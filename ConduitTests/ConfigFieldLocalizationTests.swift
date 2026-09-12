@@ -32,6 +32,7 @@ final class ConfigFieldLocalizationTests: XCTestCase {
         "memory.provider": [],
         "context.engine": ["default"],
         "display.memory_notifications": ["default", "on", "off"],
+        "display.tool_progress": ["all", "off"],
     ]
 
     func testImageInputModeOptionsAreRawProtocolValues() {
@@ -41,6 +42,18 @@ final class ConfigFieldLocalizationTests: XCTestCase {
         }
         XCTAssertEqual(options, ["auto", "native", "text"])
         XCTAssertEqual(defaultValue, "auto")
+    }
+
+    func testToolProgressTextToggleValuesAreRawProtocolValues() {
+        // display.tool_progress persists "all"/"off" as .text into the Hermes
+        // profile config; the toggle's on/off values must stay raw.
+        let field = allFields.first { $0.key == "display.tool_progress" }
+        guard case .textToggle(let onValue, let offValue, let defaultValue)? = field?.control else {
+            return XCTFail("display.tool_progress must use the .textToggle control")
+        }
+        XCTAssertEqual(onValue, "all")
+        XCTAssertEqual(offValue, "off")
+        XCTAssertTrue(defaultValue)
     }
 
     func testOptionChoicesAndDefaultsAreNeverLocalized() {
@@ -69,6 +82,16 @@ final class ConfigFieldLocalizationTests: XCTestCase {
                 }
                 XCTAssertTrue(allowed.contains(defaultValue),
                               "\(field.key) defaultValue \(defaultValue) is not a raw protocol value")
+            case .textToggle(let onValue, let offValue, let defaultValue):
+                let allowed = Self.rawValuesByField[field.key] ?? []
+                XCTAssertFalse(allowed.isEmpty,
+                               "\(field.key) must have a raw-value allowlist entry")
+                for value in [onValue, offValue] {
+                    XCTAssertTrue(allowed.contains(value),
+                                  "\(field.key) textToggle value \(value) is not a raw protocol value")
+                }
+                XCTAssertTrue(defaultValue || allowed.contains(offValue),
+                              "\(field.key) textToggle default must map to a raw protocol value")
             default:
                 break
             }
