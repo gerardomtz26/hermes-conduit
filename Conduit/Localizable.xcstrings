@@ -5629,6 +5629,16 @@
         }
       }
     },
+    "Include approval details so cards work from notifications. Disable for maximum privacy." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在通知中包含审批详情，以便直接从通知使用审批卡片。若要最大限度保护隐私，请关闭此选项。"
+          }
+        }
+      }
+    },
     "Include available agent reasoning in replies." : {
       "localizations" : {
         "zh-Hans" : {
