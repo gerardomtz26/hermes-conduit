@@ -1502,6 +1502,7 @@ private struct GatewaySettingsDetail: View {
 
 private struct AppearanceSettingsDetail: View {
     @EnvironmentObject private var appState: AppState
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     let theme: ThemePreference
     let saveTheme: (ThemePreference) -> Void
     @AppStorage("conduit.ipadPersistentSidebar") private var iPadPersistentSidebar = false
@@ -1520,6 +1521,20 @@ private struct AppearanceSettingsDetail: View {
                 })) {
                     Text("Dark").tag(ThemePreference.dark); Text("Light").tag(ThemePreference.light); Text("System").tag(ThemePreference.system)
                 }.pickerStyle(.segmented)
+            }
+            ConduitSettingsSection(title: String(localized: "App language"), symbol: "globe", tint: .conduitAccent) {
+                Text("Choose the language Conduit’s interface uses. Speech, transcription, and provider language settings are unaffected.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Picker("App language", selection: Binding(get: { appLanguage.selection }, set: {
+                    Haptics.selection()
+                    appLanguage.select($0)
+                })) {
+                    Text("System Default").tag(AppLanguage.system)
+                    Text(verbatim: "English").tag(AppLanguage.english)
+                    Text(verbatim: "简体中文").tag(AppLanguage.simplifiedChinese)
+                }
+                .pickerStyle(.segmented)
             }
             ConduitSettingsSection(title: String(localized: "App icon"), symbol: "app.badge", tint: .conduitAura) {
                 Text("Choose the icon shown on your Home Screen.")
