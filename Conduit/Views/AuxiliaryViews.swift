@@ -19,7 +19,7 @@ import UIKit
 // MARK: - Context Sheet
 
 struct ContextSheet: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject var appState: AppState
     @State private var breakdown: ContextBreakdown?
 
@@ -118,7 +118,7 @@ struct SettingsSnapshot: Identifiable {
 }
 
 private struct LegacySettingsView: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let snapshot: SettingsSnapshot
     let saveTheme: (ThemePreference) -> Void
     let persistBusyInputMode: (BusyInputMode) async -> Bool
@@ -454,7 +454,7 @@ struct ProfileSettingField: Identifiable {
 }
 
 struct SettingsView: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var appState: AppState
     let snapshot: SettingsSnapshot
     let saveTheme: (ThemePreference) -> Void
@@ -606,7 +606,7 @@ struct SettingsView: View {
 }
 
 private struct SettingsHome: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let snapshot: SettingsSnapshot
     @Binding var path: [SettingsDestination]
     @EnvironmentObject private var appState: AppState
@@ -772,7 +772,7 @@ private struct SettingsHome: View {
 }
 
 private struct ProfileSettingsDetail: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let profile: String
     let displayName: String
     let saveDefaultProfileName: (String) -> Void
@@ -822,7 +822,7 @@ private struct ProfileSettingsDetail: View {
 }
 
 struct ChatSettingsDetail: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let busyInputMode: BusyInputMode
     let persistBusyInputMode: (BusyInputMode) async -> Bool
     let chatResumeBehavior: ChatResumeBehavior
@@ -885,7 +885,7 @@ struct ChatSettingsDetail: View {
 /// is live (the visible transcript re-renders as the slider moves), there
 /// is no Save button, and `Default` keeps today's appearance.
 private struct ChatTextSizeSettings: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @AppStorage(ChatTypography.preferenceKey) private var chatTextSizeRaw = ChatTypography.defaultSize.rawValue
 
     private var selected: ChatTextSize {
@@ -937,7 +937,7 @@ private struct ChatTextSizeSettings: View {
 /// Local, device-only composer input preference. Stored in UserDefaults via
 /// @AppStorage; never part of the Hermes profile configuration.
 private struct ComposerReturnKeySettings: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @AppStorage(ComposerReturnKey.preferenceKey) private var returnKeySends = false
 
     var body: some View {
@@ -960,7 +960,7 @@ private struct ComposerReturnKeySettings: View {
 }
 
 private struct DeviceHapticsSettings: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @AppStorage(Haptics.preferenceKey) private var enabled = true
 
     var body: some View {
@@ -983,7 +983,7 @@ private struct DeviceHapticsSettings: View {
 }
 
 private struct ChatReturnBehaviorSettings: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let persistBehavior: (ChatResumeBehavior) -> Void
     let persistSurface: (ChatReturnSurface) -> Void
     @State private var behavior: ChatResumeBehavior
@@ -1056,7 +1056,7 @@ private struct ChatReturnBehaviorSettings: View {
     }
 }
 private struct ResponseBehaviorSettings: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let initialMode: BusyInputMode
     let save: (BusyInputMode) async -> Bool
     @State private var mode: BusyInputMode
@@ -1141,7 +1141,7 @@ struct ConduitMenuPicker<Label: View>: View {
 }
 
 private struct ProfileModelSettingsDetail: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let load: () async -> ProfileModelDefaults?
     let save: (String, String, String) async -> Bool
     @State private var defaults: ProfileModelDefaults?
@@ -1217,7 +1217,7 @@ private struct ProfileModelSettingsDetail: View {
 }
 
 private struct DelegationModelSettings: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let loadModels: () async -> ProfileModelDefaults?
     let loadSettings: ([String]) async -> [String: ProfileSettingValue]
     let save: (String, ProfileSettingValue) async -> Bool
@@ -1292,7 +1292,7 @@ private struct DelegationModelSettings: View {
 }
 
 private struct MemorySettingsDetail: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let load: ([String]) async -> [String: ProfileSettingValue]
     let save: (String, ProfileSettingValue) async -> Bool
     let loadOptions: () async -> ProfileConfigOptions
@@ -1468,7 +1468,7 @@ struct ProfileConfigSettingsPage: View {
 }
 
 private struct GatewaySettingsDetail: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let snapshot: SettingsSnapshot
     let reconnect: () async -> Bool
     let disconnect: () -> Void
@@ -1520,7 +1520,7 @@ private struct GatewaySettingsDetail: View {
 
 private struct AppearanceSettingsDetail: View {
     @EnvironmentObject private var appState: AppState
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let theme: ThemePreference
     let saveTheme: (ThemePreference) -> Void
     @AppStorage("conduit.ipadPersistentSidebar") private var iPadPersistentSidebar = false
@@ -1611,7 +1611,7 @@ private struct AppearanceSettingsDetail: View {
 }
 
 private struct NotificationsSettingsDetail: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @ObservedObject private var notifications = PushNotificationService.shared
     @AppStorage("conduit.relayURL") private var customRelayURL: String = ""
 
@@ -1872,7 +1872,7 @@ private struct NotificationSetupCommand: View {
 }
 
 private struct AboutSettingsDetail: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let profile: String
     @EnvironmentObject private var appState: AppState
 

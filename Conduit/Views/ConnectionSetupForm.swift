@@ -2,7 +2,7 @@ import SwiftUI
 
 /// Form rendering only: navigation and final validation stay in the flow.
 struct ConnectionSetupForm: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @Binding var flow: ConnectionSetupFlow
     let onStartTest: () -> Void
     let onComplete: (ConnectionSetupResult) -> Void

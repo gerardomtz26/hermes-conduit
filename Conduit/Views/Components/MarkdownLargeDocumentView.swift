@@ -845,7 +845,7 @@ struct LargeMarkdownColumns: View {
 /// lines), with highlighting computed off the MainActor and swapped in per
 /// slice. Copy always uses the complete source.
 struct LargeCodeBlockView: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let source: String
     let language: String
     let usesAccentSurface: Bool

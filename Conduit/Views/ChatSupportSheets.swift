@@ -10,7 +10,7 @@
 import SwiftUI
 
 struct GatewayDiagnosticsSheet: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var appState: AppState
 
     var body: some View {
@@ -114,7 +114,7 @@ struct GatewayDiagnosticsSheet: View {
 }
 
 struct WorkspaceBrowserSheet: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var appState: AppState
     @State private var previewOpen = false
 
@@ -193,7 +193,7 @@ struct WorkspaceBrowserSheet: View {
 }
 
 private struct WorkspaceFilePreviewSheet: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var appState: AppState
     @State private var downloadURL: URL?
 
@@ -258,7 +258,7 @@ private struct WorkspaceFilePreviewSheet: View {
 }
 
 struct DelegateAgentsSheet: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var appState: AppState
 
     var body: some View {
@@ -295,7 +295,7 @@ struct DelegateAgentsSheet: View {
 }
 
 private struct DelegateAgentCard: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let agent: DelegateAgentActivity
     @State private var expanded = true
 

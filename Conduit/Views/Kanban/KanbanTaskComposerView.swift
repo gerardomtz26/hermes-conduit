@@ -16,7 +16,7 @@ import SwiftUI
 /// - Goal Mode maps to `goal_mode` (+ optional `goal_max_turns`); it is NOT
 ///   Conduit's chat YOLO setting.
 struct KanbanTaskComposerView: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var store: KanbanStore
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
@@ -431,7 +431,7 @@ struct KanbanTaskComposerView: View {
 /// curated `/model-options` roster, with a free-text fallback when the server
 /// inventory is unavailable. Entirely detached from any live session model.
 struct KanbanModelOverrideSheet: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var store: KanbanStore
     @Environment(\.dismiss) private var dismiss
     @Binding var value: TaskModelOverride
@@ -625,7 +625,7 @@ struct KanbanModelOverrideSheet: View {
 /// skill list and allows manual entry for anything unlisted (upstream accepts
 /// arbitrary comma-separated names).
 struct KanbanSkillsPickerSheet: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
     @Binding var selected: [String]
@@ -749,7 +749,7 @@ struct KanbanSkillsPickerSheet: View {
 /// Single-parent selection over the CURRENT BOARD snapshot, mirroring
 /// Desktop's New Task dialog (one parent, even though the API accepts lists).
 struct KanbanParentPickerSheet: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var store: KanbanStore
     @Environment(\.dismiss) private var dismiss
     @Binding var selectedParentID: String?

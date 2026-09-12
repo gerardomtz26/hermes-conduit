@@ -332,7 +332,7 @@ private struct MainViewWindowWidthKey: PreferenceKey {
 // MARK: - Connection Status
 
 struct ConnectionStatusIndicator: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject var appState: AppState
 
     private var color: Color {

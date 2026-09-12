@@ -144,7 +144,7 @@ struct SidebarView: View {
 // MARK: - Session List
 
 struct SessionList: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject var appState: AppState
     @State private var searchText = ""
     @State private var showFilterOrder = false
@@ -569,7 +569,7 @@ private struct SessionFilterOrderSheet: View {
 }
 
 private struct ArchivedSessionsSheet: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
     @State private var searchText = ""
@@ -1027,7 +1027,7 @@ private struct ProjectFolderPickerSheet: View {
 // MARK: - Cron List
 
 struct CronList: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject var appState: AppState
     @State private var searchText = ""
     @State private var selectedJob: CronJob?
@@ -1109,7 +1109,7 @@ struct CronList: View {
 }
 
 private struct CronJobRow: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let job: CronJob
     var body: some View {
         HStack(spacing: 11) {
@@ -1131,7 +1131,7 @@ private struct CronJobRow: View {
 }
 
 private struct CronJobDetailSheet: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
     let job: CronJob

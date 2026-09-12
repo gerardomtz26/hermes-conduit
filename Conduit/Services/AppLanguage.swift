@@ -56,7 +56,7 @@ enum AppLanguage: String, CaseIterable, Identifiable {
 
 /// Observable holder for the App Language preference. Views that build
 /// user-facing copy through `AppLocalization.string` observe the shared
-/// store (`@ObservedObject private var appLanguage = AppLanguageStore.shared`),
+/// store (`@ObservedObject var appLanguage = AppLanguageStore.shared`),
 /// so a selection change re-renders exactly those views; the root sets
 /// `.environment(\.locale, resolvedLocale)` so literal-key SwiftUI text
 /// re-renders reactively as well. No view identity is ever replaced.

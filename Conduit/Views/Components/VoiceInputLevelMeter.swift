@@ -23,7 +23,7 @@ enum VoiceLevelMeterMath {
 /// barely moving. Presentation only — it must be driven by the raw capture
 /// level, never by a VAD decision.
 struct VoiceInputLevelMeter: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let level: Float
     let isActive: Bool
 

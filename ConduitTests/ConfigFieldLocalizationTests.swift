@@ -119,15 +119,17 @@ final class ConfigFieldLocalizationTests: XCTestCase {
     func testProtocolValuesAreIdenticalUnderEveryAppLanguage() {
         let standardDefaults = UserDefaults.standard
         defer { standardDefaults.removeObject(forKey: AppLanguageStore.defaultsKey) }
-        let baseline = allFields.map { field -> (key: String, control: ProfileSettingField.Control) in
-            (field.key, field.control)
+        let baseline: [(key: String, control: ProfileSettingControl)] = allFields.map {
+            (key: $0.key, control: $0.control)
         }
         XCTAssertFalse(baseline.isEmpty)
         for language in AppLanguage.allCases {
             standardDefaults.set(language.rawValue, forKey: AppLanguageStore.defaultsKey)
             XCTAssertEqual(AppLanguage.current, language,
                            "each iteration must activate a different language")
-            let current = allFields.map { ($0.key, $0.control) }
+            let current: [(key: String, control: ProfileSettingControl)] = allFields.map {
+                (key: $0.key, control: $0.control)
+            }
             for (before, after) in zip(baseline, current) {
                 XCTAssertEqual(before.key, after.key)
                 switch (before.control, after.control) {
@@ -139,12 +141,14 @@ final class ConfigFieldLocalizationTests: XCTestCase {
                     XCTAssertEqual(aOff, bOff, "\(before.key) offValue must not localize under \(language)")
                     XCTAssertEqual(aDefault, bDefault)
                 case (.labeledOptions(let a, let aDefault), .labeledOptions(let b, let bDefault)):
-                    XCTAssertEqual(a.map(\.value), b.map(\.value),
+                    XCTAssertEqual(a.map { $0.value }, b.map { $0.value },
                                    "\(before.key) option values must not localize under \(language)")
                     XCTAssertEqual(aDefault, bDefault)
-                case (.text(let a), .text(let b)),
-                     (.number(let a), .number(let b)),
-                     (.toggle(let a), .toggle(let b)):
+                case (.text(let a), .text(let b)):
+                    XCTAssertEqual(a, b)
+                case (.number(let a), .number(let b)):
+                    XCTAssertEqual(a, b)
+                case (.toggle(let a), .toggle(let b)):
                     XCTAssertEqual(a, b)
                 default:
                     XCTFail("\(before.key) control changed shape under \(language)")

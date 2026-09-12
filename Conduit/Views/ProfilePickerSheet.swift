@@ -6,7 +6,7 @@
 import SwiftUI
 
 struct ProfilePickerSheet: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
     @State private var isReordering = false
@@ -72,7 +72,7 @@ struct ProfilePickerSheet: View {
 }
 
 private struct ProfilePickerRow: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var appState: AppState
     let profile: String
     let isReordering: Bool

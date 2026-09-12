@@ -11,7 +11,7 @@ import SwiftUI
 import UIKit
 
 struct AskHermesPromptView: View {
-    @ObservedObject private var appLanguage = AppLanguageStore.shared
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let title: String
     let prompt: String
 
