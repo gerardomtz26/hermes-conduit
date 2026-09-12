@@ -112,8 +112,8 @@ enum AppLocalization {
     /// system (the plain `String(localized:)` path) or when the pinned
     /// language's bundle is absent from the built app.
     nonisolated private static func bundle(for language: AppLanguage) -> Bundle? {
-        guard let code = language.languageCode else { return nil }
-        return languageBundles[code]
+        guard language.languageCode != nil else { return nil }
+        return languageBundles[language]
     }
 
     /// Bundles are immutable once loaded; one cache, built lazily and

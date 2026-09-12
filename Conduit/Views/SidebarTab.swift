@@ -12,9 +12,9 @@ enum SidebarTab: String, CaseIterable, Identifiable {
     /// 本地化显示名; rawValue 仅用于持久化
     var displayName: String {
         switch self {
-        case .sessions: return String(localized: "Sessions")
-        case .cron: return String(localized: "Cron")
-        case .kanban: return String(localized: "Kanban")
+        case .sessions: return AppLocalization.string("Sessions")
+        case .cron: return AppLocalization.string("Cron")
+        case .kanban: return AppLocalization.string("Kanban")
         }
     }
 

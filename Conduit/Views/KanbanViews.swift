@@ -120,7 +120,7 @@ enum KanbanSelectionChromePolicy {
 
     /// ONE logical single-line label — never a vertical letter column.
     static func selectedCountLabel(count: Int) -> String {
-        count == 1 ? String(localized: "1 task selected") : String(localized: "\(count) tasks selected")
+        count == 1 ? AppLocalization.string("1 task selected") : AppLocalization.string("\(count) tasks selected")
     }
 
     /// One bulk-action control in the bottom bar. `title == nil` renders it
@@ -151,11 +151,12 @@ enum KanbanSelectionChromePolicy {
     }
 
     /// Roomy variant: icon + title per action.
-    static let fullBulkActions: [BulkActionDescriptor] = [
-        BulkActionDescriptor(kind: .move, title: String(localized: "Move"), systemImage: "arrow.left.arrow.right"),
-        BulkActionDescriptor(kind: .assign, title: String(localized: "Assign"), systemImage: "person.fill.badge.plus"),
-        BulkActionDescriptor(kind: .more, title: String(localized: "More"), systemImage: "ellipsis.circle"),
+    static var fullBulkActions: [BulkActionDescriptor] { [
+        BulkActionDescriptor(kind: .move, title: AppLocalization.string("Move"), systemImage: "arrow.left.arrow.right"),
+        BulkActionDescriptor(kind: .assign, title: AppLocalization.string("Assign"), systemImage: "person.fill.badge.plus"),
+        BulkActionDescriptor(kind: .more, title: AppLocalization.string("More"), systemImage: "ellipsis.circle"),
     ]
+    }
 
     /// Compact variant (narrow widths): the SAME actions, icon-only.
     static let compactBulkActions: [BulkActionDescriptor] = [
@@ -168,14 +169,15 @@ enum KanbanSelectionChromePolicy {
     /// not visual titles, carry the meaning when icons stand alone. The noun
     /// is singular for exactly one selected task, plural otherwise.
     static func bulkAccessibilityLabel(_ kind: BulkActionDescriptor.Kind, selectedCount: Int) -> String {
-        let noun = selectedCount == 1 ? "task" : "tasks"
+        // The catalog's plural variations own both grammars; the code never
+        // assembles an English plural.
         switch kind {
         case .move:
-            return String(localized: "Move \(String(selectedCount)) selected \(noun)")
+            return AppLocalization.string("Move \(selectedCount) selected task")
         case .assign:
-            return String(localized: "Assign \(String(selectedCount)) selected \(noun)")
+            return AppLocalization.string("Assign \(selectedCount) selected task")
         case .more:
-            return String(localized: "More actions for \(String(selectedCount)) selected \(noun)")
+            return AppLocalization.string("More actions for \(selectedCount) selected task")
         }
     }
 }
@@ -831,7 +833,7 @@ struct KanbanView: View {
             ) else { return }
             var token = 0
             withAnimation(.easeOut(duration: 0.15)) {
-                token = nudgeNoticeState.show(String(localized: "Dispatcher nudged"))
+                token = nudgeNoticeState.show(AppLocalization.string("Dispatcher nudged"))
             }
             do {
                 try await Task.sleep(nanoseconds: 2_000_000_000)
@@ -981,7 +983,7 @@ struct KanbanView: View {
     private func selectionA11yLabel(task: KanbanTask, isSelected: Bool) -> Text {
         let lane = KanbanStatusPresentation.forStatus(task.status).displayName
         let body = task.latestSummary ?? task.title
-        return Text((isSelected ? String(localized: "Task \(task.id), selected") : String(localized: "Task \(task.id), not selected")) + ", " + lane + ": " + body)
+        return Text((isSelected ? AppLocalization.string("Task \(task.id), selected") : AppLocalization.string("Task \(task.id), not selected")) + ", " + lane + ": " + body)
     }
 
     private func cardCore(task: KanbanTask, isSelected: Bool, actionsInert: Bool) -> some View {
@@ -1115,7 +1117,7 @@ struct KanbanView: View {
 
     private var selectedCountLabel: String {
         let n = selectedTaskIDs.count
-        return n == 1 ? String(localized: "1 task selected") : String(localized: "\(n) tasks selected")
+        return n == 1 ? AppLocalization.string("1 task selected") : AppLocalization.string("\(n) tasks selected")
     }
 
     private var canRunBulk: Bool {
@@ -1124,20 +1126,20 @@ struct KanbanView: View {
 
     private var bulkArchiveTitle: String {
         let n = pendingBulkOperation?.ids.count ?? selectedTaskIDs.count
-        return n == 1 ? String(localized: "Archive 1 Task?") : String(localized: "Archive \(n) Tasks?")
+        return n == 1 ? AppLocalization.string("Archive 1 Task?") : AppLocalization.string("Archive \(n) Tasks?")
     }
 
     private func bulkArchiveActionTitle(count: Int) -> String {
-        count == 1 ? "Archive 1" : String(localized: "Archive \(count)")
+        AppLocalization.string("Archive \(count)")
     }
 
     private var bulkDeleteTitle: String {
         let n = pendingBulkDelete?.taskIDs.count ?? selectedTaskIDs.count
-        return n == 1 ? String(localized: "Delete 1 Task?") : String(localized: "Delete \(n) Tasks?")
+        return n == 1 ? AppLocalization.string("Delete 1 Task?") : AppLocalization.string("Delete \(n) Tasks?")
     }
 
     private func bulkDeleteActionTitle(count: Int) -> String {
-        count == 1 ? "Delete 1" : String(localized: "Delete \(count)")
+        AppLocalization.string("Delete \(count)")
     }
 
     // MARK: - V3C bulk sheets
@@ -1174,7 +1176,7 @@ struct KanbanView: View {
 
     private var moveSheetTitle: String {
         let n = bulkStagedSelection?.ids.count ?? 0
-        return n == 1 ? String(localized: "Move 1 Task") : String(localized: "Move \(n) Tasks")
+        return n == 1 ? AppLocalization.string("Move 1 Task") : AppLocalization.string("Move \(n) Tasks")
     }
 
     private var bulkAssignSheet: some View {
@@ -1218,12 +1220,12 @@ struct KanbanView: View {
 
     private var assignSheetTitle: String {
         let n = bulkStagedSelection?.ids.count ?? 0
-        return n == 1 ? String(localized: "Assign 1 Task") : String(localized: "Assign \(n) Tasks")
+        return n == 1 ? AppLocalization.string("Assign 1 Task") : AppLocalization.string("Assign \(n) Tasks")
     }
 
     private var prioritySheetTitle: String {
         let n = bulkStagedSelection?.ids.count ?? 0
-        return n == 1 ? String(localized: "Set Priority") : String(localized: "Set Priority (\(n) tasks)")
+        return n == 1 ? AppLocalization.string("Set Priority") : AppLocalization.string("Set Priority (\(n) tasks)")
     }
 
     private var bulkPrioritySheet: some View {
@@ -1557,7 +1559,7 @@ struct KanbanView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("Kanban")
                     .font(.title3.weight(.bold))
-                Text(store.selectedBoardMetadata?.name ?? store.selectedBoardMetadata?.slug ?? "Board")
+                Text(store.selectedBoardMetadata?.name ?? store.selectedBoardMetadata?.slug ?? AppLocalization.string("Board"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
@@ -1569,7 +1571,7 @@ struct KanbanView: View {
                 Button {
                     Task { await store.selectBoard(slug: "", includeArchived: includeArchived) }
                 } label: {
-                    Label(String(localized: "Server current (\(store.currentServerBoardSlug))"), systemImage: "server.rack")
+                    Label(AppLocalization.string("Server current (\(store.currentServerBoardSlug))"), systemImage: "server.rack")
                 }
                 ForEach(store.boards) { metadata in
                     Button {
@@ -1723,7 +1725,7 @@ struct KanbanView: View {
                     .frame(width: 32, height: 32)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(filtersActive ? String(localized: "Filters active — open filters") : String(localized: "Open filters"))
+            .accessibilityLabel(filtersActive ? AppLocalization.string("Filters active — open filters") : AppLocalization.string("Open filters"))
             .accessibilityHint("Shows assignee, tenant, archived, and running grouping options")
             .disabled(!store.isSelectedSnapshotLoaded)
         }
@@ -1876,12 +1878,12 @@ private struct KanbanCardView: View {
                     }
                     Section {
                         Button {
-                            copy(text: task.id, notice: String(localized: "Task ID copied"))
+                            copy(text: task.id, notice: AppLocalization.string("Task ID copied"))
                         } label: {
                             Label("Copy Task ID", systemImage: "doc.on.doc")
                         }
                         Button {
-                            copy(text: task.title, notice: String(localized: "Title copied"))
+                            copy(text: task.title, notice: AppLocalization.string("Title copied"))
                         } label: {
                             Label("Copy Task Title", systemImage: "doc.on.doc.fill")
                         }
@@ -1935,9 +1937,9 @@ private struct KanbanCardView: View {
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
         .accessibilityHint("Opens task details")
-        .accessibilityAction(named: String(localized: "Open task"), onOpen)
-        .accessibilityAction(named: String(localized: "Copy task ID")) { copy(text: task.id, notice: String(localized: "Task ID copied")) }
-        .accessibilityAction(named: String(localized: "Copy task title")) { copy(text: task.title, notice: String(localized: "Title copied")) }
+        .accessibilityAction(named: AppLocalization.string("Open task"), onOpen)
+        .accessibilityAction(named: AppLocalization.string("Copy task ID")) { copy(text: task.id, notice: AppLocalization.string("Task ID copied")) }
+        .accessibilityAction(named: AppLocalization.string("Copy task title")) { copy(text: task.title, notice: AppLocalization.string("Title copied")) }
         .contextMenu {
             Button { onOpen() } label: { Label("Open", systemImage: "arrow.up.right.square") }
             ForEach(statusOptions) { status in
@@ -1946,10 +1948,10 @@ private struct KanbanCardView: View {
                 }
                 .disabled(isMenusDisabled)
             }
-            Button { copy(text: task.id, notice: String(localized: "Task ID copied")) } label: {
+            Button { copy(text: task.id, notice: AppLocalization.string("Task ID copied")) } label: {
                 Label("Copy Task ID", systemImage: "doc.on.doc")
             }
-            Button { copy(text: task.title, notice: String(localized: "Title copied")) } label: {
+            Button { copy(text: task.title, notice: AppLocalization.string("Title copied")) } label: {
                 Label("Copy Task Title", systemImage: "doc.on.doc.fill")
             }
             Divider()

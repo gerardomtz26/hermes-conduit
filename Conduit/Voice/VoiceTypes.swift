@@ -24,12 +24,15 @@ struct VoiceCapabilitySnapshot: Equatable {
     var supportsSpeech: Bool
     var unavailableReason: String?
 
-    static let unavailable = VoiceCapabilitySnapshot(
-        isGatewayConnected: false,
-        supportsTranscription: false,
-        supportsSpeech: false,
-        unavailableReason: "This Hermes gateway does not expose voice endpoints."
-    )
+    /// Computed so the reason re-resolves under the in-app App Language.
+    static var unavailable: VoiceCapabilitySnapshot {
+        VoiceCapabilitySnapshot(
+            isGatewayConnected: false,
+            supportsTranscription: false,
+            supportsSpeech: false,
+            unavailableReason: AppLocalization.string("This Hermes gateway does not expose voice endpoints.")
+        )
+    }
 }
 
 struct VoiceProviderDescriptor: Codable, Equatable, Identifiable {
@@ -199,10 +202,10 @@ enum AppleSpeechRecognitionAvailability: Equatable {
 
     var title: String {
         switch self {
-        case .ready: return "Ready"
-        case .permissionRequired: return String(localized: "Permission required")
-        case .permissionDenied: return String(localized: "Permission denied")
-        case .unsupported: return "Unavailable"
+        case .ready: return AppLocalization.string("Ready")
+        case .permissionRequired: return AppLocalization.string("Permission required")
+        case .permissionDenied: return AppLocalization.string("Permission denied")
+        case .unsupported: return AppLocalization.string("Unavailable")
         }
     }
 
@@ -288,8 +291,8 @@ enum VoiceAudioError: LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .microphonePermissionDenied: return "Microphone access is required for voice conversations."
-        case .noAudioCaptured: return "No speech was captured."
+        case .microphonePermissionDenied: return AppLocalization.string("Microphone access is required for voice conversations.")
+        case .noAudioCaptured: return AppLocalization.string("No speech was captured.")
         case .unavailable(let detail): return detail
         }
     }

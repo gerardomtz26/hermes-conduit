@@ -44,8 +44,8 @@ enum ConnectionSetupTestStage: Equatable, CaseIterable, Identifiable {
     /// never depends on icon or color alone.
     var objectiveLabel: String {
         switch self {
-        case .server: return String(localized: "Dashboard reachable")
-        case .dashboard: return String(localized: "Hermes dashboard found")
+        case .server: return AppLocalization.string("Dashboard reachable")
+        case .dashboard: return AppLocalization.string("Hermes dashboard found")
         case .authentication: return "Authentication"
         }
     }
@@ -53,8 +53,8 @@ enum ConnectionSetupTestStage: Equatable, CaseIterable, Identifiable {
     /// The in-progress phrase for the row currently being checked.
     var runningLabel: String {
         switch self {
-        case .server: return String(localized: "Checking server…")
-        case .dashboard: return String(localized: "Checking dashboard…")
+        case .server: return AppLocalization.string("Checking server…")
+        case .dashboard: return AppLocalization.string("Checking dashboard…")
         case .authentication: return "Authenticating…"
         }
     }
@@ -62,9 +62,9 @@ enum ConnectionSetupTestStage: Equatable, CaseIterable, Identifiable {
     /// The confirmation phrase for a passed stage.
     var successLabel: String {
         switch self {
-        case .server: return String(localized: "Dashboard reachable")
-        case .dashboard: return String(localized: "Hermes dashboard found")
-        case .authentication: return String(localized: "Login successful")
+        case .server: return AppLocalization.string("Dashboard reachable")
+        case .dashboard: return AppLocalization.string("Hermes dashboard found")
+        case .authentication: return AppLocalization.string("Login successful")
         }
     }
 
@@ -105,8 +105,8 @@ enum ConnectionSetupStageState: Equatable {
         case .pending: return "waiting"
         case .running: return "checking"
         case .succeeded: return "passed"
-        case .requiresInteractiveSignIn: return String(localized: "browser sign-in required")
-        case .requiresCredentials: return String(localized: "credentials required")
+        case .requiresInteractiveSignIn: return AppLocalization.string("browser sign-in required")
+        case .requiresCredentials: return AppLocalization.string("credentials required")
         case .failed: return "failed"
         }
     }
@@ -253,8 +253,8 @@ struct ConnectionSetupTestState: Equatable {
         switch self[stage] {
         case .running: return stage.runningLabel
         case .succeeded: return stage.successLabel
-        case .requiresInteractiveSignIn: return String(localized: "Browser sign-in required")
-        case .requiresCredentials: return String(localized: "Credentials required")
+        case .requiresInteractiveSignIn: return AppLocalization.string("Browser sign-in required")
+        case .requiresCredentials: return AppLocalization.string("Credentials required")
         case .pending, .failed: return stage.objectiveLabel
         }
     }
@@ -282,7 +282,7 @@ struct ConnectionSetupTestRecoveryPlan: Equatable {
         case .server, .dashboard:
             return ConnectionSetupTestRecoveryPlan(
                 remediationStep: .connectionDetails,
-                remediationLabel: String(localized: "Edit Connection Details"),
+                remediationLabel: AppLocalization.string("Edit Connection Details"),
                 offersRetry: failure != .rateLimited
             )
         case .authentication:
@@ -290,7 +290,7 @@ struct ConnectionSetupTestRecoveryPlan: Equatable {
             // blind retries feed the rate limiter. Edit comes first.
             return ConnectionSetupTestRecoveryPlan(
                 remediationStep: .loginCredentials,
-                remediationLabel: String(localized: "Edit Credentials"),
+                remediationLabel: AppLocalization.string("Edit Credentials"),
                 offersRetry: failure != .rateLimited
             )
         }

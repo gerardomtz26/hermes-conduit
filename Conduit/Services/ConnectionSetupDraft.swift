@@ -30,12 +30,12 @@ struct ConnectionSetupDraft: Equatable, CustomStringConvertible, CustomDebugStri
     }
 
     var methodTitle: String {
-        if usesExistingAddress { return String(localized: "Current dashboard address") }
+        if usesExistingAddress { return AppLocalization.string("Current dashboard address") }
         switch accessMethod {
-        case .lan: return String(localized: "Same network")
+        case .lan: return AppLocalization.string("Same network")
         case .tailscale: return "Tailscale"
-        case .reverseProxy: return String(localized: "Existing HTTPS domain")
-        case nil: return String(localized: "Choose a connection method")
+        case .reverseProxy: return AppLocalization.string("Existing HTTPS domain")
+        case nil: return AppLocalization.string("Choose a connection method")
         }
     }
 

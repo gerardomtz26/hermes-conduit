@@ -361,7 +361,7 @@ struct ConnectionStatusIndicator: View {
         }
         .conduitGlassControl(cornerRadius: 20, tint: color.opacity(0.10))
         .animation(ConduitMotion.response, value: appState.isConnected)
-        .accessibilityLabel(appState.isConnected ? String(localized: "Gateway connected") : String(localized: "Gateway disconnected"))
+        .accessibilityLabel(appState.isConnected ? AppLocalization.string("Gateway connected") : AppLocalization.string("Gateway disconnected"))
     }
 }
 

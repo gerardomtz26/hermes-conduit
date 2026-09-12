@@ -43,7 +43,7 @@ struct CapabilitiesView: View {
         case .emptySuccess:
             VStack(spacing: 0) {
                 ContentUnavailableView(
-                    "No capabilities found",
+                    AppLocalization.string("No capabilities found"),
                     systemImage: "tray",
                     description: Text("This profile has no enabled skills or toolsets.")
                 )
@@ -55,7 +55,7 @@ struct CapabilitiesView: View {
                 skillsSection
                 toolsetsSection
             }
-            .searchable(text: $searchText, prompt: String(localized: "Search skills"))
+            .searchable(text: $searchText, prompt: AppLocalization.string("Search skills"))
             .scrollContentBackground(.hidden)
             .listStyle(.plain)
             .refreshable { await loadCapabilities() }
@@ -173,7 +173,7 @@ struct CapabilitiesView: View {
     static func localError(for outcome: AppState.CapabilityLoadOutcome, hasData: Bool) -> String? {
         switch outcome {
         case .success:
-            return hasData ? nil : "No capabilities found."
+            return hasData ? nil : AppLocalization.string("No capabilities found.")
         case .failed(_, let message):
             return message
         case .unavailable:

@@ -243,15 +243,15 @@ final class VoiceConversationController: ObservableObject {
 
     func requestOnDeviceTranscriptionPermissions() async -> VoiceProviderTestResult {
         guard isForegroundActive else {
-            return .failure("Voice permissions can only be requested while Conduit is in the foreground.")
+            return .failure(AppLocalization.string("Voice permissions can only be requested while Conduit is in the foreground."))
         }
         guard await capture.requestPermission() else {
             return .failure(VoiceAudioError.microphonePermissionDenied.localizedDescription)
         }
         guard await deviceTranscriber.requestPermission() else {
-            return .failure("Speech Recognition permission is required for on-device transcription.")
+            return .failure(AppLocalization.string("Speech Recognition permission is required for on-device transcription."))
         }
-        return .success("On-device speech recognition is ready.")
+        return .success(AppLocalization.string("On-device speech recognition is ready."))
     }
 
     func startListening(includePreRoll: Bool = false) async {
@@ -260,7 +260,7 @@ final class VoiceConversationController: ObservableObject {
         isVoiceSessionActive = true
         // A fresh listen re-arms the runtime: suspended state ends here.
         rearmRuntimeAfterCaptureRestart()
-        guard let gateway else { state = .failed("Voice is unavailable for this gateway."); return }
+        guard let gateway else { state = .failed(AppLocalization.string("Voice is unavailable for this gateway.")); return }
         _ = gateway // keeps the availability check explicit at the state edge.
         guard await capture.requestPermission() else {
             guard isCurrent(generation) else { return }
@@ -473,10 +473,10 @@ final class VoiceConversationController: ObservableObject {
     func runTranscriptionTest(duration: TimeInterval = 4) async -> VoiceProviderTestResult {
         stop()
         guard isForegroundActive else {
-            return .failure("Voice tests only run while Conduit is in the foreground.")
+            return .failure(AppLocalization.string("Voice tests only run while Conduit is in the foreground."))
         }
         guard let gateway else {
-            return .failure("Conduit could not connect this test to the selected profile.")
+            return .failure(AppLocalization.string("Conduit could not connect this test to the selected profile."))
         }
         isVoiceSessionActive = true
         isProviderTestRunning = true
@@ -494,14 +494,14 @@ final class VoiceConversationController: ObservableObject {
             return .failure(VoiceAudioError.microphonePermissionDenied.localizedDescription)
         }
         guard isCurrent(generation) else {
-            return .failure("The speech-to-text test was cancelled.")
+            return .failure(AppLocalization.string("The speech-to-text test was cancelled."))
         }
         do {
             try capture.startListening(includePreRoll: false)
             state = .listening
             try await Task.sleep(for: .seconds(duration))
             guard isCurrent(generation) else {
-                return .failure("The speech-to-text test was cancelled.")
+                return .failure(AppLocalization.string("The speech-to-text test was cancelled."))
             }
             let audio = try capture.finishUtterance()
             state = .transcribing
@@ -510,13 +510,13 @@ final class VoiceConversationController: ObservableObject {
             resetMicrophoneMeter()
             let transcript = try await transcribe(audio, gateway: gateway)
             guard isCurrent(generation) else {
-                return .failure("The speech-to-text test was cancelled.")
+                return .failure(AppLocalization.string("The speech-to-text test was cancelled."))
             }
             guard !transcript.isEmpty else {
-                return .failure("The selected speech-to-text provider returned an empty transcript.")
+                return .failure(AppLocalization.string("The selected speech-to-text provider returned an empty transcript."))
             }
             latestTranscript = transcript
-            return .success("Transcribed: \(transcript)")
+            return .success(AppLocalization.string("Transcribed: \(transcript)"))
         } catch {
             if isCurrent(generation) { state = .failed(error.localizedDescription) }
             return .failure(error.localizedDescription)
@@ -528,10 +528,10 @@ final class VoiceConversationController: ObservableObject {
     func runSpeechTest(text: String) async -> VoiceProviderTestResult {
         stop()
         guard isForegroundActive else {
-            return .failure("Voice tests only run while Conduit is in the foreground.")
+            return .failure(AppLocalization.string("Voice tests only run while Conduit is in the foreground."))
         }
         guard let gateway else {
-            return .failure("Conduit could not connect this test to the selected profile.")
+            return .failure(AppLocalization.string("Conduit could not connect this test to the selected profile."))
         }
         isVoiceSessionActive = true
         isProviderTestRunning = true
@@ -583,21 +583,21 @@ final class VoiceConversationController: ObservableObject {
             speechStream = stream
             try await stream.append(text)
             guard isCurrent(generation) else {
-                return .failure("The speech playback test was cancelled.")
+                return .failure(AppLocalization.string("The speech playback test was cancelled."))
             }
             _ = try await stream.finish()
             guard isCurrent(generation) else {
-                return .failure("The speech playback test was cancelled.")
+                return .failure(AppLocalization.string("The speech playback test was cancelled."))
             }
             try playback.finish()
             await playback.drain()
             guard isCurrent(generation) else {
-                return .failure("The speech playback test was cancelled.")
+                return .failure(AppLocalization.string("The speech playback test was cancelled."))
             }
             guard deliveredAudio else {
-                return .failure("Hermes connected, but the selected speech provider returned no audio.")
+                return .failure(AppLocalization.string("Hermes connected, but the selected speech provider returned no audio."))
             }
-            return .success("Speech playback completed.")
+            return .success(AppLocalization.string("Speech playback completed."))
         } catch {
             if isCurrent(generation) { state = .failed(error.localizedDescription) }
             return .failure(error.localizedDescription)
@@ -858,7 +858,7 @@ final class VoiceConversationController: ObservableObject {
                     // session and the sticky orphan — the user's next
                     // Listen + utterance retries the cancellation.
                     releaseRuntimeResources()
-                    state = .failed("Hermes could not cancel the previous response.")
+                    state = .failed(AppLocalization.string("Hermes could not cancel the previous response."))
                     return
                 }
                 suspendedInFlightTurnOrphaned = false
@@ -871,7 +871,7 @@ final class VoiceConversationController: ObservableObject {
             guard await submit(transcript) else {
                 guard isCurrent(generation) else { return }
                 isAwaitingVoiceAssistant = false
-                state = .failed("Hermes could not submit the transcription.")
+                state = .failed(AppLocalization.string("Hermes could not submit the transcription."))
                 return
             }
             guard isCurrent(generation) else { return }
@@ -978,7 +978,7 @@ final class VoiceConversationController: ObservableObject {
         // Terminal path: release session-ownership bookkeeping so audio-
         // adjacent side features (response haptics) do not stand down
         // forever after an interruption.
-        state = .failed("Audio was interrupted.")
+        state = .failed(AppLocalization.string("Audio was interrupted."))
     }
 
     /// Clears the lifecycle-suspension gate after the capture runtime has

@@ -1176,7 +1176,7 @@ private struct UserImageAttachmentPreview: View {
                 loadingPlaceholder
             } else {
                 Label(
-                    (gatewayLoadFailed || localPreviewFailed) ? String(localized: "Image unavailable") : String(localized: "Image attached"),
+                    (gatewayLoadFailed || localPreviewFailed) ? AppLocalization.string("Image unavailable") : AppLocalization.string("Image attached"),
                     systemImage: (gatewayLoadFailed || localPreviewFailed) ? "photo.badge.exclamationmark" : "photo"
                 )
                 .font(.caption.weight(.medium))
@@ -1364,7 +1364,7 @@ struct AssistantMessageActions: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(copied ? Color.conduitAccent : Color.secondary)
-        .accessibilityLabel(copied ? String(localized: "Response copied") : String(localized: "Copy response"))
+        .accessibilityLabel(copied ? AppLocalization.string("Response copied") : AppLocalization.string("Copy response"))
 
         Button {
             Haptics.medium()
@@ -1434,7 +1434,7 @@ struct ReadAloudButton: View {
         .foregroundStyle(isActive ? Color.conduitAccent : Color.secondary)
         .disabled(unavailable && !isActive)
         .opacity(unavailable && !isActive ? 0.45 : 1)
-        .accessibilityLabel(isActive ? String(localized: "Stop reading response") : String(localized: "Read response aloud"))
+        .accessibilityLabel(isActive ? AppLocalization.string("Stop reading response") : AppLocalization.string("Read response aloud"))
     }
 }
 
@@ -1497,7 +1497,7 @@ struct SystemBubble: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
-                    Text(isRuntimeNotice ? String(localized: "System") : String(localized: "Command"))
+                    Text(isRuntimeNotice ? AppLocalization.string("System") : AppLocalization.string("Command"))
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.conduitAccent)
                         .textCase(.uppercase)
@@ -1574,7 +1574,7 @@ private struct ReviewSummaryCard: View {
             }
             .buttonStyle(.plain)
             .disabled(details.isEmpty)
-            .accessibilityLabel(details.isEmpty ? activity.summary : (expanded ? String(localized: "Collapse review details") : String(localized: "Expand review details")))
+            .accessibilityLabel(details.isEmpty ? activity.summary : (expanded ? AppLocalization.string("Collapse review details") : AppLocalization.string("Expand review details")))
 
             if expanded, !details.isEmpty {
                 VStack(alignment: .leading, spacing: 12) {
@@ -1923,7 +1923,7 @@ struct ToolCard: View {
     static func truncateForDisplay(_ text: String, maxLines: Int) -> String {
         let lines = text.components(separatedBy: "\n")
         guard lines.count > maxLines else { return text }
-        return lines.prefix(maxLines).joined(separator: "\n") + String(localized: "\n… (\(lines.count - maxLines) more lines)")
+        return lines.prefix(maxLines).joined(separator: "\n") + AppLocalization.string("\n… (\(lines.count - maxLines) more lines)")
     }
 }
 
@@ -1951,7 +1951,7 @@ enum ClarifyCardLayout {
         case .singleQuestion:
             return activity.questions.first?.question ?? ""
         case .batch:
-            return String(localized: "Hermes asked \(activity.questions.count) questions before it can continue")
+            return AppLocalization.string("Hermes asked \(activity.questions.count) questions before it can continue")
         }
     }
 
@@ -2063,11 +2063,11 @@ struct ClarifyCard: View {
 
     private func statusTitle(for status: ClarifyActivity.Status) -> String {
         switch status {
-        case .pending: return String(localized: "NEEDS YOUR INPUT")
-        case .submitting: return String(localized: "SENDING ANSWER")
-        case .answered: return String(localized: "ANSWERED")
-        case .error: return String(localized: "TRY AGAIN")
-        case .expired: return String(localized: "EXPIRED")
+        case .pending: return AppLocalization.string("NEEDS YOUR INPUT")
+        case .submitting: return AppLocalization.string("SENDING ANSWER")
+        case .answered: return AppLocalization.string("ANSWERED")
+        case .error: return AppLocalization.string("TRY AGAIN")
+        case .expired: return AppLocalization.string("EXPIRED")
         }
     }
 
@@ -2221,7 +2221,7 @@ struct ClarifyQuestionRow: View {
 
         HStack(spacing: 8) {
             TextField(
-                question.choices.isEmpty ? String(localized: "Type your answer…") : String(localized: "Something else…"),
+                question.choices.isEmpty ? AppLocalization.string("Type your answer…") : AppLocalization.string("Something else…"),
                 text: $customAnswer,
                 axis: .vertical
             )
@@ -2322,7 +2322,7 @@ struct ClarifyQuestionRow: View {
     }
 
     private var confirmTitle: String {
-        selection.isEmpty ? String(localized: "Select to confirm") : String(localized: "Confirm \(selection.count) selected")
+        selection.isEmpty ? AppLocalization.string("Select to confirm") : AppLocalization.string("Confirm \(selection.count) selected")
     }
 
     private var isAnswerable: Bool {
@@ -2479,21 +2479,21 @@ struct ApprovalCard: View {
 
     private func decisionTitle(_ choice: String) -> String {
         switch choice {
-        case "once": return String(localized: "Approved once")
-        case "session": return String(localized: "Approved for this session")
-        case "always": return String(localized: "Always allowed")
-        case "deny": return String(localized: "Rejected")
+        case "once": return AppLocalization.string("Approved once")
+        case "session": return AppLocalization.string("Approved for this session")
+        case "always": return AppLocalization.string("Always allowed")
+        case "deny": return AppLocalization.string("Rejected")
         default: return choice
         }
     }
 
     private func statusTitle(for status: ApprovalActivity.Status) -> String {
         switch status {
-        case .pending: return String(localized: "APPROVAL NEEDED")
-        case .submitting: return String(localized: "SENDING DECISION")
-        case .approved: return String(localized: "APPROVED")
-        case .rejected: return String(localized: "REJECTED")
-        case .error: return String(localized: "TRY AGAIN")
+        case .pending: return AppLocalization.string("APPROVAL NEEDED")
+        case .submitting: return AppLocalization.string("SENDING DECISION")
+        case .approved: return AppLocalization.string("APPROVED")
+        case .rejected: return AppLocalization.string("REJECTED")
+        case .error: return AppLocalization.string("TRY AGAIN")
         }
     }
 
@@ -2580,7 +2580,7 @@ struct TypingIndicator: View {
 private struct WorkingStatusLabel: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private let text = String(localized: "Working…")
+    private let text = AppLocalization.string("Working…")
     private let cycleDuration = 1.9
     private let sweepFraction = 0.72
 

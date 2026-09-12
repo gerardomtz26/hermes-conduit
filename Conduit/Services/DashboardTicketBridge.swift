@@ -622,7 +622,7 @@ final class DashboardTicketBridge: NSObject {
     private func javaScriptLiteral(_ value: Any) throws -> String {
         let data = try JSONSerialization.data(withJSONObject: value, options: [.fragmentsAllowed])
         guard let literal = String(data: data, encoding: .utf8) else {
-            throw DashboardTicketBridgeError.requestFailed("Could not encode dashboard request.")
+            throw DashboardTicketBridgeError.requestFailed(AppLocalization.string("Could not encode dashboard request."))
         }
         return literal
     }
@@ -829,7 +829,7 @@ extension DashboardTicketBridge: WKScriptMessageHandler {
             continuation.resume(throwing: DashboardTicketBridgeError.signInRequired)
             return
         }
-        let detail = payload["error"] as? String ?? "Dashboard request failed (\(status))."
+        let detail = payload["error"] as? String ?? AppLocalization.string("Dashboard request failed (\(status)).")
         // The injected fetch throws exactly one sentinel for a response that
         // outgrew the safe bound (content-length or streamed bytes). It
         // arrives here as a status-0 failure like every other JS-level

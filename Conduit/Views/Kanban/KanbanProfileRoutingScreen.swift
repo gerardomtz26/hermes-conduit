@@ -352,7 +352,7 @@ struct KanbanProfileDescriptionEditorView: View {
             } else {
                 // Semantic refusal (e.g. "no auxiliary client configured"):
                 // the backend reason IS the product semantics.
-                errorMessage = outcome.reason ?? "Hermes could not generate a description."
+                errorMessage = outcome.reason ?? AppLocalization.string("Hermes could not generate a description.")
             }
         } catch {
             if liveness.owns(operationID) { isGenerating = false }

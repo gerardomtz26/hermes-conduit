@@ -78,7 +78,7 @@ final class HermesVoiceGateway: VoiceGatewayService {
                 queryItems: [URLQueryItem(name: "ticket", value: ticket), URLQueryItem(name: "profile", value: profile)]
             )
         } catch {
-            throw VoiceAudioError.unavailable("Could not open the speech stream.")
+            throw VoiceAudioError.unavailable(AppLocalization.string("Could not open the speech stream."))
         }
         let task = URLSession.shared.webSocketTask(with: url)
         task.resume()
@@ -104,7 +104,7 @@ final class HermesVoiceGateway: VoiceGatewayService {
         if let error = response["error"] as? String, !error.isEmpty { throw DashboardTicketBridgeError.requestFailed(error) }
         guard let dataURL = response["data_url"] as? String ?? response["dataUrl"] as? String,
               let data = DataURLLimits.decodeBase64DataURL(dataURL) else {
-            throw DashboardTicketBridgeError.requestFailed("Hermes returned invalid fallback audio.")
+            throw DashboardTicketBridgeError.requestFailed(AppLocalization.string("Hermes returned invalid fallback audio."))
         }
         return data
     }
@@ -176,7 +176,7 @@ private final class HermesSpeechStream: VoiceSpeechStream {
                 catch { return }
                 guard let self, !self.terminal, !self.cancelledByClient else { return }
                 if self.receivedPCM {
-                    self.complete(.failure(VoiceAudioError.unavailable("Hermes speech streaming timed out.")))
+                    self.complete(.failure(VoiceAudioError.unavailable(AppLocalization.string("Hermes speech streaming timed out."))))
                 } else {
                     self.fallbackMode = true
                     // A send of {done:true} can remain suspended even after
@@ -227,7 +227,7 @@ private final class HermesSpeechStream: VoiceSpeechStream {
 
     private func sendJSON(_ object: [String: Any]) async throws {
         let data = try JSONSerialization.data(withJSONObject: object)
-        guard let string = String(data: data, encoding: .utf8) else { throw VoiceAudioError.unavailable("Could not encode speech request.") }
+        guard let string = String(data: data, encoding: .utf8) else { throw VoiceAudioError.unavailable(AppLocalization.string("Could not encode speech request.")) }
         // Hermes uses receive_json(), so these must be WebSocket text frames.
         try await task.send(.string(string))
     }
@@ -274,7 +274,7 @@ private final class HermesSpeechStream: VoiceSpeechStream {
             task.cancel(with: .goingAway, reason: nil)
             startFallbackIfNeeded()
         case "error":
-            complete(.failure(DashboardTicketBridgeError.requestFailed(object["message"] as? String ?? "Hermes speech stream failed.")))
+            complete(.failure(DashboardTicketBridgeError.requestFailed(object["message"] as? String ?? AppLocalization.string("Hermes speech stream failed."))))
         default:
             break
         }

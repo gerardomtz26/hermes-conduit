@@ -409,8 +409,8 @@ struct ComposerBar: View {
                     .foregroundStyle(.orange)
             }
             Text(appState.turnState == .unsupportedGateway
-                 ? "Update this Hermes gateway to recover active turns safely."
-                 : String(localized: "Synchronizing with Hermes before enabling chat controls"))
+                 ? AppLocalization.string("Update this Hermes gateway to recover active turns safely.")
+                 : AppLocalization.string("Synchronizing with Hermes before enabling chat controls"))
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
@@ -588,7 +588,7 @@ struct ComposerBar: View {
                             options: .repeating,
                             isActive: appState.turnState == .running && !reduceMotion
                         )
-                    Text(appState.runtime.model.isEmpty ? String(localized: "Model") : appState.runtime.model)
+                    Text(appState.runtime.model.isEmpty ? AppLocalization.string("Model") : appState.runtime.model)
                         .lineLimit(1)
                     if !appState.runtime.reasoningEffort.isEmpty {
                         Text("/")
@@ -730,7 +730,7 @@ struct ComposerBar: View {
             interactive: appState.canStartVoiceConversation
         )
         .accessibilityLabel("Start voice conversation")
-        .accessibilityHint(appState.voiceUnavailableReason ?? String(localized: "Opens voice controls over this conversation"))
+        .accessibilityHint(appState.voiceUnavailableReason ?? AppLocalization.string("Opens voice controls over this conversation"))
     }
 
     /// Collapse the draft in the same transaction that dismisses the keyboard.
@@ -970,8 +970,8 @@ struct ComposerBar: View {
 
     private func formatEffort(_ value: String) -> String {
         let lower = value.lowercased()
-        if lower == "none" || lower == "off" { return "Off" }
-        if lower == "xhigh" { return String(localized: "Extra High") }
+        if lower == "none" || lower == "off" { return AppLocalization.string("Off") }
+        if lower == "xhigh" { return AppLocalization.string("Extra High") }
         return lower.capitalized
             .replacingOccurrences(of: "-", with: " ")
             .replacingOccurrences(of: "_", with: " ")
@@ -979,21 +979,21 @@ struct ComposerBar: View {
 
     private var accessibilityLabel: String {
         switch action {
-        case .stop: return String(localized: "Stop response")
-        case .steer: return String(localized: "Steer with message")
-        case .interrupt: return String(localized: "Interrupt and correct response")
-        case .send: return String(localized: "Send message")
-        case .unavailable: return String(localized: "Composer unavailable")
+        case .stop: return AppLocalization.string("Stop response")
+        case .steer: return AppLocalization.string("Steer with message")
+        case .interrupt: return AppLocalization.string("Interrupt and correct response")
+        case .send: return AppLocalization.string("Send message")
+        case .unavailable: return AppLocalization.string("Composer unavailable")
         }
     }
 
     private var modelAccessibilityLabel: String {
-        let model = appState.runtime.model.isEmpty ? String(localized: "Model") : appState.runtime.model
+        let model = appState.runtime.model.isEmpty ? AppLocalization.string("Model") : appState.runtime.model
         let reasoning = appState.runtime.reasoningEffort.isEmpty
-            ? String(localized: "reasoning not set")
-            : String(localized: "reasoning \(formatEffort(appState.runtime.reasoningEffort))")
-        let approvals = appState.runtime.yolo ? String(localized: ", auto-approve enabled") : ""
-        let activity = appState.turnState == .running ? String(localized: ", agent working") : ""
+            ? AppLocalization.string("reasoning not set")
+            : AppLocalization.string("reasoning \(formatEffort(appState.runtime.reasoningEffort))")
+        let approvals = appState.runtime.yolo ? AppLocalization.string(", auto-approve enabled") : ""
+        let activity = appState.turnState == .running ? AppLocalization.string(", agent working") : ""
         return "\(model), \(reasoning)\(approvals)\(activity)"
     }
 }

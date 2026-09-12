@@ -33,7 +33,7 @@ enum SessionSource: String, Codable, CaseIterable {
 
     var label: String {
         switch self {
-        case .chat: return String(localized: "Chat")
+        case .chat: return AppLocalization.string("Chat")
         case .discord: return "Discord"
         case .telegram: return "Telegram"
         case .api: return "API"
@@ -680,8 +680,8 @@ enum BusyInputMode: String, CaseIterable, Codable, Identifiable {
 
     var title: String {
         switch self {
-        case .steer: return String(localized: "Steer")
-        case .interrupt: return String(localized: "Interrupt")
+        case .steer: return AppLocalization.string("Steer")
+        case .interrupt: return AppLocalization.string("Interrupt")
         }
     }
 

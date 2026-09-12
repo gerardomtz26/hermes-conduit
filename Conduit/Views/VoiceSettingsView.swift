@@ -162,8 +162,8 @@ struct VoiceSettingsView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 4)
                     } else if service.snapshot.capability.isGatewayConnected {
-                        providerSection(title: String(localized: "Speech to text"), symbol: "waveform", kind: .stt, providers: service.snapshot.sttProviders)
-                        providerSection(title: String(localized: "Assistant speech"), symbol: "speaker.wave.3", kind: .tts, providers: service.snapshot.ttsProviders)
+                        providerSection(title: AppLocalization.string("Speech to text"), symbol: "waveform", kind: .stt, providers: service.snapshot.sttProviders)
+                        providerSection(title: AppLocalization.string("Assistant speech"), symbol: "speaker.wave.3", kind: .tts, providers: service.snapshot.ttsProviders)
                         credentialsSection
                         testingSection
                         spokenControlsSection
@@ -184,7 +184,7 @@ struct VoiceSettingsView: View {
     }
 
     private var capabilitySection: some View {
-        ConduitSettingsSection(title: String(localized: "Voice on \(profileDisplayName)"), symbol: "mic.badge.plus", tint: .conduitAccent) {
+        ConduitSettingsSection(title: AppLocalization.string("Voice on \(profileDisplayName)"), symbol: "mic.badge.plus", tint: .conduitAccent) {
             Toggle("Enable voice on this device", isOn: Binding(
                 get: { voiceEnabled },
                 set: { requested in
@@ -233,7 +233,7 @@ struct VoiceSettingsView: View {
             Button {
                 Task { await load() }
             } label: {
-                Label(service.isLoading ? "Checking…" : String(localized: "Check voice support"), systemImage: "arrow.clockwise")
+                Label(service.isLoading ? AppLocalization.string("Checking…") : AppLocalization.string("Check voice support"), systemImage: "arrow.clockwise")
                     .frame(maxWidth: .infinity)
                     .frame(height: 44)
             }
@@ -253,8 +253,8 @@ struct VoiceSettingsView: View {
         ConduitSettingsSection(title: title, symbol: symbol, tint: kind == .stt ? .conduitAura : .conduitAccent) {
             if choices.isEmpty {
                 Text(kind == .stt
-                     ? String(localized: "No transcription providers were discovered for this Hermes profile.")
-                     : String(localized: "No speech providers were discovered for this Hermes profile."))
+                     ? AppLocalization.string("No transcription providers were discovered for this Hermes profile.")
+                     : AppLocalization.string("No speech providers were discovered for this Hermes profile."))
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {
@@ -266,7 +266,7 @@ struct VoiceSettingsView: View {
                     Text("Provider").foregroundStyle(.secondary)
                 }
                 .disabled(service.isLoading || savingField == "\(kind.rawValue).provider")
-                .accessibilityHint(kind == .stt ? String(localized: "Choose on-device Apple speech or a provider reported by Hermes") : String(localized: "Provider options are reported by Hermes for this profile"))
+                .accessibilityHint(kind == .stt ? AppLocalization.string("Choose on-device Apple speech or a provider reported by Hermes") : AppLocalization.string("Provider options are reported by Hermes for this profile"))
 
                 if kind == .stt, transcriptionMode == .appleOnDevice {
                     appleOnDeviceDetail
@@ -338,12 +338,12 @@ struct VoiceSettingsView: View {
                 .foregroundStyle(.secondary)
         }
         if !descriptor.models.isEmpty {
-            Text(String(localized: "Suggested models: ") + descriptor.models.joined(separator: ", "))
+            Text(AppLocalization.string("Suggested models: ") + descriptor.models.joined(separator: ", "))
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
         if !descriptor.voices.isEmpty {
-            Text(String(localized: "Suggested voices: ") + descriptor.voices.joined(separator: ", "))
+            Text(AppLocalization.string("Suggested voices: ") + descriptor.voices.joined(separator: ", "))
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
@@ -362,7 +362,7 @@ struct VoiceSettingsView: View {
     }
 
     private var credentialsSection: some View {
-        ConduitSettingsSection(title: String(localized: "Credentials on Hermes"), symbol: "key.fill", tint: .conduitAura) {
+        ConduitSettingsSection(title: AppLocalization.string("Credentials on Hermes"), symbol: "key.fill", tint: .conduitAura) {
             Text("Keys stay on your Hermes host. Conduit only receives whether each key is set; it never reads a key back.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
@@ -383,7 +383,7 @@ struct VoiceSettingsView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(credential.key).font(.subheadline.weight(.semibold))
-                    Text(credential.isSet ? String(localized: "Configured on Hermes") : String(localized: "Not configured"))
+                    Text(credential.isSet ? AppLocalization.string("Configured on Hermes") : AppLocalization.string("Not configured"))
                         .font(.caption)
                         .foregroundStyle(credential.isSet ? .green : .secondary)
                 }
@@ -419,7 +419,7 @@ struct VoiceSettingsView: View {
     }
 
     private var testingSection: some View {
-        ConduitSettingsSection(title: String(localized: "Test this profile"), symbol: "checkmark.seal", tint: .conduitAccent) {
+        ConduitSettingsSection(title: AppLocalization.string("Test this profile"), symbol: "checkmark.seal", tint: .conduitAccent) {
             Text("These checks use the selected speech route and active profile. Provider credentials remain on Hermes.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
@@ -474,15 +474,15 @@ struct VoiceSettingsView: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             SpokenPhraseListEditor(
-                title: "Stop Phrases",
-                purposeText: "Cancel the current response and keep Voice open.",
+                title: AppLocalization.string("Stop Phrases"),
+                purposeText: AppLocalization.string("Cancel the current response and keep Voice open."),
                 initialPhrases: spokenStopPhrases,
                 onChange: setStopPhrases
             )
             .id(spokenStopPhrases)
             SpokenPhraseListEditor(
-                title: "End Conversation Phrases",
-                purposeText: "Close the Voice conversation completely.",
+                title: AppLocalization.string("End Conversation Phrases"),
+                purposeText: AppLocalization.string("Close the Voice conversation completely."),
                 initialPhrases: spokenEndConversationPhrases,
                 onChange: setEndConversationPhrases
             )
@@ -491,7 +491,7 @@ struct VoiceSettingsView: View {
     }
 
     private var wakeSection: some View {
-        ConduitSettingsSection(title: String(localized: "Wake phrase"), symbol: "ear.and.waveform", tint: .conduitAura) {
+        ConduitSettingsSection(title: AppLocalization.string("Wake phrase"), symbol: "ear.and.waveform", tint: .conduitAura) {
             Text("The bundled bilingual wake model is not active yet. Its redistribution terms and checksums must be reviewed before it can be included in Conduit.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
@@ -502,19 +502,19 @@ struct VoiceSettingsView: View {
     }
 
     private var profileDisplayName: String {
-        service.profile == "default" ? String(localized: "Default profile") : service.profile.replacingOccurrences(of: "_", with: " ").capitalized
+        service.profile == "default" ? AppLocalization.string("Default profile") : service.profile.replacingOccurrences(of: "_", with: " ").capitalized
     }
 
     private var availabilityTitle: String {
-        if supportsSelectedTranscription || service.snapshot.capability.supportsSpeech { return String(localized: "Voice settings are available") }
-        return String(localized: "Voice is unavailable")
+        if supportsSelectedTranscription || service.snapshot.capability.supportsSpeech { return AppLocalization.string("Voice settings are available") }
+        return AppLocalization.string("Voice is unavailable")
     }
 
     private var availabilityDetail: String {
         if transcriptionMode == .appleOnDevice, appleSpeechAvailability.canAttemptRecognition {
             return "Speech-to-text runs on this iPhone. Hermes retains assistant speech configuration and chat processing."
         }
-        return service.snapshot.capability.unavailableReason ?? "Hermes will retain all provider credentials and audio processing."
+        return service.snapshot.capability.unavailableReason ?? AppLocalization.string("Hermes will retain all provider credentials and audio processing.")
     }
 
     private var availabilityColor: Color {
@@ -535,7 +535,7 @@ struct VoiceSettingsView: View {
     ) -> [(id: String, title: String)] {
         let hermes = providers.map { (id: $0.descriptor.id, title: $0.descriptor.displayName) }
         guard kind == .stt else { return hermes }
-        return [(id: Self.appleProviderID, title: String(localized: "On this iPhone"))] + hermes
+        return [(id: Self.appleProviderID, title: AppLocalization.string("On this iPhone"))] + hermes
     }
 
     private var supportsSelectedTranscription: Bool {
@@ -555,11 +555,11 @@ struct VoiceSettingsView: View {
                     transcriptionMode = .appleOnDevice
                     testStatus = nil
                 } else if case .permissionRequired = appleSpeechAvailability {
-                    testStatus = String(localized: "Enable Speech Recognition in Settings > Conduit > Speech Recognition, then retry selecting \"On this iPhone\".")
+                    testStatus = AppLocalization.string("Enable Speech Recognition in Settings > Conduit > Speech Recognition, then retry selecting \"On this iPhone\".")
                 } else if case .permissionDenied = appleSpeechAvailability {
-                    testStatus = String(localized: "Speech Recognition permission was denied. Please enable it in Settings > Conduit > Speech Recognition.")
+                    testStatus = AppLocalization.string("Speech Recognition permission was denied. Please enable it in Settings > Conduit > Speech Recognition.")
                 } else if case .unsupported = appleSpeechAvailability {
-                    testStatus = String(localized: "On-device speech recognition is not available for your current language locale.")
+                    testStatus = AppLocalization.string("On-device speech recognition is not available for your current language locale.")
                 }
             } else {
                 let providerSaved: Bool
@@ -600,7 +600,7 @@ struct VoiceSettingsView: View {
         Task {
             isRunningTest = true
             isRecordingASRTest = kind == .stt
-            testStatus = kind == .stt ? String(localized: "Listening for a short test…") : String(localized: "Starting speech playback…")
+            testStatus = kind == .stt ? AppLocalization.string("Listening for a short test…") : AppLocalization.string("Starting speech playback…")
             let result = await action()
             if kind == .stt, transcriptionMode == .appleOnDevice {
                 appleSpeechAvailability = AppleOnDeviceSpeechTranscriber.currentAvailability()
@@ -658,7 +658,7 @@ private struct SpokenPhraseListEditor: View {
                 phraseRow(phrase)
             }
             HStack(spacing: 8) {
-                TextField(editingIndex == nil ? "Add a phrase" : "Edit phrase", text: $draft)
+                TextField(editingIndex == nil ? AppLocalization.string("Add a phrase") : AppLocalization.string("Edit phrase"), text: $draft)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit(commitDraft)
                     .accessibilityLabel(Text(editingIndex == nil ? "Add \(title)" : "Edit \(title)"))
@@ -786,7 +786,7 @@ private struct VoiceProviderFieldEditor: View {
                 if case .choice = field.kind {
                     EmptyView()
                 } else {
-                    Button(isSaving ? String(localized: "Saving…") : String(localized: "Save")) { Task { await save(value) } }
+                    Button(isSaving ? AppLocalization.string("Saving…") : AppLocalization.string("Save")) { Task { await save(value) } }
                         .font(.caption.weight(.semibold))
                         .disabled(isSaving || validationMessage != nil)
                         .accessibilityHint(saveHint)

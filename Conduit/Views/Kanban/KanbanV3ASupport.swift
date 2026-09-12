@@ -107,7 +107,7 @@ enum KanbanProfileDescriptionPolicy {
                 baselineIsAuto: false,
                 draft: submitted,
                 isDirtyAfter: false,
-                notice: "Description saved."
+                notice: AppLocalization.string("Description saved.")
             )
         }
         return CompletionOutcome(
@@ -115,7 +115,7 @@ enum KanbanProfileDescriptionPolicy {
             baselineIsAuto: false,
             draft: currentRawDraft,
             isDirtyAfter: true,
-            notice: "Description saved. Your newer edits are still unsaved."
+            notice: AppLocalization.string("Description saved. Your newer edits are still unsaved.")
         )
     }
 
@@ -133,7 +133,7 @@ enum KanbanProfileDescriptionPolicy {
                 baselineIsAuto: true,
                 draft: generated,
                 isDirtyAfter: false,
-                notice: "Generated automatically — review recommended."
+                notice: AppLocalization.string("Generated automatically — review recommended.")
             )
         }
         return CompletionOutcome(
@@ -141,7 +141,7 @@ enum KanbanProfileDescriptionPolicy {
             baselineIsAuto: true,
             draft: currentRawDraft,
             isDirtyAfter: true,
-            notice: "Hermes generated a new routing description. Your newer local edits were preserved and are still unsaved."
+            notice: AppLocalization.string("Hermes generated a new routing description. Your newer local edits were preserved and are still unsaved.")
         )
     }
 }
@@ -260,7 +260,7 @@ enum KanbanOrchestrationDisplay {
         if resolved.trimmingCharacters(in: .whitespaces).isEmpty {
             return "Default"
         }
-        return String(localized: "Default (\(resolved.trimmingCharacters(in: .whitespaces)))")
+        return AppLocalization.string("Default (\(resolved.trimmingCharacters(in: .whitespaces)))")
     }
 
     /// Footer copy for a profile selector: describes what Default resolves to,
@@ -297,19 +297,23 @@ enum KanbanTriageActionsPolicy {
     }
 
     /// The confirmation dialog copy (title + message).
-    static let decomposeConfirmationTitle = String(localized: "Decompose this task?")
-    static let decomposeConfirmationMessage = "Hermes may create and assign multiple dependent tasks."
+    static var decomposeConfirmationTitle: String { AppLocalization.string("Decompose this task?") }
+    static var decomposeConfirmationMessage: String {
+        AppLocalization.string("Hermes may create and assign multiple dependent tasks.")
+    }
 
     /// Success notice after a completed decompose, built from the backend's
     /// own `fanout` / `child_ids` counts — real product semantics, never
     /// fabricated diagnostics.
     static func successNotice(fanout: Bool, childCount: Int) -> String? {
         if fanout {
-            return String(localized: "Decomposed into \(String(childCount)) task") + (childCount == 1 ? "" : "s")
+            // Plural variations in the catalog own both grammars; the Int
+            // argument drives the plural rule.
+            return AppLocalization.string("Decomposed into \(childCount) task")
         }
         // Decompose's single-task fallback (backend fanout=false == a
         // spec-style promotion; distinct from a plain Specify).
-        return String(localized: "Decomposed (single task, no fan-out)")
+        return AppLocalization.string("Decomposed (single task, no fan-out)")
     }
 
     /// Partial-success notice when the mutation reached the server but the

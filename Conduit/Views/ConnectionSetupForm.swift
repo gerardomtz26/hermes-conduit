@@ -53,7 +53,7 @@ struct ConnectionSetupForm: View {
                      ? "Review or edit your current dashboard address, including its port and path."
                      : "Paste the full HTTPS dashboard address Hermes supplied, including any port or path.")
                     .foregroundStyle(.secondary)
-                labeled(String(localized: "Dashboard address")) {
+                labeled(AppLocalization.string("Dashboard address")) {
                     TextField("Dashboard address", text: fullURLBinding)
                         .keyboardType(.URL)
                         .textContentType(.URL)
@@ -70,8 +70,8 @@ struct ConnectionSetupForm: View {
                      ? "Enter the local IP address and port Hermes gave you. You don’t need to type http://."
                      : "Enter the Tailscale hostname or address Hermes gave you. Tailscale Serve hostnames use HTTPS; leave the port blank unless Hermes supplied one.")
                     .foregroundStyle(.secondary)
-                labeled(flow.accessMethod == .lan ? String(localized: "Private LAN IP address") : "Tailscale hostname / address") {
-                    TextField(flow.accessMethod == .lan ? String(localized: "Local IP address") : String(localized: "Tailscale host or address"), text: hostBinding)
+                labeled(flow.accessMethod == .lan ? AppLocalization.string("Private LAN IP address") : AppLocalization.string("Tailscale hostname / address")) {
+                    TextField(flow.accessMethod == .lan ? AppLocalization.string("Local IP address") : AppLocalization.string("Tailscale host or address"), text: hostBinding)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
@@ -79,14 +79,14 @@ struct ConnectionSetupForm: View {
                         .submitLabel(.next)
                         .onSubmit { focusedField = .port }
                         .accessibilityIdentifier("setup.host")
-                        .accessibilityLabel(flow.accessMethod == .lan ? String(localized: "Private LAN IP address") : String(localized: "Tailscale hostname or address"))
+                        .accessibilityLabel(flow.accessMethod == .lan ? AppLocalization.string("Private LAN IP address") : AppLocalization.string("Tailscale hostname or address"))
                 }.id(Field.host)
-                labeled(flow.accessMethod == .lan ? String(localized: "Port") : String(localized: "Port (optional)")) {
+                labeled(flow.accessMethod == .lan ? AppLocalization.string("Port") : AppLocalization.string("Port (optional)")) {
                     TextField("Port supplied by Hermes", text: portBinding)
                         .keyboardType(.numberPad)
                         .focused($focusedField, equals: .port)
                         .accessibilityIdentifier("setup.port")
-                        .accessibilityLabel(flow.accessMethod == .lan ? String(localized: "Dashboard port") : String(localized: "Dashboard port (optional)"))
+                        .accessibilityLabel(flow.accessMethod == .lan ? AppLocalization.string("Dashboard port") : AppLocalization.string("Dashboard port (optional)"))
                 }.id(Field.port)
                 if flow.accessMethod == .tailscale,
                    !ConnectionSetupAddressBuilder.isServeHostname(flow.draft.tailscale.host) {
@@ -117,7 +117,7 @@ struct ConnectionSetupForm: View {
             Text("Dashboard credentials").font(.title2.weight(.semibold))
             Text("Use your Hermes dashboard username and password. These are not your Tailscale, Cloudflare, or Apple credentials.")
                 .foregroundStyle(.secondary)
-            labeled(String(localized: "Dashboard username")) {
+            labeled(AppLocalization.string("Dashboard username")) {
                 TextField("Dashboard username", text: $flow.draft.username)
                     .textContentType(.username)
                     .textInputAutocapitalization(.never)
@@ -128,7 +128,7 @@ struct ConnectionSetupForm: View {
                     .accessibilityIdentifier("setup.username")
                     .accessibilityLabel("Dashboard username")
             }.id(Field.username)
-            labeled(String(localized: "Dashboard password")) {
+            labeled(AppLocalization.string("Dashboard password")) {
                 SecureField("Dashboard password", text: $flow.draft.password)
                     .textContentType(.password)
                     .textInputAutocapitalization(.never)
@@ -275,13 +275,13 @@ struct ConnectionSetupForm: View {
                 repairReviewFooter(repair)
             } else {
                 Text(flow.enteredFromCurrentConnection
-                     ? String(localized: "Applying saves these settings for your next reconnect. Your current session stays connected.")
-                     : String(localized: "These settings will fill the login form. You’ll tap Connect there when you’re ready."))
+                     ? AppLocalization.string("Applying saves these settings for your next reconnect. Your current session stays connected.")
+                     : AppLocalization.string("These settings will fill the login form. You’ll tap Connect there when you’re ready."))
                     .foregroundStyle(.secondary)
                 validationNotice
                 // From Settings with unchanged, successfully tested settings
                 // there is nothing to apply — Done simply closes the wizard.
-                Button(flow.testedSettingsUnchanged ? String(localized: "Done") : String(localized: "Use these settings")) {
+                Button(flow.testedSettingsUnchanged ? AppLocalization.string("Done") : AppLocalization.string("Use these settings")) {
                     if let result = flow.complete() { onComplete(result) }
                 }
                 .buttonStyle(.borderedProminent)
@@ -336,18 +336,18 @@ struct ConnectionSetupForm: View {
     @ViewBuilder private var reviewContent: some View {
         switch flow.reviewState() {
         case .success(let result):
-            reviewValue(String(localized: "Connection method"), flow.draft.methodTitle)
-            reviewValue(String(localized: "Dashboard address"), result.serverURL)
+            reviewValue(AppLocalization.string("Connection method"), flow.draft.methodTitle)
+            reviewValue(AppLocalization.string("Dashboard address"), result.serverURL)
             if !result.username.isEmpty {
-                reviewValue(String(localized: "Username"), result.username)
+                reviewValue(AppLocalization.string("Username"), result.username)
             }
             if result.password.isEmpty {
                 // Only reachable through the interactive-auth acceptance:
                 // discovery proved this dashboard signs in via the browser,
                 // so the absent password is expected, not an omission.
-                reviewValue(String(localized: "Password"), String(localized: "None — browser sign-in"))
+                reviewValue(AppLocalization.string("Password"), AppLocalization.string("None — browser sign-in"))
             } else {
-                reviewValue(String(localized: "Password"), String(localized: "Entered"))
+                reviewValue(AppLocalization.string("Password"), AppLocalization.string("Entered"))
             }
         case .failure(let error):
             VStack(alignment: .leading, spacing: 8) {

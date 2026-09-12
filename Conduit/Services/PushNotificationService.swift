@@ -311,8 +311,8 @@ final class PushNotificationService: ObservableObject {
     var isEnabled: Bool { registration != nil && preferences.enabled }
     var statusText: String {
         if isWorking { return "Updating" }
-        if isEnabled { return String(localized: "Enabled") }
-        if authorizationStatus == .denied { return String(localized: "Notifications denied") }
+        if isEnabled { return AppLocalization.string("Enabled") }
+        if authorizationStatus == .denied { return AppLocalization.string("Notifications denied") }
         return "Off"
     }
 
@@ -492,7 +492,7 @@ final class PushNotificationService: ObservableObject {
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse else {
-                throw RelayDecisionError.transport(String(localized: "invalid response"))
+                throw RelayDecisionError.transport(AppLocalization.string("invalid response"))
             }
             let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             let remaining = json?["remaining"] as? [String]
