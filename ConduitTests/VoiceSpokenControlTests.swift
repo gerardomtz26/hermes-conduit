@@ -161,10 +161,14 @@ final class VoiceSpokenMultilingualCommandTests: XCTestCase {
     }
 
     func testRecognitionIsLanguageIndependentOfAppLanguageSelection() {
-        // Simulating "UI language = Chinese" vs "UI language = English" by
-        // construction: the phrase lists handed to matches() are the same
-        // built-ins in both cases, and both languages' commands match.
+        // Command matching consults only the phrase lists, never the App
+        // Language selection — pin that by actually changing the persisted
+        // selection between matches (restored in defer).
+        let standardDefaults = UserDefaults.standard
+        defer { standardDefaults.removeObject(forKey: AppLanguageStore.defaultsKey) }
         for language in AppLanguage.allCases {
+            standardDefaults.set(language.rawValue, forKey: AppLanguageStore.defaultsKey)
+            XCTAssertEqual(AppLanguage.current, language)
             XCTAssertTrue(VoiceSpokenCommands.matches("停止", phrases: defaults),
                           "Stop must match under \(language)")
             XCTAssertTrue(VoiceSpokenCommands.matches("再见", phrases: endDefaults),
@@ -226,7 +230,7 @@ final class VoiceSpokenMultilingualCommandTests: XCTestCase {
             VoiceSpokenCommands.defaultStopPhrases)
         XCTAssertEqual(
             VoiceSpokenCommands.migratedDefaultPhrases(
-                ["that’s all", "Bye."],
+                ["that’s all", "Bye.", "Goodbye!", "END CONVERSATION"],
                 previous: VoiceSpokenCommands.previousDefaultEndConversationPhrases,
                 current: VoiceSpokenCommands.defaultEndConversationPhrases),
             VoiceSpokenCommands.defaultEndConversationPhrases)

@@ -115,6 +115,32 @@ REGRESSION_KEYS = (
     "Context usage, %lld percent",
     "Hermes asked %lld questions before it can continue",
     "Confirm %lld selected",
+    # Dynamic display-label lookups invisible to the extractor: the config
+    # value display table and the archive/restore ternary.
+    "archive",
+    "restore",
+    "Manual",
+    "Smart",
+    "YOLO mode",
+    "Automatic",
+    "Native images",
+    "Text only",
+    "Default",
+    "Helpful",
+    "Concise",
+    "Technical",
+    "Creative",
+    "Teacher",
+    "Kawaii",
+    "Catgirl",
+    "Pirate",
+    "Shakespeare",
+    "Surfer",
+    "Noir",
+    "Philosopher",
+    "Hype",
+    "Session",
+    "Skills & extensions",
 )
 
 CALL_RE = re.compile(
@@ -124,7 +150,7 @@ SWIFTUI_RE = re.compile(
 MODIFIER_RE = re.compile(
     r"\.\s*(" + "|".join(SWIFTUI_LOCALIZED_MODIFIERS) + r")\s*\(")
 
-_PLACEHOLDER_RE = re.compile(r"%(?:(\d+)\$)?([@dfIu]|l+l[d|i]|lld|ll|ld|lf|@|d|i|u|f|%)")
+_PLACEHOLDER_RE = re.compile(r"%(?:(\d+)\$)?([@df]|l{1,2}[diu]|lf|@|d|i|u|%)")
 # Normalize a printf spec to (position_or_None, type) with %d/%lld/%u/%i
 # folded to "int", %f/%lf to "float", %@ to "object".
 
@@ -331,6 +357,12 @@ def required_key_problems(catalog: dict, required_keys) -> dict:
     return problems
 
 
+# Additional Conduit-owned catalogs that must satisfy the same zh-Hans
+# requirements. Key existence is validated only against Localizable
+# (call-site extraction); the others carry OS-owned Siri/InfoPlist content.
+SECONDARY_CATALOGS = ("AppShortcuts.xcstrings", "InfoPlist.xcstrings")
+
+
 def check(repo_root: str):
     """Full check. Returns (checked_site_count, missing_sites, catalog_problems)."""
     catalog_path = os.path.join(repo_root, "Conduit", "Localizable.xcstrings")
@@ -357,7 +389,17 @@ def check(repo_root: str):
                 line = source.count("\n", 0, offset) + 1
                 rel = os.path.relpath(path, repo_root)
                 missing.setdefault(skeleton, []).append(f"{rel}:{line}")
-    return checked, missing, catalog_problems(catalog)
+
+    key_problems = catalog_problems(catalog)
+    for name in SECONDARY_CATALOGS:
+        secondary_path = os.path.join(repo_root, "Conduit", name)
+        if not os.path.exists(secondary_path):
+            continue
+        with open(secondary_path, encoding="utf-8") as handle:
+            secondary = json.load(handle)
+        for key, problems in catalog_problems(secondary).items():
+            key_problems[f"{name}: {key}"] = problems
+    return checked, missing, key_problems
 
 
 def main() -> int:

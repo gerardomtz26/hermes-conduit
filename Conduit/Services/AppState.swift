@@ -9062,12 +9062,14 @@ final class AppState: ObservableObject {
     /// Keep the common Hermes commands discoverable even when an older gateway
     /// returns only skill entries from `commands.catalog`. Commands Conduit
     /// does not own locally still run through slash.exec / command.dispatch.
-    private static var builtInSlashCommands: [SlashCommand] { [
-        SlashCommand(name: "new", aliases: ["reset"], description: AppLocalization.string("Start a new conversation"), category: "Session"),
-        SlashCommand(name: "branch", aliases: ["fork"], description: AppLocalization.string("Branch this conversation into a new chat"), category: "Session"),
-        SlashCommand(name: "model", description: AppLocalization.string("Open the model and run settings"), category: "Session"),
-        SlashCommand(name: "yolo", description: AppLocalization.string("Toggle automatic tool approval"), category: "Session"),
-        SlashCommand(name: "help", aliases: ["commands"], description: AppLocalization.string("Show available slash commands"), category: "Session"),
+    /// Internal so localization tests can pin the protocol-value invariants
+    /// (raw name/aliases, localized display copy) across every App Language.
+    static var builtInSlashCommands: [SlashCommand] { [
+        SlashCommand(name: "new", aliases: ["reset"], description: AppLocalization.string("Start a new conversation"), category: AppLocalization.string("Session")),
+        SlashCommand(name: "branch", aliases: ["fork"], description: AppLocalization.string("Branch this conversation into a new chat"), category: AppLocalization.string("Session")),
+        SlashCommand(name: "model", description: AppLocalization.string("Open the model and run settings"), category: AppLocalization.string("Session")),
+        SlashCommand(name: "yolo", description: AppLocalization.string("Toggle automatic tool approval"), category: AppLocalization.string("Session")),
+        SlashCommand(name: "help", aliases: ["commands"], description: AppLocalization.string("Show available slash commands"), category: AppLocalization.string("Session")),
         SlashCommand(name: "approvals", description: AppLocalization.string("Show or set approval mode"), category: "Hermes"),
         SlashCommand(name: "agents", aliases: ["tasks"], description: AppLocalization.string("Show active sessions and tasks"), category: "Hermes"),
         SlashCommand(name: "background", aliases: ["bg", "btw"], description: AppLocalization.string("Run a prompt in the background"), category: "Hermes"),
@@ -9184,9 +9186,24 @@ final class AppState: ObservableObject {
         do {
             let result = try await client.commandsCatalog(sessionId: sessionID)
             guard profile == activeProfile, self.client === client else { return }
+            lastSlashCatalogPayload = result
             slashCommands = Self.normalizedSlashCatalog(result)
         } catch {
             // Non-fatal — keep whatever we have
+        }
+    }
+
+    private var lastSlashCatalogPayload: AnyCodable?
+
+    /// Re-resolves the slash command list after an in-app App Language
+    /// change. Built-in descriptions/categories localize per call; the
+    /// server catalog is a stored protocol payload (descriptions are server
+    /// data and stay raw), so only the merge is re-run — no refetch.
+    func appLanguageDidChange() {
+        if let payload = lastSlashCatalogPayload {
+            slashCommands = Self.normalizedSlashCatalog(payload)
+        } else {
+            slashCommands = Self.builtInSlashCommands
         }
     }
 

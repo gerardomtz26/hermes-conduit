@@ -271,7 +271,7 @@ private struct LegacySettingsView: View {
 
             displayToggle(.reasoning, title: AppLocalization.string("Show reasoning"), detail: AppLocalization.string("Include available agent reasoning in replies."))
             displayToggle(.toolProgress, title: AppLocalization.string("Show tool activity"), detail: AppLocalization.string("Show tool calls and their progress in chat."))
-            displayToggle(.expandTools, title: AppLocalization.string("Keep tool cards expanded"), detail: "Open completed tool details by default.")
+            displayToggle(.expandTools, title: AppLocalization.string("Keep tool cards expanded"), detail: AppLocalization.string("Open completed tool details by default."))
 
             if let displayPreferenceError {
                 Label(displayPreferenceError, systemImage: "exclamationmark.triangle.fill")
@@ -1653,7 +1653,7 @@ private struct NotificationsSettingsDetail: View {
                     notificationToggle("Background task finished", detail: AppLocalization.string("A delegated agent completes"), keyPath: \.backgroundTaskFinished)
                     notificationToggle("Completion sound", detail: AppLocalization.string("Play a sound with notifications"), keyPath: \.completionSound)
                     notificationToggle("Show previews", detail: AppLocalization.string("Include response text in notifications"), keyPath: \.showPreviews)
-                    notificationToggle("Approval cards in pushes", detail: "Include approval details so cards work from notifications. Disable for maximum privacy.", keyPath: \.decisionCards)
+                    notificationToggle("Approval cards in pushes", detail: AppLocalization.string("Include approval details so cards work from notifications. Disable for maximum privacy."), keyPath: \.decisionCards)
                 }
 
                 ConduitSettingsSection(title: AppLocalization.string("Compatibility"), symbol: "checkmark.seal", tint: .conduitAura) {

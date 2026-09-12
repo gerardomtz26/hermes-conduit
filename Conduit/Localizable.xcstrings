@@ -7578,7 +7578,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "未在此 Hermes 配置中发现任何语音提供方。"
+            "value" : "未在此 Hermes 档案中发现任何语音提供方。"
           }
         }
       }
@@ -7638,7 +7638,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "未在此 Hermes 配置中发现任何转录提供方。"
+            "value" : "未在此 Hermes 档案中发现任何转录提供方。"
           }
         }
       }
@@ -10257,6 +10257,16 @@
         }
       }
     },
+    "Session" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "会话"
+          }
+        }
+      }
+    },
     "Session filters" : {
       "localizations" : {
         "zh-Hans" : {
@@ -10884,7 +10894,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此 Hermes 档案已停用语音转录。"
+            "value" : "此 Hermes 档案已停用语音转文字。"
           }
         }
       }
@@ -12060,7 +12070,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "此 Hermes 档案没有可用的转录提供方。"
+            "value" : "此 Hermes 档案没有可用的语音转文字提供方。"
           }
         }
       }
@@ -13158,7 +13168,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "只有在前台时才能请求语音权限。"
+            "value" : "只有当 Conduit 位于前台时才能请求语音权限。"
           }
         }
       }
@@ -13204,7 +13214,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "语音测试只能在前台运行。"
+            "value" : "语音测试仅在 Conduit 处于前台时运行。"
           }
         }
       }

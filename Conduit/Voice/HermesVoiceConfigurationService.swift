@@ -658,7 +658,7 @@ enum VoiceConfigurationParser {
             let status: String
             if let text = row["status"] as? String { status = text }
             else if let object = row["status"] as? [String: Any] { status = object["state"] as? String ?? object["label"] as? String ?? AppLocalization.string("Unknown") }
-            else { status = "Unknown" }
+            else { status = AppLocalization.string("Unknown") }
             // providerID resolves to "nous" only for the managed route (the
             // managed feature marker or the legacy managed-row label), so the
             // canonical ID doubles as the structured managed marker.

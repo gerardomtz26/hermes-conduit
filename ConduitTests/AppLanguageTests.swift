@@ -124,9 +124,9 @@ final class AppLanguageTests: XCTestCase {
     // MARK: - Fallback behavior (English is the development language)
 
     func testUntranslatedKeyFallsBackToEnglishSource() {
-        let missing = "Completely untranslated probe key"
-        XCTAssertEqual(AppLocalization.string(missing, language: .simplifiedChinese), missing)
-        XCTAssertEqual(AppLocalization.string(missing, language: .english), missing)
+        let missing = String.LocalizationValue("Completely untranslated probe key")
+        XCTAssertEqual(AppLocalization.string(missing, language: .simplifiedChinese), "Completely untranslated probe key")
+        XCTAssertEqual(AppLocalization.string(missing, language: .english), "Completely untranslated probe key")
     }
 
     func testMissingInterpolatedSkeletonFormatsEnglishFallback() {
@@ -168,5 +168,36 @@ final class AppLanguageTests: XCTestCase {
         XCTAssertEqual(voicePreferences.spokenEndConversationPhrases,
                        VoiceSpokenCommands.defaultEndConversationPhrases)
         XCTAssertEqual(voicePreferences.resolvedTranscriptionMode, .hermes)
+    }
+
+    // MARK: - Protocol-value invariants under localization
+
+    func testBuiltInSlashCommandsKeepProtocolFieldsRaw() {
+        // Only the display copy (description, category) localizes. The
+        // name/aliases are protocol tokens dispatched verbatim to Hermes
+        // and must stay raw ASCII under every App Language.
+        for language in AppLanguage.allCases {
+            for command in AppState.builtInSlashCommands {
+                XCTAssertFalse(command.name.isEmpty)
+                XCTAssertTrue(command.name.allSatisfy { $0.isASCII },
+                              "\(command.name) must stay a raw protocol token")
+                for alias in command.aliases {
+                    XCTAssertTrue(alias.allSatisfy { $0.isASCII },
+                                  "\(command.name) alias \(alias) must stay raw")
+                }
+                XCTAssertFalse(command.description.isEmpty)
+            }
+        }
+    }
+
+    func testSlashCommandIdentityIsStableAcrossLanguageChanges() {
+        // Identity is the protocol name: the localized rebuild must not
+        // mint fresh identities that would churn ForEach and equality.
+        let before = AppState.builtInSlashCommands
+        standardDefaults.set(AppLanguage.simplifiedChinese.rawValue, forKey: AppLanguageStore.defaultsKey)
+        defer { standardDefaults.removeObject(forKey: AppLanguageStore.defaultsKey) }
+        let after = AppState.builtInSlashCommands
+        XCTAssertEqual(before.map(\.id), after.map(\.id))
+        XCTAssertEqual(before.map(\.name), after.map(\.name))
     }
 }

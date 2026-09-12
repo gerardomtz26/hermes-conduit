@@ -807,7 +807,10 @@ struct CapabilityToolset: Identifiable, Equatable {
 // MARK: - Slash Commands
 
 struct SlashCommand: Identifiable, Equatable {
-    let id = UUID()
+    /// Stable identity: the protocol name. Descriptions are re-resolved per
+    /// App Language, so a UUID minted at construction would make every
+    /// language change look like a full list replacement to ForEach.
+    var id: String { name }
     let name: String
     var aliases: [String] = []
     var description: String

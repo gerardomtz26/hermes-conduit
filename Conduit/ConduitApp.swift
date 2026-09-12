@@ -101,6 +101,12 @@ struct ConduitApp: App {
             // language changes — no AppleLanguages mutation, no relaunch.
             .environment(\.locale, appLanguage.resolvedLocale)
             .id(appLanguage.contentIdentity)
+            .onChange(of: appLanguage.contentIdentity) { _, _ in
+                // AppState-owned display caches (slash command descriptions)
+                // re-resolve outside SwiftUI state, so the identity rebuild
+                // alone cannot refresh them.
+                appState.appLanguageDidChange()
+            }
             .preferredColorScheme(appState.themePreference.colorScheme)
             .tint(.conduitAccent)
             .task { await PushNotificationService.shared.refresh() }
