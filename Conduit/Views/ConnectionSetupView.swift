@@ -475,9 +475,9 @@ struct ConnectionSetupView: View {
 
             if showNotSureGuidance {
                 VStack(alignment: .leading, spacing: 10) {
-                    guidanceBullet(AppLocalization.string("Using Conduit at home, on the same network as the Hermes machine? Choose Same Network.")
-                    guidanceBullet(AppLocalization.string("Need access away from home without existing remote access? Choose Tailscale — the simplest secure option.")
-                    guidanceBullet(AppLocalization.string("Already operating an HTTPS domain or reverse proxy for Hermes? Choose Existing Domain.")
+                    guidanceBullet(AppLocalization.string("Using Conduit at home, on the same network as the Hermes machine? Choose Same Network."))
+                    guidanceBullet(AppLocalization.string("Need access away from home without existing remote access? Choose Tailscale — the simplest secure option."))
+                    guidanceBullet(AppLocalization.string("Already operating an HTTPS domain or reverse proxy for Hermes? Choose Existing Domain."))
                 }
                 .padding(.top, 2)
             }
@@ -516,12 +516,12 @@ struct ConnectionSetupView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             VStack(alignment: .leading, spacing: 12) {
-                numberedStep(1, AppLocalization.string("Tailscale is installed on the Hermes machine.")
-                numberedStep(2, AppLocalization.string("Tailscale is installed on this iPhone or iPad.")
-                numberedStep(3, AppLocalization.string("Both are signed in to the same tailnet.")
-                numberedStep(4, AppLocalization.string("The Hermes dashboard is running.")
-                numberedStep(5, AppLocalization.string("Hermes configures Tailscale Serve for the dashboard.")
-                numberedStep(6, AppLocalization.string("Hermes tells you the address to enter into Conduit.")
+                numberedStep(1, AppLocalization.string("Tailscale is installed on the Hermes machine."))
+                numberedStep(2, AppLocalization.string("Tailscale is installed on this iPhone or iPad."))
+                numberedStep(3, AppLocalization.string("Both are signed in to the same tailnet."))
+                numberedStep(4, AppLocalization.string("The Hermes dashboard is running."))
+                numberedStep(5, AppLocalization.string("Hermes configures Tailscale Serve for the dashboard."))
+                numberedStep(6, AppLocalization.string("Hermes tells you the address to enter into Conduit."))
             }
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -552,10 +552,10 @@ struct ConnectionSetupView: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text("You will need:")
                     .font(.subheadline.weight(.semibold))
-                guidanceBullet(AppLocalization.string("Your existing HTTPS Hermes dashboard URL — for example https://hermes.example.com, https://hermes.example.com:9443, or https://example.com/hermes.")
-                guidanceBullet(AppLocalization.string("Any custom port.")
-                guidanceBullet(AppLocalization.string("Any path prefix your proxy uses.")
-                guidanceBullet(AppLocalization.string("Your dashboard login credentials.")
+                guidanceBullet(AppLocalization.string("Your existing HTTPS Hermes dashboard URL — for example https://hermes.example.com, https://hermes.example.com:9443, or https://example.com/hermes."))
+                guidanceBullet(AppLocalization.string("Any custom port."))
+                guidanceBullet(AppLocalization.string("Any path prefix your proxy uses."))
+                guidanceBullet(AppLocalization.string("Your dashboard login credentials."))
             }
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
