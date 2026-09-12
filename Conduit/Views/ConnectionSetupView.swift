@@ -43,6 +43,7 @@ struct ConnectionRepairSetupSheet: View {
 }
 
 struct ConnectionSetupView: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     @Environment(\.dismiss) private var dismiss
     @State private var flow: ConnectionSetupFlow
     @State private var showNotSureGuidance = false

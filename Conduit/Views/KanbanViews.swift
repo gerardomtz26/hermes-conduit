@@ -343,6 +343,7 @@ struct KanbanBulkActionsCluster<MoreMenu: View>: View {
 }
 
 struct KanbanView: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var appState: AppState
     @StateObject private var store = KanbanStore()
     @State private var selectedTask: KanbanTask?
@@ -1819,6 +1820,7 @@ struct KanbanView: View {
 }
 
 private struct KanbanCardView: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     let task: KanbanTask
     /// Whether Hermes has ANY configured default assignee fallback. When not,
     /// an unassigned ready card would silently never run — worth surfacing.

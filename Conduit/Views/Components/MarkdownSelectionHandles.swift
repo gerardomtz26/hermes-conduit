@@ -405,6 +405,7 @@ final class MarkdownSelectionChromeLocator: ObservableObject {
 /// rendered but untouchable). Positions come from window-coordinate
 /// conversion, so placement is correct regardless of where this sits.
 struct MarkdownSelectionChromeRoot: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     @ObservedObject private var locator = MarkdownSelectionChromeLocator.shared
 
     var body: some View {

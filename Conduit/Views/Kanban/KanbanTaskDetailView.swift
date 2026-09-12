@@ -19,6 +19,7 @@ import SwiftUI
 /// runs, events, and metadata but never overwrites unsaved user edits; diffs
 /// run against the last-synced server baseline.
 struct KanbanTaskDetailView: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     /// Editable fields as last synced from the server. The draft fields below
     /// are compared against this so a poll can refresh collections WITHOUT
     /// ever overwriting unsaved user edits.

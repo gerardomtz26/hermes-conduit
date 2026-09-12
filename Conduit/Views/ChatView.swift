@@ -1085,6 +1085,7 @@ struct UserMessageContent: View, Equatable {
 }
 
 private struct UserImageAttachmentPreview: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     let attachment: Attachment
     let gatewayResolver: GatewayMediaDataURLResolver?
     @State private var gatewayImage: UIImage?
@@ -1350,6 +1351,7 @@ struct SettledAssistantMessageContent: View, Equatable {
 /// The dynamic half of an assistant row: copy/branch controls that depend
 /// on busy state, kept small so their per-publish re-evaluation is cheap.
 struct AssistantMessageActions: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     let message: ChatMessage
     @EnvironmentObject private var appState: AppState
     @State private var copied = false
@@ -1398,6 +1400,7 @@ struct AssistantMessageActions: View {
 /// playback state transition re-renders a 34pt button instead of every
 /// response's Markdown in the transcript.
 struct ReadAloudButton: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     let message: ChatMessage
     @ObservedObject var controller: MessageReadAloudController
     @EnvironmentObject private var appState: AppState
@@ -1478,6 +1481,7 @@ struct AssistantBubble: View {
 // MARK: - System Message (slash command output)
 
 struct SystemBubble: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     let message: ChatMessage
 
     private var isRuntimeNotice: Bool {
@@ -1531,6 +1535,7 @@ struct SystemBubble: View {
 /// (Of the system-message surfaces, only `SystemBubble`'s Markdown body
 /// follows `ChatTypography`.)
 private struct ReviewSummaryCard: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     let activity: ReviewActivity
     let timestamp: String
     @EnvironmentObject private var appState: AppState
@@ -1901,6 +1906,7 @@ private struct SettledToolCardContent: View, Equatable {
 }
 
 struct ToolCard: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     let message: ChatMessage
     @EnvironmentObject var appState: AppState
     @Environment(\.sizeCategory) private var sizeCategory
@@ -1965,6 +1971,7 @@ enum ClarifyCardLayout {
 }
 
 struct ClarifyCard: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     let message: ChatMessage
     @EnvironmentObject var appState: AppState
     // Per-question draft state, keyed by the gateway qid: typed custom text
@@ -2088,6 +2095,7 @@ struct ClarifyCard: View {
 /// each row draws its own grouped box and title; a single-question card keeps
 /// the legacy flat layout (the card header already carries the title).
 struct ClarifyQuestionRow: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     let question: ClarifyQuestion
     var showsTitle: Bool = true
     @Binding var customAnswer: String
@@ -2354,6 +2362,7 @@ struct ClarifyQuestionRow: View {
 // MARK: - Approval Card
 
 struct ApprovalCard: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     let message: ChatMessage
     @EnvironmentObject var appState: AppState
     @State private var confirmAlways = false
@@ -2578,6 +2587,7 @@ struct TypingIndicator: View {
 }
 
 private struct WorkingStatusLabel: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private let text = AppLocalization.string("Working…")

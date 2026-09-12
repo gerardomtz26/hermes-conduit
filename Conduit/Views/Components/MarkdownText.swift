@@ -1596,6 +1596,7 @@ struct LargeMarkdownTable: View {
 /// renderers are not chunkable, so past the guard size the presentation is
 /// a bounded source preview plus Copy (the render action is dropped).
 struct GuardedSourceCard: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     let title: String
     let icon: String
     let source: String
@@ -1645,6 +1646,7 @@ struct GuardedSourceCard: View {
 }
 
 private struct RemoteMarkdownImage: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     let url: String
     let alt: String
     let gatewayMediaDataURL: ((String) async -> String?)?
@@ -1998,6 +2000,7 @@ private enum RemoteImageHTML {
 }
 
 struct ChatCodeBlock: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     let source: String
     var language: String = ""
     var usesAccentSurface = false
@@ -2073,6 +2076,7 @@ struct ChatCodeBlock: View {
 }
 
 private struct MermaidBlock: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     let source: String
     @Environment(\.colorScheme) private var colorScheme
     @State private var preview: MarkupPreview?
@@ -2086,6 +2090,7 @@ private struct MermaidBlock: View {
 }
 
 private struct MathBlock: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     let source: String
     @Environment(\.colorScheme) private var colorScheme
     @State private var preview: MarkupPreview?

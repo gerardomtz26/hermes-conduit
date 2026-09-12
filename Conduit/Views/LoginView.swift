@@ -12,6 +12,7 @@ import WebKit
 import os
 
 struct LoginView: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     private static let logger = Logger(subsystem: "com.milim.relay", category: "login")
 
     @EnvironmentObject var appState: AppState

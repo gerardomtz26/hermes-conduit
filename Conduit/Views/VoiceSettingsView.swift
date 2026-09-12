@@ -94,6 +94,7 @@ struct VoiceSettingsActions {
 /// standalone in a sheet; the host app supplies live-audio test closures after
 /// it has built the active VoiceConversationController.
 struct VoiceSettingsView: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     @ObservedObject var service: HermesVoiceConfigurationService
     /// Observed so the Record ASR meter tracks the active controller's raw
     /// microphone level (issue #130): a moving meter proves capture works
@@ -620,6 +621,7 @@ struct VoiceSettingsView: View {
 /// canonicalizes through `VoiceSpokenCommands` so duplicates and blanks never
 /// reach persistence.
 private struct SpokenPhraseListEditor: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     let title: String
     let purposeText: String
     let initialPhrases: [String]
@@ -731,6 +733,7 @@ private struct SpokenPhraseListEditor: View {
 }
 
 private struct VoiceProviderFieldEditor: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     let field: VoiceTypedField
     @Binding var value: String
     let isSaving: Bool

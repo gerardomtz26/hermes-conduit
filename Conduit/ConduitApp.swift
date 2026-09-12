@@ -96,15 +96,17 @@ struct ConduitApp: App {
         RootView()
             .environmentObject(appState)
             // In-app App Language: literal SwiftUI keys resolve through the
-            // same selection as AppLocalization.string(…), and the content
-            // identity re-runs every String-context resolution when the
-            // language changes — no AppleLanguages mutation, no relaunch.
+            // same selection as AppLocalization.string(…). The environment
+            // locale propagates reactively (Text re-renders without identity
+            // changes), and every view holding String-context copy observes
+            // AppLanguageStore itself, so switching language re-renders
+            // exactly those views — the root is never rebuilt, and
+            // navigation/composer/sheet/window-claim state is untouched.
             .environment(\.locale, appLanguage.resolvedLocale)
-            .id(appLanguage.contentIdentity)
-            .onChange(of: appLanguage.contentIdentity) { _, _ in
+            .onChange(of: appLanguage.selection) { _, _ in
                 // AppState-owned display caches (slash command descriptions)
-                // re-resolve outside SwiftUI state, so the identity rebuild
-                // alone cannot refresh them.
+                // re-resolve outside SwiftUI state, so view re-renders alone
+                // cannot refresh them.
                 appState.appLanguageDidChange()
             }
             .preferredColorScheme(appState.themePreference.colorScheme)

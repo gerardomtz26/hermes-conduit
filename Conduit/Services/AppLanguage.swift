@@ -54,10 +54,13 @@ enum AppLanguage: String, CaseIterable, Identifiable {
     }
 }
 
-/// Observable holder for the App Language preference. The store exists for
-/// SwiftUI: publishing drives the root `.environment(\.locale)` and the
-/// root content identity that re-runs every `AppLocalization`-resolved
-/// string. Resolution itself (`AppLanguage.current`) never depends on it.
+/// Observable holder for the App Language preference. Views that build
+/// user-facing copy through `AppLocalization.string` observe the shared
+/// store (`@ObservedObject private var appLanguage = AppLanguageStore.shared`),
+/// so a selection change re-renders exactly those views; the root sets
+/// `.environment(\.locale, resolvedLocale)` so literal-key SwiftUI text
+/// re-renders reactively as well. No view identity is ever replaced.
+/// Resolution itself (`AppLanguage.current`) never depends on the store.
 @MainActor
 final class AppLanguageStore: ObservableObject {
     static let shared = AppLanguageStore()
@@ -89,11 +92,6 @@ final class AppLanguageStore: ObservableObject {
     var resolvedLocale: Locale {
         selection.locale ?? .autoupdatingCurrent
     }
-
-    /// Identity for the root `.id(…)`: any selection change rebuilds the view
-    /// tree so String-context copy recomputes. This is presentation-only
-    /// state rebuild; no application state is reset.
-    var contentIdentity: String { selection.rawValue }
 }
 
 /// Explicit localized-String creation that follows the in-app App Language.

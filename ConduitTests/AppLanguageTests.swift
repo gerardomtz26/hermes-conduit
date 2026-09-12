@@ -170,6 +170,93 @@ final class AppLanguageTests: XCTestCase {
         XCTAssertEqual(voicePreferences.resolvedTranscriptionMode, .hermes)
     }
 
+    // MARK: - Live switching without state loss
+
+    /// Switching App Language must update localization WITHOUT the old
+    /// root-identity rebuild: no navigation, session, message, profile, or
+    /// composer-draft state may be touched by the switch path.
+    func testLanguageSwitchDoesNotResetApplicationState() {
+        let suite = "AppLanguageTests.AppState.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let appState = AppState(
+            defaults: defaults,
+            loadSavedConnection: false,
+            clearSessionPresentationCache: {},
+            sessionPresentationCache: SessionPresentationCache(defaults: defaults)
+        )
+
+        // Seed representative app state the old `.id()` rebuild would have
+        // disturbed.
+        let message = ChatMessage(
+            id: "lang-switch-msg",
+            role: .user,
+            content: "unchanged conversation content",
+            timestamp: "1"
+        )
+        appState.messages = [message]
+        let originalProfile = appState.activeProfile
+        let originalConnectionPhase = appState.voiceLaunchConnectionSnapshot()
+
+        let store = AppLanguageStore()
+        let expectations = [AppLanguage.english, .simplifiedChinese, .system]
+        for language in expectations {
+            store.select(language)
+            appState.appLanguageDidChange()
+
+            XCTAssertEqual(appState.messages.map(\.id), [message.id],
+                           "messages must survive a language switch to \(language)")
+            XCTAssertEqual(appState.messages.first?.content, message.content)
+            XCTAssertEqual(appState.activeProfile, originalProfile,
+                           "active profile must survive a language switch to \(language)")
+            XCTAssertEqual(appState.voiceLaunchConnectionSnapshot().phase,
+                           originalConnectionPhase.phase,
+                           "voice connection phase must be untouched by \(language)")
+            XCTAssertFalse(appState.slashCommands.isEmpty,
+                           "slash command cache must stay populated after \(language)")
+        }
+
+        standardDefaults.removeObject(forKey: AppLanguageStore.defaultsKey)
+    }
+
+    /// Composer drafts live in their own store; the language-switch path
+    /// must never clear them (old `.id()` rebuild discarded the ComposerBar
+    /// @State that owned the store).
+    func testLanguageSwitchSurvivesComposerDraft() {
+        let store = ComposerDraftStore()
+        let key = ComposerDraftKey(profile: "default",
+                                   sessionID: ComposerDraftKey.newConversationSessionID)
+        let draft = ComposerDraft(text: "unsent draft that must survive", attachments: [])
+        store.save(draft, for: key)
+
+        let languageStore = AppLanguageStore()
+        for language in [AppLanguage.simplifiedChinese, .english, .system] {
+            languageStore.select(language)
+            XCTAssertEqual(store.draft(for: key), draft,
+                           "composer draft must survive a language switch to \(language)")
+        }
+        standardDefaults.removeObject(forKey: AppLanguageStore.defaultsKey)
+    }
+
+    func testLanguageSwitchDoesNotRepublishSlashCommandIdentity() {
+        let suite = "AppLanguageTests.SlashIdentity.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let appState = AppState(
+            defaults: defaults,
+            loadSavedConnection: false,
+            clearSessionPresentationCache: {},
+            sessionPresentationCache: SessionPresentationCache(defaults: defaults)
+        )
+        let before = appState.slashCommands.map(\.id)
+        let store = AppLanguageStore()
+        store.select(.simplifiedChinese)
+        appState.appLanguageDidChange()
+        XCTAssertEqual(appState.slashCommands.map(\.id), before,
+                       "language refresh re-merges descriptions, not identities")
+        standardDefaults.removeObject(forKey: AppLanguageStore.defaultsKey)
+    }
+
     // MARK: - Protocol-value invariants under localization
 
     func testBuiltInSlashCommandsKeepProtocolFieldsRaw() {

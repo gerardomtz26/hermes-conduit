@@ -35,6 +35,7 @@ struct ModelPickerYoloDraft: Equatable {
 }
 
 struct ModelPickerView: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     @EnvironmentObject var appState: AppState
     @Environment(\.colorScheme) private var colorScheme
     @State private var selectedModel = ""

@@ -3,6 +3,7 @@ import SwiftUI
 /// Settings-owned capabilities browser. It remains scoped to the active Hermes
 /// profile and intentionally reuses AppState's existing loading/mutation APIs.
 struct CapabilitiesView: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     @EnvironmentObject var appState: AppState
     @State private var searchText = ""
     @State private var capabilitiesLoading = false

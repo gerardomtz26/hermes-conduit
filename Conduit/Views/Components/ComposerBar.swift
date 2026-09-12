@@ -12,6 +12,7 @@ import PhotosUI
 import UniformTypeIdentifiers
 
 struct ComposerBar: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     @EnvironmentObject var appState: AppState
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion

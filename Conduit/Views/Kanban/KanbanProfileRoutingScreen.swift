@@ -86,6 +86,7 @@ struct KanbanProfileRoutingScreen: View {
 ///   identity; underneath, KanbanStore's generation guard is the hard
 ///   boundary.
 struct KanbanProfileDescriptionEditorView: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var store: KanbanStore
     @Environment(\.dismiss) private var dismiss
 

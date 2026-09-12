@@ -8,6 +8,7 @@ import SwiftUI
 /// The sheet is deliberately presentation-only. AppState remains responsible
 /// for submitting, interrupting, and rendering the associated Hermes turn.
 struct VoiceConversationSheet: View {
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
     @ObservedObject var controller: VoiceConversationController
     let profile: String
     let onClose: () -> Void
