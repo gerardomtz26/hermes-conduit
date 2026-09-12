@@ -1467,6 +1467,26 @@
         }
       }
     },
+    "Attachment failed: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "附件发送失败：%@"
+          }
+        }
+      }
+    },
+    "Attachments can only be sent in a new message, after the current response finishes." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "附件只能在当前回复结束后随新消息发送。"
+          }
+        }
+      }
+    },
     "Audio was interrupted." : {
       "localizations" : {
         "zh-Hans" : {
@@ -2763,6 +2783,16 @@
         }
       }
     },
+    "Connect to a Hermes dashboard to use Kanban." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "连接 Hermes 仪表盘后才能使用看板。"
+          }
+        }
+      }
+    },
     "Connected" : {
       "localizations" : {
         "zh-Hans" : {
@@ -3095,6 +3125,16 @@
         }
       }
     },
+    "Could not %@ scheduled job: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法%1$@定时任务：%2$@"
+          }
+        }
+      }
+    },
     "Could not %@ this conversation: %@" : {
       "localizations" : {
         "en" : {
@@ -3111,6 +3151,16 @@
         }
       }
     },
+    "Could not branch conversation: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法分支对话：%@"
+          }
+        }
+      }
+    },
     "Could not build a safe Hermes Kanban request (invalid %@). The operation was cancelled before any data changed." : {
       "localizations" : {
         "zh-Hans" : {
@@ -3121,12 +3171,42 @@
         }
       }
     },
+    "Could not change the app icon: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法更改应用图标：%@"
+          }
+        }
+      }
+    },
     "Could not check dashboard sign-in options: %@" : {
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "无法检查仪表盘登录选项：%@"
+          }
+        }
+      }
+    },
+    "Could not create the project: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法创建项目：%@"
+          }
+        }
+      }
+    },
+    "Could not delete this conversation: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法删除此对话：%@"
           }
         }
       }
@@ -3161,12 +3241,92 @@
         }
       }
     },
+    "Could not interrupt the active response: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法中断正在进行的回复：%@"
+          }
+        }
+      }
+    },
+    "Could not load %@: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法加载 %1$@：%2$@"
+          }
+        }
+      }
+    },
+    "Could not load archived conversations: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法加载已归档的对话：%@"
+          }
+        }
+      }
+    },
     "Could not load capabilities: %@" : {
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "无法加载能力：%@"
+          }
+        }
+      }
+    },
+    "Could not load model defaults: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法加载模型默认设置：%@"
+          }
+        }
+      }
+    },
+    "Could not load profile settings: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法加载档案设置：%@"
+          }
+        }
+      }
+    },
+    "Could not load scheduled jobs: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法加载定时任务：%@"
+          }
+        }
+      }
+    },
+    "Could not load scheduled-job runs: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法加载定时任务运行记录：%@"
+          }
+        }
+      }
+    },
+    "Could not load voice settings to save this change." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法加载语音设置，无法保存此更改。"
           }
         }
       }
@@ -3191,12 +3351,102 @@
         }
       }
     },
+    "Could not prepare %@ for upload." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法准备 %@ 以便上传。"
+          }
+        }
+      }
+    },
+    "Could not redirect the active response: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法重定向正在进行的回复：%@"
+          }
+        }
+      }
+    },
     "Could not refresh dashboard status." : {
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "无法刷新仪表盘状态。"
+          }
+        }
+      }
+    },
+    "Could not save %@.provider: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法保存 %1$@.provider：%2$@"
+          }
+        }
+      }
+    },
+    "Could not save %@: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法保存 %1$@：%2$@"
+          }
+        }
+      }
+    },
+    "Could not save credential: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法保存凭据：%@"
+          }
+        }
+      }
+    },
+    "Could not save display preference: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法保存显示偏好设置：%@"
+          }
+        }
+      }
+    },
+    "Could not save message behavior: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法保存消息行为设置：%@"
+          }
+        }
+      }
+    },
+    "Could not save model defaults: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法保存模型默认设置：%@"
+          }
+        }
+      }
+    },
+    "Could not select %@: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法选择 %1$@：%2$@"
           }
         }
       }
@@ -3217,6 +3467,36 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "无法启动会话"
+          }
+        }
+      }
+    },
+    "Could not switch workspace: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法切换工作区：%@"
+          }
+        }
+      }
+    },
+    "Could not update skill: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法更新技能：%@"
+          }
+        }
+      }
+    },
+    "Could not update toolset: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法更新工具集：%@"
           }
         }
       }
@@ -4661,6 +4941,66 @@
         }
       }
     },
+    "Failed to create session: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "创建会话失败：%@"
+          }
+        }
+      }
+    },
+    "Failed to load gateway sessions: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加载网关会话失败：%@"
+          }
+        }
+      }
+    },
+    "Failed to load sessions: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "加载会话失败：%@"
+          }
+        }
+      }
+    },
+    "Failed to refresh the dashboard session: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "刷新仪表盘会话失败：%@"
+          }
+        }
+      }
+    },
+    "Failed to restore this conversation: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "恢复此对话失败：%@"
+          }
+        }
+      }
+    },
+    "Failed to send: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "发送失败：%@"
+          }
+        }
+      }
+    },
     "Fans eligible triage tasks into child task graphs" : {
       "localizations" : {
         "zh-Hans" : {
@@ -5133,6 +5473,36 @@
         }
       }
     },
+    "Hermes created a conversation without a session ID." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hermes 创建的对话没有会话 ID。"
+          }
+        }
+      }
+    },
+    "Hermes created this branch in %@, not %@. It was not opened." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hermes 在 %@（而非 %@）中创建了这个分支。未将其打开。"
+          }
+        }
+      }
+    },
+    "Hermes created this conversation in %@, not %@. It was not opened." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hermes 在 %@（而非 %@）中创建了这个对话。未将其打开。"
+          }
+        }
+      }
+    },
     "Hermes dashboard found" : {
       "localizations" : {
         "zh-Hans" : {
@@ -5259,6 +5629,16 @@
         }
       }
     },
+    "Hermes must translate this managed selection; its provider endpoint is unavailable." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hermes 需要转换此受管选择；其提供方端点不可用。"
+          }
+        }
+      }
+    },
     "Hermes needs your answer" : {
       "localizations" : {
         "zh-Hans" : {
@@ -5329,6 +5709,16 @@
         }
       }
     },
+    "Hermes returned a different conversation while resuming this one. Try reopening it." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hermes 在恢复此对话时返回了另一个对话。请尝试重新打开。"
+          }
+        }
+      }
+    },
     "Hermes returned an unexpected Kanban response: %@" : {
       "localizations" : {
         "zh-Hans" : {
@@ -5375,6 +5765,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "Hermes 依据路由描述，将分类任务的分解路由到这些档案。清晰的描述有助于分解器选出合适的专长档案。"
+          }
+        }
+      }
+    },
+    "Hermes saved this selection, but the Nous subscription needs sign-in before %@ can use it." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hermes 已保存此选择，但在登录 Nous 订阅之前 %@ 无法使用它。"
           }
         }
       }
@@ -7903,6 +8303,16 @@
         }
       }
     },
+    "On-device speech recognition is not available for %@." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "设备端语音识别不支持 %@。"
+          }
+        }
+      }
+    },
     "On-device speech recognition is not available for your current language locale." : {
       "localizations" : {
         "zh-Hans" : {
@@ -7919,6 +8329,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "设备端语音识别已就绪。"
+          }
+        }
+      }
+    },
+    "On-device speech recognition is unavailable." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "设备端语音识别不可用。"
           }
         }
       }
@@ -11135,6 +11555,36 @@
         }
       }
     },
+    "Stop the active response before archiving this conversation." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "归档此对话前，请先停止正在进行的回复。"
+          }
+        }
+      }
+    },
+    "Stop the active response before branching this conversation." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "分支此对话前，请先停止正在进行的回复。"
+          }
+        }
+      }
+    },
+    "Stop the active response before deleting this conversation." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "删除此对话前，请先停止正在进行的回复。"
+          }
+        }
+      }
+    },
     "Stop the current response before starting voice in this conversation." : {
       "localizations" : {
         "zh-Hans" : {
@@ -11659,6 +12109,16 @@
         }
       }
     },
+    "That conversation belongs to another workspace. Switch profiles to open it." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "该对话属于另一个工作区。请切换档案后再打开。"
+          }
+        }
+      }
+    },
     "That doesn’t look like a dashboard URL Conduit can use. Check it for typos — it should look like https://hermes.example." : {
       "localizations" : {
         "zh-Hans" : {
@@ -11711,6 +12171,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "内置的双语唤醒模型尚未启用。其再分发条款与校验和须经审核，方可纳入 Conduit。"
+          }
+        }
+      }
+    },
+    "The connection to Hermes was lost. (UI test stub)" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "与 Hermes 的连接已断开。（UI 测试桩）"
           }
         }
       }
@@ -11985,6 +12455,26 @@
         }
       }
     },
+    "There is no assistant response to branch from yet." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "还没有可供分支的助手回复。"
+          }
+        }
+      }
+    },
+    "There is no message history to branch from." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "没有可供分支的消息历史。"
+          }
+        }
+      }
+    },
     "These checks use the selected speech route and active profile. Provider credentials remain on Hermes." : {
       "localizations" : {
         "zh-Hans" : {
@@ -12075,6 +12565,26 @@
         }
       }
     },
+    "This Hermes gateway is too old to report voice readiness." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此 Hermes 网关版本过旧，无法报告语音就绪状态。"
+          }
+        }
+      }
+    },
+    "This Hermes gateway must support session turn state. Update Hermes to enable message, stop, and steer controls." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此 Hermes 网关必须支持会话回合状态。请更新 Hermes 以启用消息、停止和转向控件。"
+          }
+        }
+      }
+    },
     "This Hermes profile has no ready speech-to-text provider." : {
       "localizations" : {
         "zh-Hans" : {
@@ -12101,6 +12611,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此选项仅适用于你已在使用的 HTTPS 基础设施——Conduit 不会指导你创建。"
+          }
+        }
+      }
+    },
+    "This build does not include alternate app icons." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此构建不包含备用应用图标。"
           }
         }
       }
@@ -12543,6 +13063,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "超高"
+          }
+        }
+      }
+    },
+    "Unable to change YOLO mode: %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法更改 YOLO 模式：%@"
           }
         }
       }
@@ -13249,6 +13779,16 @@
         }
       }
     },
+    "Wait for the workspace switch to finish before starting a conversation." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请等待工作区切换完成后再开始对话。"
+          }
+        }
+      }
+    },
     "Waiting for activity…" : {
       "localizations" : {
         "zh-Hans" : {
@@ -13445,6 +13985,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "工作区不可用"
+          }
+        }
+      }
+    },
+    "Workspace unavailable: Hermes has not reported a working directory for this session yet." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "工作区不可用：Hermes 尚未报告此会话的工作目录。"
           }
         }
       }
@@ -13785,6 +14335,16 @@
         }
       }
     },
+    "pause" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "暂停"
+          }
+        }
+      }
+    },
     "pid %@" : {
       "localizations" : {
         "en" : {
@@ -13857,6 +14417,16 @@
         }
       }
     },
+    "resume" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "恢复"
+          }
+        }
+      }
+    },
     "set to NULL" : {
       "localizations" : {
         "zh-Hans" : {
@@ -13883,6 +14453,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "某人"
+          }
+        }
+      }
+    },
+    "trigger" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "立即运行"
           }
         }
       }

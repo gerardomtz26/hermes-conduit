@@ -638,7 +638,7 @@ struct ComposerBar: View {
                         .frame(minWidth: 36, minHeight: 36)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Delegate agents, \(appState.activeAgents) active")
+                .accessibilityLabel(AppLocalization.string("Delegate agents, \(String(appState.activeAgents)) active"))
             }
         }
         .padding(.horizontal, 14)
@@ -964,7 +964,7 @@ struct ComposerBar: View {
             attachments.append(Attachment(id: UUID().uuidString, name: name, uri: url.absoluteString, mimeType: mimeType, kind: kind))
             Haptics.light()
         } catch {
-            appState.errorMessage = "Could not prepare \(name) for upload."
+            appState.errorMessage = AppLocalization.string("Could not prepare \(name) for upload.")
             Haptics.error()
         }
     }

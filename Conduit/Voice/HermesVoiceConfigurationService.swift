@@ -158,7 +158,7 @@ final class HermesVoiceConfigurationService: ObservableObject {
         // Toolset config was added after some public gateways. Its absence is
         // a capability limitation, not a failed text-chat connection.
         if (try? stt.get()) == nil && (try? tts.get()) == nil {
-            errorMessage = "This Hermes gateway is too old to report voice readiness."
+            errorMessage = AppLocalization.string("This Hermes gateway is too old to report voice readiness.")
         }
     }
 
@@ -177,7 +177,7 @@ final class HermesVoiceConfigurationService: ObservableObject {
             // except the canonical managed Nous ID, whose meaning is
             // server-owned and never written raw.
             guard provider.lowercased() != "nous" else {
-                errorMessage = "Hermes must translate this managed selection; its provider endpoint is unavailable."
+                errorMessage = AppLocalization.string("Hermes must translate this managed selection; its provider endpoint is unavailable.")
                 return false
             }
             return await saveVendorSelection(provider, kind: kind)
@@ -206,7 +206,7 @@ final class HermesVoiceConfigurationService: ObservableObject {
     private func saveVendorSelection(_ vendor: String, kind: VoiceProviderDescriptor.Kind) async -> Bool {
         let sectionKey = kind.rawValue
         guard var config = try? await requester.requestJSON(path: profilePath("/api/config"), method: "GET", body: nil) else {
-            errorMessage = "Could not load voice settings to save this change."
+            errorMessage = AppLocalization.string("Could not load voice settings to save this change.")
             return false
         }
         var section = config[sectionKey] as? [String: Any] ?? [:]
@@ -221,7 +221,7 @@ final class HermesVoiceConfigurationService: ObservableObject {
             await reload()
             return true
         } catch {
-            errorMessage = "Could not save \(sectionKey).provider: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not save \(sectionKey).provider: \(error.localizedDescription)")
             return false
         }
     }
@@ -234,7 +234,7 @@ final class HermesVoiceConfigurationService: ObservableObject {
                 body: ["provider": rowName]
             )
             if let error = response["error"] as? String, !error.isEmpty {
-                errorMessage = "Could not select \(rowName): \(error)"
+                errorMessage = AppLocalization.string("Could not select \(rowName): \(error)")
                 return false
             }
             await reload()
@@ -242,11 +242,11 @@ final class HermesVoiceConfigurationService: ObservableObject {
                 // The write landed; Hermes is flagging that the managed route
                 // still needs sign-in. Diagnostic, never a silent failure.
                 let feature = kind == .stt ? "speech-to-text" : "speech"
-                errorMessage = "Hermes saved this selection, but the Nous subscription needs sign-in before \(feature) can use it."
+                errorMessage = AppLocalization.string("Hermes saved this selection, but the Nous subscription needs sign-in before \(feature) can use it.")
             }
             return true
         } catch {
-            errorMessage = "Could not select \(rowName): \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not select \(rowName): \(error.localizedDescription)")
             return false
         }
     }
@@ -258,7 +258,7 @@ final class HermesVoiceConfigurationService: ObservableObject {
         }
         let stored = VoiceConfigurationParser.storedValue(for: value, key: key)
         guard var config = try? await requester.requestJSON(path: profilePath("/api/config"), method: "GET", body: nil) else {
-            errorMessage = "Could not load voice settings to save this change."
+            errorMessage = AppLocalization.string("Could not load voice settings to save this change.")
             return false
         }
         // One clear decision, derived from trimmed input, drives both the
@@ -289,7 +289,7 @@ final class HermesVoiceConfigurationService: ObservableObject {
             if key == "tts.provider" { snapshot.selectedTTSProvider = value }
             return true
         } catch {
-            errorMessage = "Could not save \(key): \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not save \(key): \(error.localizedDescription)")
             return false
         }
     }
@@ -307,7 +307,7 @@ final class HermesVoiceConfigurationService: ObservableObject {
             await reload()
             return true
         } catch {
-            errorMessage = "Could not save credential: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not save credential: \(error.localizedDescription)")
             return false
         }
     }

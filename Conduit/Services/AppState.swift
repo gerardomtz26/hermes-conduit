@@ -2341,7 +2341,7 @@ final class AppState: ObservableObject {
     func selectAppIcon(_ choice: AppIconChoice) async -> Bool {
         guard choice != appIconChoice else { return true }
         guard UIApplication.shared.supportsAlternateIcons else {
-            errorMessage = "This build does not include alternate app icons."
+            errorMessage = AppLocalization.string("This build does not include alternate app icons.")
             return false
         }
 
@@ -2349,7 +2349,7 @@ final class AppState: ObservableObject {
             UIApplication.shared.setAlternateIconName(choice.alternateIconName) { [weak self] error in
                 Task { @MainActor in
                     if let error {
-                        self?.errorMessage = "Could not change the app icon: \(error.localizedDescription)"
+                        self?.errorMessage = AppLocalization.string("Could not change the app icon: \(error.localizedDescription)")
                         continuation.resume(returning: false)
                     } else {
                         self?.appIconChoice = choice
@@ -2450,7 +2450,7 @@ final class AppState: ObservableObject {
             isConnecting = false
             turnState = .reconnecting
             lastConnectionFailure = failureKind
-            errorMessage = "The connection to Hermes was lost. (UI test stub)"
+            errorMessage = AppLocalization.string("The connection to Hermes was lost. (UI test stub)")
             showLogin = false
             return
         }
@@ -3322,7 +3322,7 @@ final class AppState: ObservableObject {
                 return chatResumeSyncInterruptionOutcome(for: automaticWorkToken)
             }
             turnState = .reconnecting
-            errorMessage = "Failed to load gateway sessions: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Failed to load gateway sessions: \(error.localizedDescription)")
             settleReconciliation(
                 token,
                 automaticSyncOperationID: automaticOperationID
@@ -3689,7 +3689,7 @@ final class AppState: ObservableObject {
                 if turnState == .synchronizing {
                     turnState = .idle
                 }
-                errorMessage = "Hermes returned a different conversation while resuming this one. Try reopening it."
+                errorMessage = AppLocalization.string("Hermes returned a different conversation while resuming this one. Try reopening it.")
                 settleReconciliation(token, automaticSyncOperationID: automaticSyncOperationID)
                 chatResumeCoordinator.abandonPendingAutomaticSync()
                 return false
@@ -4055,7 +4055,7 @@ final class AppState: ObservableObject {
                 // must not claim the backend lacks pagination).
                 errorMessage = error.localizedDescription
             default:
-                errorMessage = "Failed to restore this conversation: \(error.localizedDescription)"
+                errorMessage = AppLocalization.string("Failed to restore this conversation: \(error.localizedDescription)")
             }
             settleReconciliation(token, automaticSyncOperationID: automaticSyncOperationID)
             chatResumeCoordinator.abandonPendingAutomaticSync()
@@ -4124,7 +4124,7 @@ final class AppState: ObservableObject {
             if let returnedProfile = created.profile,
                !profilesMatch(returnedProfile, profile) {
                 turnState = .idle
-                errorMessage = "Hermes created this conversation in \(profileDisplayName(returnedProfile)), not \(profileDisplayName(profile)). It was not opened."
+                errorMessage = AppLocalization.string("Hermes created this conversation in \(profileDisplayName(returnedProfile)), not \(profileDisplayName(profile)). It was not opened.")
                 settleReconciliation(token, automaticSyncOperationID: automaticSyncOperationID)
                 chatResumeCoordinator.abandonPendingAutomaticSync()
                 await loadSessions(forceRefresh: true)
@@ -4133,7 +4133,7 @@ final class AppState: ObservableObject {
             let runtimeSessionID = created.sessionId.isEmpty ? (created.storedSessionId ?? "") : created.sessionId
             guard !runtimeSessionID.isEmpty else {
                 turnState = .idle
-                errorMessage = "Hermes created a conversation without a session ID."
+                errorMessage = AppLocalization.string("Hermes created a conversation without a session ID.")
                 settleReconciliation(token, automaticSyncOperationID: automaticSyncOperationID)
                 chatResumeCoordinator.abandonPendingAutomaticSync()
                 return
@@ -4241,7 +4241,7 @@ final class AppState: ObservableObject {
                 return
             }
             turnState = .idle
-            errorMessage = "Failed to create session: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Failed to create session: \(error.localizedDescription)")
             settleReconciliation(token, automaticSyncOperationID: automaticSyncOperationID)
             chatResumeCoordinator.abandonPendingAutomaticSync()
             if resumePurpose == .automaticReturn {
@@ -4401,7 +4401,7 @@ final class AppState: ObservableObject {
             turnState = .running
         } else if TurnState.fromGatewayRunning(result.snapshot.running) == .unsupportedGateway {
             turnState = .unsupportedGateway
-            errorMessage = "This Hermes gateway must support session turn state. Update Hermes to enable message, stop, and steer controls."
+            errorMessage = AppLocalization.string("This Hermes gateway must support session turn state. Update Hermes to enable message, stop, and steer controls.")
             return true
         } else {
             turnState = TurnState.fromGatewayRunning(result.snapshot.running)
@@ -5170,7 +5170,7 @@ final class AppState: ObservableObject {
                 isConnecting = false
                 turnState = .reconnecting
                 lastConnectionFailure = ConnectionFailureClassifier.classify(error)
-                errorMessage = "Failed to refresh the dashboard session: \(error.localizedDescription)"
+                errorMessage = AppLocalization.string("Failed to refresh the dashboard session: \(error.localizedDescription)")
                 scheduleReconnect(purpose: continuationPurpose)
             }
             return
@@ -6701,7 +6701,7 @@ final class AppState: ObservableObject {
                 guard let activeClient, self.client === activeClient else { return false }
             }
             guard requiredViewportTransitionGeneration.map({ chatViewportTransitionIsCurrent(generation: $0) }) ?? true else { return false }
-            errorMessage = "Failed to load sessions: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Failed to load sessions: \(error.localizedDescription)")
             return false
         }
     }
@@ -6732,7 +6732,7 @@ final class AppState: ObservableObject {
             archivedSessions = uniqueSessions(loaded.filter { sessionBelongsToProfile($0, profile: profile) })
         } catch {
             guard profile == activeProfile else { return }
-            errorMessage = "Could not load archived conversations: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not load archived conversations: \(error.localizedDescription)")
         }
     }
 
@@ -6749,7 +6749,7 @@ final class AppState: ObservableObject {
               sessionBelongsToProfile(session, profile: activeProfile),
               let dashboardTicketBridge else { return false }
         if archived, isBusy, sessionMatchesActiveSession(session) {
-            errorMessage = "Stop the active response before archiving this conversation."
+            errorMessage = AppLocalization.string("Stop the active response before archiving this conversation.")
             return false
         }
 
@@ -6871,7 +6871,7 @@ final class AppState: ObservableObject {
               sessionBelongsToProfile(session, profile: activeProfile),
               let dashboardTicketBridge else { return false }
         if isBusy, sessionMatchesActiveSession(session) {
-            errorMessage = "Stop the active response before deleting this conversation."
+            errorMessage = AppLocalization.string("Stop the active response before deleting this conversation.")
             return false
         }
 
@@ -6900,7 +6900,7 @@ final class AppState: ObservableObject {
             return true
         } catch {
             guard profile == activeProfile else { return false }
-            errorMessage = "Could not delete this conversation: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not delete this conversation: \(error.localizedDescription)")
             return false
         }
     }
@@ -7066,7 +7066,7 @@ final class AppState: ObservableObject {
         if let session = (sessions + cronSessions).first(where: {
             $0.id == sessionId || $0.alternateIds.contains(sessionId)
         }), !sessionBelongsToProfile(session, profile: activeProfile) {
-            errorMessage = "That conversation belongs to another workspace. Switch profiles to open it."
+            errorMessage = AppLocalization.string("That conversation belongs to another workspace. Switch profiles to open it.")
             return false
         }
         let transitionGeneration: UInt64
@@ -7389,7 +7389,7 @@ final class AppState: ObservableObject {
     func createNewSession(cwd: String? = nil) async {
         guard !isProfileSwitching, isConnected, !isConnecting, let client else {
             if isProfileSwitching || isConnecting {
-                errorMessage = "Wait for the workspace switch to finish before starting a conversation."
+                errorMessage = AppLocalization.string("Wait for the workspace switch to finish before starting a conversation.")
             }
             return
         }
@@ -7449,7 +7449,7 @@ final class AppState: ObservableObject {
             return SessionBranchMessage(role: message.role, content: trimmed)
         }
         guard !prefix.isEmpty else {
-            errorMessage = "There is no message history to branch from."
+            errorMessage = AppLocalization.string("There is no message history to branch from.")
             return
         }
 
@@ -7488,7 +7488,7 @@ final class AppState: ObservableObject {
             if let returnedProfile = branched.profile,
                !profilesMatch(returnedProfile, profile) {
                 turnState = previousTurnState
-                errorMessage = "Hermes created this branch in \(profileDisplayName(returnedProfile)), not \(profileDisplayName(profile)). It was not opened."
+                errorMessage = AppLocalization.string("Hermes created this branch in \(profileDisplayName(returnedProfile)), not \(profileDisplayName(profile)). It was not opened.")
                 guard await loadSessions(
                     forceRefresh: true,
                     requiredViewportTransitionGeneration: transitionGeneration
@@ -7572,7 +7572,7 @@ final class AppState: ObservableObject {
                   profile == activeProfile,
                   self.client === client else { return }
             turnState = previousTurnState
-            errorMessage = "Could not branch conversation: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not branch conversation: \(error.localizedDescription)")
         }
     }
 
@@ -7746,7 +7746,7 @@ final class AppState: ObservableObject {
 
         if isBusy {
             guard attachments.isEmpty else {
-                errorMessage = "Attachments can only be sent in a new message, after the current response finishes."
+                errorMessage = AppLocalization.string("Attachments can only be sent in a new message, after the current response finishes.")
                 return false
             }
 
@@ -7768,7 +7768,7 @@ final class AppState: ObservableObject {
         if turnState == .idle, turnStateIsStale,
            await correctStaleIdleTurnState(using: submissionContext) {
             guard attachments.isEmpty else {
-                errorMessage = "Attachments can only be sent in a new message, after the current response finishes."
+                errorMessage = AppLocalization.string("Attachments can only be sent in a new message, after the current response finishes.")
                 return false
             }
             switch busyInputMode {
@@ -7788,7 +7788,7 @@ final class AppState: ObservableObject {
         // turn — the same busy-edge rule the freshness gate enforces.
         if turnState.isRunning {
             guard attachments.isEmpty else {
-                errorMessage = "Attachments can only be sent in a new message, after the current response finishes."
+                errorMessage = AppLocalization.string("Attachments can only be sent in a new message, after the current response finishes.")
                 return false
             }
             switch busyInputMode {
@@ -7820,7 +7820,7 @@ final class AppState: ObservableObject {
                 // routes through the configured busy submission, exactly like
                 // a stale-idle correction to running.
                 guard attachments.isEmpty else {
-                    errorMessage = "Attachments can only be sent in a new message, after the current response finishes."
+                    errorMessage = AppLocalization.string("Attachments can only be sent in a new message, after the current response finishes.")
                     return false
                 }
                 switch busyInputMode {
@@ -8334,7 +8334,7 @@ final class AppState: ObservableObject {
                 guard isCurrentComposerSubmission(submissionContext) else { return false }
             } catch {
                 guard isCurrentComposerSubmission(submissionContext) else { return false }
-                errorMessage = "Attachment failed: \(error.localizedDescription)"
+                errorMessage = AppLocalization.string("Attachment failed: \(error.localizedDescription)")
                 await recoverComposerSubmission(using: submissionContext)
                 return false
             }
@@ -8594,7 +8594,7 @@ final class AppState: ObservableObject {
                 // failed send must not paint an error onto the session the
                 // user switched to while recovery was suspended.
                 if isCurrentComposerSubmission(submissionContext) {
-                    errorMessage = "Failed to send: \(error.localizedDescription)"
+                    errorMessage = AppLocalization.string("Failed to send: \(error.localizedDescription)")
                 }
                 if !reconnected, isCurrentComposerSubmission(submissionContext) {
                     await recoverComposerSubmission(using: submissionContext)
@@ -8604,7 +8604,7 @@ final class AppState: ObservableObject {
                 return false
             }
             if isCurrentComposerSubmission(submissionContext) {
-                errorMessage = "Failed to send: \(error.localizedDescription)"
+                errorMessage = AppLocalization.string("Failed to send: \(error.localizedDescription)")
             }
             await recoverComposerSubmission(using: submissionContext)
             return false
@@ -9001,7 +9001,7 @@ final class AppState: ObservableObject {
             return true
         } catch {
             guard isCurrentComposerSubmission(submissionContext) else { return false }
-            errorMessage = "Unable to change YOLO mode: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Unable to change YOLO mode: \(error.localizedDescription)")
             return false
         }
     }
@@ -9278,7 +9278,7 @@ final class AppState: ObservableObject {
         case "new", "reset":
             guard !isProfileSwitching, isConnected, !isConnecting else {
                 if isProfileSwitching || isConnecting {
-                    errorMessage = "Wait for the workspace switch to finish before starting a conversation."
+                    errorMessage = AppLocalization.string("Wait for the workspace switch to finish before starting a conversation.")
                 }
                 return
             }
@@ -9287,12 +9287,12 @@ final class AppState: ObservableObject {
             return
         case "branch", "fork":
             guard !isBusy else {
-                errorMessage = "Stop the active response before branching this conversation."
+                errorMessage = AppLocalization.string("Stop the active response before branching this conversation.")
                 return
             }
             guard !isBranchingChat, !isProfileSwitching else { return }
             guard let assistantMessage = messages.last(where: { $0.role == .assistant }) else {
-                errorMessage = "There is no assistant response to branch from yet."
+                errorMessage = AppLocalization.string("There is no assistant response to branch from yet.")
                 return
             }
             guard let messageIndex = messages.firstIndex(where: { $0.id == assistantMessage.id }),
@@ -9304,7 +9304,7 @@ final class AppState: ObservableObject {
                           ?? message.content
                       return !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                   }) else {
-                errorMessage = "There is no message history to branch from."
+                errorMessage = AppLocalization.string("There is no message history to branch from.")
                 return
             }
             cancelChatResumeRestoration()
@@ -9615,12 +9615,12 @@ final class AppState: ObservableObject {
                 return false
             }
 
-            errorMessage = "Could not redirect the active response: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not redirect the active response: \(error.localizedDescription)")
             await recoverComposerSubmission(using: submissionContext)
             return false
         } catch {
             guard isCurrentOrAliasedComposerSubmission(submissionContext) else { return false }
-            errorMessage = "Could not redirect the active response: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not redirect the active response: \(error.localizedDescription)")
             await recoverComposerSubmission(using: submissionContext)
             return false
         }
@@ -9696,7 +9696,7 @@ final class AppState: ObservableObject {
             return true
         } catch {
             guard isCurrentOrAliasedComposerSubmission(currentContext) else { return false }
-            errorMessage = "Could not interrupt the active response: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not interrupt the active response: \(error.localizedDescription)")
             await recoverComposerSubmission(using: currentContext)
             return false
         }
@@ -10993,7 +10993,7 @@ final class AppState: ObservableObject {
             guard chatViewportTransitionIsCurrent(generation: transitionGeneration) else {
                 return false
             }
-            errorMessage = "Could not switch workspace: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not switch workspace: \(error.localizedDescription)")
             clearPendingDecisionRestorationGuard()
             // The pre-switch reset neutralized the approval state; restore it
             // with the rest of the previous profile or a failed switch loses
@@ -11303,7 +11303,7 @@ final class AppState: ObservableObject {
                 projects = []
                 supportsProjects = false
             } else {
-                errorMessage = "Could not load \(project.title): \(error.localizedDescription)"
+                errorMessage = AppLocalization.string("Could not load \(project.title): \(error.localizedDescription)")
             }
             return nil
         }
@@ -11340,7 +11340,7 @@ final class AppState: ObservableObject {
                 projects = []
                 supportsProjects = false
             } else {
-                errorMessage = "Could not create the project: \(error.localizedDescription)"
+                errorMessage = AppLocalization.string("Could not create the project: \(error.localizedDescription)")
             }
             return false
         }
@@ -11495,7 +11495,7 @@ final class AppState: ObservableObject {
             if let index = skills.firstIndex(where: { $0.name == name }) {
                 skills[index].enabled = !enabled
             }
-            errorMessage = "Could not update skill: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not update skill: \(error.localizedDescription)")
         }
     }
 
@@ -11519,7 +11519,7 @@ final class AppState: ObservableObject {
             if let index = toolsets.firstIndex(where: { $0.name == name }) {
                 toolsets[index].enabled = !enabled
             }
-            errorMessage = "Could not update toolset: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not update toolset: \(error.localizedDescription)")
         }
     }
 
@@ -11570,7 +11570,7 @@ final class AppState: ObservableObject {
             }
         } catch {
             guard profile == activeProfile else { return }
-            errorMessage = "Could not load scheduled jobs: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not load scheduled jobs: \(error.localizedDescription)")
         }
     }
 
@@ -11606,7 +11606,7 @@ final class AppState: ObservableObject {
             }
         } catch {
             guard profile == activeProfile else { return }
-            errorMessage = "Could not load scheduled-job runs: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not load scheduled-job runs: \(error.localizedDescription)")
         }
     }
 
@@ -11632,7 +11632,10 @@ final class AppState: ObservableObject {
             }
             return true
         } catch {
-            errorMessage = "Could not \(action) scheduled job: \(error.localizedDescription)"
+            // The wire token stays raw for the URL path; the sentence shows
+            // the localized verb.
+            let actionVerb = AppLocalization.string(String.LocalizationValue(action))
+            errorMessage = AppLocalization.string("Could not \(actionVerb) scheduled job: \(error.localizedDescription)")
             return false
         }
     }
@@ -11727,7 +11730,7 @@ final class AppState: ObservableObject {
                 profileSettingValue(in: config, key: key).map { (key, $0) }
             })
         } catch {
-            errorMessage = "Could not load profile settings: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not load profile settings: \(error.localizedDescription)")
             return [:]
         }
     }
@@ -11777,7 +11780,7 @@ final class AppState: ObservableObject {
             let reasoning = config["reasoning"] as? String ?? config["reasoning_effort"] as? String ?? "medium"
             return ProfileModelDefaults(providers: providers, model: model, provider: provider, reasoning: reasoning)
         } catch {
-            errorMessage = "Could not load model defaults: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not load model defaults: \(error.localizedDescription)")
             return nil
         }
     }
@@ -11808,7 +11811,7 @@ final class AppState: ObservableObject {
             )
             return true
         } catch {
-            errorMessage = "Could not save model defaults: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not save model defaults: \(error.localizedDescription)")
             return false
         }
     }
@@ -11850,7 +11853,7 @@ final class AppState: ObservableObject {
             }
             return true
         } catch {
-            errorMessage = "Could not save \(key): \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not save \(key): \(error.localizedDescription)")
             return false
         }
     }
@@ -11916,7 +11919,7 @@ final class AppState: ObservableObject {
             return true
         } catch {
             if activeProfile == profile { displayPreferences = previous }
-            errorMessage = "Could not save display preference: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not save display preference: \(error.localizedDescription)")
             return false
         }
     }
@@ -11956,7 +11959,7 @@ final class AppState: ObservableObject {
             return true
         } catch {
             busyInputMode = previous
-            errorMessage = "Could not save message behavior: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not save message behavior: \(error.localizedDescription)")
             return false
         }
     }
@@ -12882,7 +12885,7 @@ final class AppState: ObservableObject {
 
     func openWorkspace() async {
         guard !runtime.cwd.isEmpty else {
-            errorMessage = "Workspace unavailable: Hermes has not reported a working directory for this session yet."
+            errorMessage = AppLocalization.string("Workspace unavailable: Hermes has not reported a working directory for this session yet.")
             return
         }
         workspaceRoot = runtime.cwd
@@ -13379,9 +13382,9 @@ final class AppState: ObservableObject {
                 errorMessage = AppLocalization.string("Speech Recognition permission was denied. Please enable it in Settings > Conduit > Speech Recognition.")
             case .unsupported(let localeIdentifier):
                 let localeName = Locale.current.localizedString(forIdentifier: localeIdentifier) ?? localeIdentifier
-                errorMessage = "On-device speech recognition is not available for \(localeName)."
+                errorMessage = AppLocalization.string("On-device speech recognition is not available for \(localeName).")
             default:
-                errorMessage = "On-device speech recognition is unavailable."
+                errorMessage = AppLocalization.string("On-device speech recognition is unavailable.")
             }
             return false
         }

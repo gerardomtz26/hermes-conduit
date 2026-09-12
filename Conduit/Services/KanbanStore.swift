@@ -191,7 +191,7 @@ final class KanbanStore: ObservableObject {
         let generation = loadGeneration
         guard let service else {
             if board == nil {
-                errorMessage = "Connect to a Hermes dashboard to use Kanban."
+                errorMessage = AppLocalization.string("Connect to a Hermes dashboard to use Kanban.")
             }
             return
         }
