@@ -50,7 +50,7 @@ enum AuthClientError: LocalizedError {
                 return AppLocalization.string("Login failed: no response from the dashboard.")
             }
             if !(401...403).contains(status) {
-                return AppLocalization.string("Login failed: HTTP \(status)")
+                return AppLocalization.string("Login failed: HTTP \(String(status))")
             }
             return AppLocalization.string("Login failed. Check your dashboard credentials and try again.")
         case .ticketFailed(_, let detail):

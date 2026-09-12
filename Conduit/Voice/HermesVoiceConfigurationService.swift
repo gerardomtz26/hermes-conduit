@@ -547,7 +547,7 @@ enum VoiceConfigurationParser {
             if id == "openai" || id == "nous" {
                 shared += [
                     .init(key: "\(root).base_url", label: AppLocalization.string("Base URL"), help: Self.customEndpointHelp("OpenAI"), kind: .text, defaultValue: ""),
-                    .init(key: "\(root).speed", label: AppLocalization.string("Speed"), help: "Speech rate multiplier (0.25–4.0); Hermes clamps this range. Leave blank to remove the override. Note: applies to Hermes' whole-file synthesis — upstream's current PCM streaming path does not use this setting.", kind: .decimal, defaultValue: "1", numericRange: 0.25...4.0)
+                    .init(key: "\(root).speed", label: AppLocalization.string("Speed"), help: AppLocalization.string("Speech rate multiplier (0.25–4.0); Hermes clamps this range. Leave blank to remove the override. Note: applies to Hermes' whole-file synthesis — upstream's current PCM streaming path does not use this setting."), kind: .decimal, defaultValue: "1", numericRange: 0.25...4.0)
                 ]
             }
         }

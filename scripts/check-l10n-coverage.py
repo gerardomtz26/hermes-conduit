@@ -1,17 +1,27 @@
 #!/usr/bin/env python3
-"""Localization catalog coverage: every localizable call site must resolve,
-and every required key must carry a REAL zh-Hans translation.
+"""Localization catalog coverage: every localizable call site must resolve
+against a runtime-accurate key, and every required key must carry a REAL
+zh-Hans translation.
 
 Scans Conduit Swift sources for sites that look up String Catalog keys -
 
   1. AppLocalization.string("...") / String(localized: "...") - the
-     interpolated skeleton must exist in Localizable.xcstrings as a format
-     string (either %@ or %lld placeholder forms are accepted).
+     skeleton must exist in Localizable.xcstrings with the SAME placeholder
+     types the runtime will request: `\\(String(x))`-style interpolations
+     request %@, integer-shaped expressions (Int casts, .count/.index/
+     .total, count-like identifiers, digit arithmetic) request %lld.
+     Placeholders are never normalized across type families, so a source
+     Int interpolation against a %@ catalog key (or vice versa) fails.
   2. SwiftUI literal initializers (Text/Button/Label/TextField/SecureField/
      Toggle/NavigationLink/Picker/ProgressView/ContentUnavailableView/
      Section/Menu/GroupBox) - a leading string literal is a
      LocalizedStringKey and is checked the same way.
-  3. LocalizedStringKey modifier literals (.alert / .confirmationDialog).
+  3. LocalizedStringKey modifiers (.alert / .confirmationDialog /
+     .navigationTitle / .accessibilityLabel / .accessibilityHint /
+     .accessibilityValue).
+  4. Raw user-facing String assignments/arguments that flow into
+     Text/Label/alert rendering: `errorMessage = "..."`, `help: "..."`,
+     `purposeText: "..."`.
 
 For every required key (static call sites plus the explicit REGRESSION_KEYS
 below - dynamic/ternary sites that cannot be extracted statically), the
@@ -23,8 +33,11 @@ checker then validates the zh-Hans localization:
   * every stringUnit leaf - direct or inside plural/device variations -
     must have state == "translated" and a non-empty value;
   * the printf placeholders of each localized value must match the key's
-    placeholders (type and count; positional forms compared by index), so a
-    translation can never break the runtime format substitution.
+    placeholder TYPE FAMILIES (object vs integer vs float) in count, order,
+    and positional index validity - %@ and %lld are never interchangeable;
+  * the value must not contain malformed literal Unicode escape sequences
+    (e.g. the text "\\u4e00") - those are double-escaped authoring bugs,
+    not legitimate backslash content.
 
 Any violation is reported with file:line (call sites) or by key (catalog)
 and fails the run.
@@ -53,19 +66,31 @@ SWIFTUI_LOCALIZED_INITIALIZERS = (
 # string literal is passed directly (there are String overloads too, but a
 # raw literal in a String-position branch is exactly the bug class this
 # checker exists for, so literal sites are always required to be keys).
-SWIFTUI_LOCALIZED_MODIFIERS = ("alert", "confirmationDialog")
+SWIFTUI_LOCALIZED_MODIFIERS = (
+    "alert", "confirmationDialog", "navigationTitle",
+    "accessibilityLabel", "accessibilityHint", "accessibilityValue",
+)
+
+# Raw user-facing String assignments/arguments that later flow into
+# Text/Label/alert rendering. Only literal right-hand sides are flagged.
+RAW_STRING_ASSIGNMENT_RE = re.compile(
+    r"\b(?:errorMessage|help|purposeText)\s*[:=]\s*\"")
 
 # Keys that are intentionally not statically present in the catalog: pure
 # variable passthroughs, separators, brand/protocol names, and placeholder
 # tokens that must never be translated.
 EXEMPT_KEYS = frozenset({
     "%@",            # verbatim variable passthrough
+    "%lld",          # bare numeric counter chip
     "%@ %@",         # two-variable passthrough
-    "%@/%@",         # numeric done/total counters
+    "%@: %@",        # speaker/field label passthrough ("You: text")
+    "%@/%@",         # numeric done/total counters (string-wrapped)
+    "%lld/%lld",     # numeric done/total counters (int interpolation)
     "%@.",           # numbered step prefix ("1.")
     "/", "•",        # separators
     "v%@",           # version prefix ("v1.2.3")
     "×%@",           # multiplier badge
+    "×%lld",         # multiplier badge (int interpolation)
     "A",             # typography size sample glyph
     "Conduit", "GitHub", "Hermes", "HTTP", "HTTPS",  # brand/protocol names
     "https://hermes.example", "https://push.milim.dev",  # literal URLs
@@ -116,7 +141,8 @@ REGRESSION_KEYS = (
     "Hermes asked %lld questions before it can continue",
     "Confirm %lld selected",
     # Dynamic display-label lookups invisible to the extractor: the config
-    # value display table and the archive/restore ternary.
+    # value display table, the archive/restore ternary, and the cron action
+    # verb display map (wire tokens stay raw in the URL path).
     "archive",
     "restore",
     "Manual",
@@ -141,6 +167,11 @@ REGRESSION_KEYS = (
     "Hype",
     "Session",
     "Skills & extensions",
+    "pause",
+    "resume",
+    "trigger",
+    # Ternary-branch suffix fragment in KanbanTaskDetailView's Unassigned row
+    "→ default",
 )
 
 CALL_RE = re.compile(
@@ -150,16 +181,58 @@ SWIFTUI_RE = re.compile(
 MODIFIER_RE = re.compile(
     r"\.\s*(" + "|".join(SWIFTUI_LOCALIZED_MODIFIERS) + r")\s*\(")
 
+# Malformed literal Unicode escapes in catalog VALUES, e.g. the text
+# "\u91cd" arriving as six visible characters instead of 重. Only the
+# backslash-u-hex shape is targeted; ordinary backslashes stay legal.
+MALFORMED_ESCAPE_RE = re.compile("\\\\u[0-9a-fA-F]{4}")
+
 _PLACEHOLDER_RE = re.compile(r"%(?:(\d+)\$)?([@df]|l{1,2}[diu]|lf|@|d|i|u|%)")
-# Normalize a printf spec to (position_or_None, type) with %d/%lld/%u/%i
-# folded to "int", %f/%lf to "float", %@ to "object".
+
+# Interpolation expressions that request an INTEGER runtime placeholder
+# (%lld) rather than an object (%@). String-hint wins: the documented
+# Conduit convention is to String()-wrap integers (avoids locale digit
+# grouping), so an explicit String(...) means %@.
+_STRING_HINT_RE = re.compile(
+    r"\bString\s*\(|localizedDescription|\.description\b|\.name\b|\.id\b"
+    r"|\.title\b|\.text\b|\.message\b|\.displayName\b|\.key\b")
+_INT_HINT_RE = re.compile(
+    r"\b(?:Int|UInt|Int8|Int16|Int32|Int64)\s*\("
+    r"|\.\s*count\b|\.\s*index\b|\.\s*total\b"
+    r"|\w*[Cc]ount\b|\w*[Ii]ndex\b|\w*[Tt]otal\b"
+    r"|^\s*[\d\s+\-*/().]+\s*$")
+
+
+def is_int_interpolation(expression: str) -> bool:
+    """Focused heuristic: does this interpolation request %lld at runtime?
+
+    Conservative by design - anything not matching the integer shapes below
+    is treated as an object (%@) placeholder, matching the codebase
+    convention of String()-wrapping non-plural interpolations.
+    """
+    if _STRING_HINT_RE.search(expression):
+        return False
+    return bool(_INT_HINT_RE.search(expression))
+
+
+def typed_skeleton(literal: str, expressions) -> str:
+    """Rebuild a literal with one placeholder per interpolation, typed by
+    the runtime argument family (%@ object / %lld integer)."""
+    parts = literal.split("%@")
+    if len(parts) - 1 != len(expressions):
+        return literal
+    out = []
+    for i, part in enumerate(parts):
+        out.append(part)
+        if i < len(expressions):
+            out.append("%lld" if is_int_interpolation(expressions[i]) else "%@")
+    return "".join(out)
 
 
 def placeholder_specs(formatted: str) -> list:
     """Extract (position, type) pairs from a printf-style format string.
 
     %% escapes are ignored. Positional forms (%1$@) keep their index;
-    non-positional forms get None.
+    non-positional forms get None. Type families: object / int / float.
     """
     specs = []
     i = 0
@@ -176,9 +249,9 @@ def placeholder_specs(formatted: str) -> list:
             continue
         position = int(match.group(1)) if match.group(1) else None
         body = match.group(2)
-        if body in ("@",):
+        if body == "@":
             kind = "object"
-        elif body in ("f", "lf", "F"):
+        elif body in ("f", "lf"):
             kind = "float"
         else:
             kind = "int"
@@ -193,8 +266,19 @@ def parse_swift_string_literal(source: str, start: int):
     literal is unterminated at EOF. Interpolations \\(...) collapse to a
     single placeholder; nested strings inside them are skipped.
     """
+    parsed = parse_swift_literal_parts(source, start)
+    if parsed is None:
+        return None
+    skeleton, end, exprs = parsed
+    return skeleton, end, bool(exprs)
+
+
+def parse_swift_literal_parts(source: str, start: int):
+    """Like parse_swift_string_literal but also returns the raw text of each
+    \\(...) interpolation expression, in order: (skeleton, end, exprs)."""
     assert source[start] == '"'
     out = []
+    exprs = []
     i = start + 1
     while i < len(source):
         ch = source[i]
@@ -206,9 +290,10 @@ def parse_swift_string_literal(source: str, start: int):
                 # Interpolation: skip to the matching close paren.
                 depth = 1
                 j = i + 2
+                expr_start = j
                 while j < len(source) and depth:
                     if source[j] == '"':
-                        parsed = parse_swift_string_literal(source, j)
+                        parsed = parse_swift_literal_parts(source, j)
                         if parsed is None:
                             return None
                         j = parsed[1] - 1
@@ -219,6 +304,7 @@ def parse_swift_string_literal(source: str, start: int):
                     j += 1
                 if depth:
                     return None
+                exprs.append(source[expr_start:j - 1])
                 out.append("%@")
                 i = j
             else:
@@ -227,7 +313,7 @@ def parse_swift_string_literal(source: str, start: int):
                 out.append(escapes.get(nxt, nxt))
                 i += 2
         elif ch == '"':
-            return "".join(out), i + 1, "%@" in out
+            return "".join(out), i + 1, exprs
         else:
             out.append(ch)
             i += 1
@@ -249,33 +335,36 @@ def strip_comment_lines(source: str) -> str:
 
 
 def extract_sites(source: str):
-    """Yield (key_skeleton, offset) for every checkable call site."""
+    """Yield (key_skeleton, offset) for every checkable call site.
+
+    Skeletons are runtime-accurate: each interpolation contributes %@ or
+    %lld according to the argument's type family.
+    """
     source = strip_comment_lines(source)
-    for match in CALL_RE.finditer(source):
-        i = match.end()
-        while i < len(source) and source[i] in " \t\n":
-            i += 1
-        if i < len(source) and source[i] == '"':
-            parsed = parse_swift_string_literal(source, i)
-            if parsed is not None and parsed[0]:
-                yield parsed[0], match.start()
-    for regex in (SWIFTUI_RE, MODIFIER_RE):
+    for regex in (CALL_RE, SWIFTUI_RE, MODIFIER_RE):
         for match in regex.finditer(source):
             i = match.end()
             while i < len(source) and source[i] in " \t\n":
                 i += 1
             if i < len(source) and source[i] == '"':
-                parsed = parse_swift_string_literal(source, i)
+                parsed = parse_swift_literal_parts(source, i)
                 if parsed is not None and parsed[0]:
-                    yield parsed[0], match.start()
+                    skeleton = typed_skeleton(parsed[0], parsed[2])
+                    yield skeleton, match.start()
+    for match in RAW_STRING_ASSIGNMENT_RE.finditer(source):
+        i = match.end() - 1  # position of the opening quote
+        if source[i] != '"':
+            continue
+        parsed = parse_swift_literal_parts(source, i)
+        if parsed is not None and parsed[0]:
+            skeleton = typed_skeleton(parsed[0], parsed[2])
+            yield skeleton, match.start()
 
 
 def catalog_has(catalog_keys: set, skeleton: str) -> bool:
-    if skeleton in catalog_keys:
-        return True
-    if "%@" in skeleton:
-        return skeleton.replace("%@", "%lld") in catalog_keys
-    return False
+    """Exact runtime-key match only. %@ and %lld are distinct type
+    families and never normalized into each other."""
+    return skeleton in catalog_keys
 
 
 def string_unit_leaves(localization) -> list:
@@ -288,6 +377,30 @@ def string_unit_leaves(localization) -> list:
             if "stringUnit" in unit:
                 leaves.append(unit["stringUnit"])
     return leaves
+
+
+def placeholders_compatible(key_specs, value_specs) -> bool:
+    """A translation's placeholders must substitute like the key's.
+
+    Types are always compared as multisets. Positions matter only when BOTH
+    sides are fully positional (a translation may introduce positional
+    forms %1$@ to reorder non-positional key arguments, which printf
+    handles). Positional indices in the translation must be valid for the
+    key's argument count.
+    """
+    key_types = sorted(kind for _, kind in key_specs)
+    value_types = sorted(kind for _, kind in value_specs)
+    if key_types != value_types:
+        return False
+    key_positional = all(pos is not None for pos, _ in key_specs)
+    value_positional = all(pos is not None for pos, _ in value_specs)
+    if key_positional and value_positional:
+        return sorted(key_specs) == sorted(value_specs)
+    # A partially-positional translation must still use valid indices.
+    for position, _ in value_specs:
+        if position is not None and not 1 <= position <= len(key_specs):
+            return False
+    return True
 
 
 def catalog_problems(catalog: dict) -> dict:
@@ -315,32 +428,15 @@ def catalog_problems(catalog: dict) -> dict:
             elif not value or not value.strip():
                 problems.setdefault(key, []).append(
                     f"{REQUIRED_LANGUAGE} value is empty")
+            elif MALFORMED_ESCAPE_RE.search(value):
+                problems.setdefault(key, []).append(
+                    f"{REQUIRED_LANGUAGE} value contains malformed literal "
+                    f"Unicode escape sequences (double-escaped authoring bug)")
             elif not placeholders_compatible(key_specs, placeholder_specs(value)):
                 problems.setdefault(key, []).append(
                     f"{REQUIRED_LANGUAGE} placeholders {placeholder_specs(value)} "
                     f"do not match key placeholders {key_specs}")
     return problems
-
-
-def placeholders_compatible(key_specs, value_specs) -> bool:
-    """A translation's placeholders must substitute like the key's.
-
-    Types are always compared as multisets. Positions matter only when BOTH
-    sides are fully positional (a translation may introduce positional
-    forms %1$@ to reorder non-positional key arguments, which printf
-    handles).
-    """
-    if sorted(key_specs) == sorted(value_specs):
-        return True
-    key_types = sorted(kind for _, kind in key_specs)
-    value_types = sorted(kind for _, kind in value_specs)
-    if key_types != value_types:
-        return False
-    key_positional = all(pos is not None for pos, _ in key_specs)
-    value_positional = all(pos is not None for pos, _ in value_specs)
-    if key_positional and value_positional:
-        return sorted(key_specs) == sorted(value_specs)
-    return True
 
 
 def required_key_problems(catalog: dict, required_keys) -> dict:
@@ -443,7 +539,7 @@ def main() -> int:
                 print(f"        {problem}")
     if not failed:
         print(f"OK: every catalog key has a real {REQUIRED_LANGUAGE} "
-              f"translation with matching placeholders.")
+              f"translation with type-matched placeholders.")
         return 0
     return 1
 

@@ -444,7 +444,7 @@ struct SessionList: View {
     private func sourceFilter(title: String, count: Int, source: SessionSource?) -> some View {
         Button { withAnimation(ConduitMotion.response) { Haptics.selection()
                 setSelectedSource(source) } } label: {
-            Text("\(title) \(count)")
+            Text("\(title) \(String(count))")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(selectedSource == source ? Color.conduitBackgroundColor : .secondary)
                 .padding(.horizontal, 11).padding(.vertical, 7)

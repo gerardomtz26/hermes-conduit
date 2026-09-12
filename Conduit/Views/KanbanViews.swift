@@ -120,7 +120,7 @@ enum KanbanSelectionChromePolicy {
 
     /// ONE logical single-line label — never a vertical letter column.
     static func selectedCountLabel(count: Int) -> String {
-        count == 1 ? AppLocalization.string("1 task selected") : AppLocalization.string("\(count) tasks selected")
+        count == 1 ? AppLocalization.string("1 task selected") : AppLocalization.string("\(String(count)) tasks selected")
     }
 
     /// One bulk-action control in the bottom bar. `title == nil` renders it
@@ -1118,7 +1118,7 @@ struct KanbanView: View {
 
     private var selectedCountLabel: String {
         let n = selectedTaskIDs.count
-        return n == 1 ? AppLocalization.string("1 task selected") : AppLocalization.string("\(n) tasks selected")
+        return n == 1 ? AppLocalization.string("1 task selected") : AppLocalization.string("\(String(n)) tasks selected")
     }
 
     private var canRunBulk: Bool {
@@ -1127,7 +1127,7 @@ struct KanbanView: View {
 
     private var bulkArchiveTitle: String {
         let n = pendingBulkOperation?.ids.count ?? selectedTaskIDs.count
-        return n == 1 ? AppLocalization.string("Archive 1 Task?") : AppLocalization.string("Archive \(n) Tasks?")
+        return n == 1 ? AppLocalization.string("Archive 1 Task?") : AppLocalization.string("Archive \(String(n)) Tasks?")
     }
 
     private func bulkArchiveActionTitle(count: Int) -> String {
@@ -1136,7 +1136,7 @@ struct KanbanView: View {
 
     private var bulkDeleteTitle: String {
         let n = pendingBulkDelete?.taskIDs.count ?? selectedTaskIDs.count
-        return n == 1 ? AppLocalization.string("Delete 1 Task?") : AppLocalization.string("Delete \(n) Tasks?")
+        return n == 1 ? AppLocalization.string("Delete 1 Task?") : AppLocalization.string("Delete \(String(n)) Tasks?")
     }
 
     private func bulkDeleteActionTitle(count: Int) -> String {
@@ -1177,7 +1177,7 @@ struct KanbanView: View {
 
     private var moveSheetTitle: String {
         let n = bulkStagedSelection?.ids.count ?? 0
-        return n == 1 ? AppLocalization.string("Move 1 Task") : AppLocalization.string("Move \(n) Tasks")
+        return n == 1 ? AppLocalization.string("Move 1 Task") : AppLocalization.string("Move \(String(n)) Tasks")
     }
 
     private var bulkAssignSheet: some View {
@@ -1221,12 +1221,12 @@ struct KanbanView: View {
 
     private var assignSheetTitle: String {
         let n = bulkStagedSelection?.ids.count ?? 0
-        return n == 1 ? AppLocalization.string("Assign 1 Task") : AppLocalization.string("Assign \(n) Tasks")
+        return n == 1 ? AppLocalization.string("Assign 1 Task") : AppLocalization.string("Assign \(String(n)) Tasks")
     }
 
     private var prioritySheetTitle: String {
         let n = bulkStagedSelection?.ids.count ?? 0
-        return n == 1 ? AppLocalization.string("Set Priority") : AppLocalization.string("Set Priority (\(n) tasks)")
+        return n == 1 ? AppLocalization.string("Set Priority") : AppLocalization.string("Set Priority (\(String(n)) tasks)")
     }
 
     private var bulkPrioritySheet: some View {
@@ -1982,7 +1982,7 @@ private struct KanbanCardView: View {
                     .foregroundStyle(.orange)
             }
             if let progress = task.progress, progress.total > 0 {
-                Label("\(progress.done)/\(progress.total)", systemImage: "checklist")
+                Label("\(String(progress.done))/\(String(progress.total))", systemImage: "checklist")
             }
             if let comments = task.commentCount, comments > 0 {
                 Label(String(comments), systemImage: "bubble.left")

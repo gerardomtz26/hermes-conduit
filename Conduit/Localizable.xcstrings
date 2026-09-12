@@ -111,6 +111,22 @@
         }
       }
     },
+    "%@ tasks selected" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld tasks selected"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已选择 %@ 个任务"
+          }
+        }
+      }
+    },
     "%@ tasks updated" : {
       "localizations" : {
         "en" : {
@@ -359,22 +375,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "已选 %lld 个"
-          }
-        }
-      }
-    },
-    "%lld tasks selected" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%lld tasks selected"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "已选 %lld 个任务"
           }
         }
       }
@@ -1077,6 +1077,22 @@
         }
       }
     },
+    "Archive %@ Tasks?" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Archive %lld Tasks?"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "归档 %@ 个任务？"
+          }
+        }
+      }
+    },
     "Archive %lld" : {
       "localizations" : {
         "en" : {
@@ -1089,22 +1105,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "归档 %lld"
-          }
-        }
-      }
-    },
-    "Archive %lld Tasks?" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Archive %lld Tasks?"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "归档 %lld 个任务？"
           }
         }
       }
@@ -1285,7 +1285,7 @@
         }
       }
     },
-    "Assign %lld Tasks" : {
+    "Assign %@ Tasks" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -1296,7 +1296,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "指派 %lld 个任务"
+            "value" : "指派 %@ 个任务"
           }
         }
       }
@@ -3851,12 +3851,12 @@
         }
       }
     },
-    "Dashboard request failed (%lld)." : {
+    "Dashboard request failed (%@)." : {
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "仪表盘请求失败（%lld）。"
+            "value" : "仪表盘请求失败（%@）。"
           }
         }
       }
@@ -4223,6 +4223,32 @@
         }
       }
     },
+    "Delete %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "删除 %@"
+          }
+        }
+      }
+    },
+    "Delete %@ Tasks?" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Delete %lld Tasks?"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "删除 %@ 个任务？"
+          }
+        }
+      }
+    },
     "Delete %lld" : {
       "localizations" : {
         "en" : {
@@ -4235,22 +4261,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "删除 %lld"
-          }
-        }
-      }
-    },
-    "Delete %lld Tasks?" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Delete %lld Tasks?"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "删除 %lld 个任务？"
           }
         }
       }
@@ -6863,6 +6873,16 @@
         }
       }
     },
+    "Login failed: HTTP %@" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "登录失败：HTTP %@"
+          }
+        }
+      }
+    },
     "Login failed: HTTP %lld" : {
       "localizations" : {
         "zh-Hans" : {
@@ -7253,6 +7273,22 @@
         }
       }
     },
+    "Move %@ Tasks" : {
+      "localizations" : {
+        "en" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Move %lld Tasks"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "移动 %@ 个任务"
+          }
+        }
+      }
+    },
     "Move %@ earlier" : {
       "localizations" : {
         "en" : {
@@ -7281,22 +7317,6 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "将 %@ 后移"
-          }
-        }
-      }
-    },
-    "Move %lld Tasks" : {
-      "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Move %lld Tasks"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "移动 %lld 个任务"
           }
         }
       }
@@ -9788,7 +9808,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "\\u91cd\\u547d\\u540d\\u5bf9\\u8bdd"
+            "value" : "重命名对话"
           }
         }
       }
@@ -10747,7 +10767,7 @@
         }
       }
     },
-    "Set Priority (%lld tasks)" : {
+    "Set Priority (%@ tasks)" : {
       "localizations" : {
         "en" : {
           "stringUnit" : {
@@ -10758,7 +10778,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "设置优先级（%lld 个任务）"
+            "value" : "设置优先级（%@ 个任务）"
           }
         }
       }
@@ -11305,6 +11325,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "语音提供方、凭据与设备端启用"
+          }
+        }
+      }
+    },
+    "Speech rate multiplier (0.25–4.0); Hermes clamps this range. Leave blank to remove the override. Note: applies to Hermes' whole-file synthesis — upstream's current PCM streaming path does not use this setting." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "语速倍率（0.25–4.0）；Hermes 会将数值限制在此范围内。留空即可移除覆盖设置。注意：仅适用于 Hermes 的整段合成——上游当前的 PCM 流式路径不使用此设置。"
           }
         }
       }
@@ -14549,6 +14579,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "— 无父任务 —"
+          }
+        }
+      }
+    },
+    "→ default" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "→ 默认"
           }
         }
       }

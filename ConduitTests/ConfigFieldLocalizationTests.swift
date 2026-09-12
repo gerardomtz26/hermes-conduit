@@ -111,4 +111,45 @@ final class ConfigFieldLocalizationTests: XCTestCase {
             }
         }
     }
+
+    /// Raw protocol values must be byte-identical under EVERY App Language.
+    /// Each iteration actually persists the selection first, so the loop
+    /// exercises different active localization states rather than testing
+    /// the same language repeatedly.
+    func testProtocolValuesAreIdenticalUnderEveryAppLanguage() {
+        let standardDefaults = UserDefaults.standard
+        defer { standardDefaults.removeObject(forKey: AppLanguageStore.defaultsKey) }
+        let baseline = allFields.map { field -> (key: String, control: ProfileSettingField.Control) in
+            (field.key, field.control)
+        }
+        XCTAssertFalse(baseline.isEmpty)
+        for language in AppLanguage.allCases {
+            standardDefaults.set(language.rawValue, forKey: AppLanguageStore.defaultsKey)
+            XCTAssertEqual(AppLanguage.current, language,
+                           "each iteration must activate a different language")
+            let current = allFields.map { ($0.key, $0.control) }
+            for (before, after) in zip(baseline, current) {
+                XCTAssertEqual(before.key, after.key)
+                switch (before.control, after.control) {
+                case (.options(let a, let aDefault), .options(let b, let bDefault)):
+                    XCTAssertEqual(a, b, "\(before.key) options must not localize under \(language)")
+                    XCTAssertEqual(aDefault, bDefault, "\(before.key) default must not localize under \(language)")
+                case (.textToggle(let aOn, let aOff, let aDefault), .textToggle(let bOn, let bOff, let bDefault)):
+                    XCTAssertEqual(aOn, bOn, "\(before.key) onValue must not localize under \(language)")
+                    XCTAssertEqual(aOff, bOff, "\(before.key) offValue must not localize under \(language)")
+                    XCTAssertEqual(aDefault, bDefault)
+                case (.labeledOptions(let a, let aDefault), .labeledOptions(let b, let bDefault)):
+                    XCTAssertEqual(a.map(\.value), b.map(\.value),
+                                   "\(before.key) option values must not localize under \(language)")
+                    XCTAssertEqual(aDefault, bDefault)
+                case (.text(let a), .text(let b)),
+                     (.number(let a), .number(let b)),
+                     (.toggle(let a), .toggle(let b)):
+                    XCTAssertEqual(a, b)
+                default:
+                    XCTFail("\(before.key) control changed shape under \(language)")
+                }
+            }
+        }
+    }
 }
