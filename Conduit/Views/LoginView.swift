@@ -154,7 +154,9 @@ struct LoginView: View {
             AuthWebView(
                 url: serverUrl,
                 cloudflareAccess: configuredCloudflareAccess,
-                dashboardID: appState.resolveDashboardID(forURL: serverUrl, registerIfMissing: true),
+                dashboardIDProvider: { [appState] in
+                    appState.resolveDashboardID(forURL: serverUrl, registerIfMissing: true)
+                },
             onTicket: { ticket, baseUrl in
                     // The dashboard is solely an authentication bridge. Dismiss it
                     // before connection work begins so Conduit, not the dashboard,
@@ -717,11 +719,14 @@ enum AuthWebViewNavigationPolicy {
 struct AuthWebView: UIViewRepresentable {
     let url: String
     let cloudflareAccess: CloudflareAccessCredentials?
-    /// The saved dashboard being signed into: the cookie mirror captured on
-    /// successful sign-in is written to this dashboard's scoped record. Nil
+    /// Resolves the saved dashboard being signed into AT CAPTURE TIME (on
+    /// successful sign-in), so the cookie mirror is written to that
+    /// dashboard's scoped record. A closure, not a value: resolving during
+    /// view construction would register a dashboard for every render of the
+    /// login card, and the binding belongs to the commit moment. Nil
     /// (callers without a registry context, e.g. tests) captures nothing —
     /// no identity, no durable mirror.
-    var dashboardID: UUID? = nil
+    var dashboardIDProvider: (() -> UUID?)? = nil
     let onTicket: (String, String) -> Void
     /// Classified failure + raw diagnostic detail. The dashboard controls the
     /// detail text (e.g. `payload["error"]`), so it is never rendered — the
@@ -877,7 +882,7 @@ struct AuthWebView: UIViewRepresentable {
             let webView = authenticatedWebView
             Task { @MainActor [weak self, weak webView] in
                 guard let self else { return }
-                if let webView, let dashboardID = parent.dashboardID {
+                if let webView, let dashboardID = parent.dashboardIDProvider?() {
                     await DashboardCookiePersistence.capture(
                         from: webView.configuration.websiteDataStore.httpCookieStore,
                         for: self.expectedURL,

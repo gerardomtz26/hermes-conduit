@@ -3051,23 +3051,33 @@ final class AppState: ObservableObject {
         return KeychainHelper.loadCredentials(dashboardID: dashboardID)
     }
 
+    /// Bumped on every dashboard switch; a restore that started under an
+    /// older generation must not install its connection underneath a newer
+    /// switch.
+    private var dashboardSwitchGeneration: UInt64 = 0
+
     /// Switch to a saved dashboard. Switching is NOT disconnecting: the
-    /// outgoing dashboard's runtime ownership is retired by the authoritative
-    /// `prepareChatResumeForConnection` boundary inside `connect`, the target
-    /// becomes the selected dashboard BEFORE connecting (so a failed switch
-    /// leaves it selected with its sign-in/repair surface), and its own
-    /// scoped auth decides between silent reconnect, credential sign-in, and
-    /// the login surface. The outgoing dashboard stays saved either way.
+    /// outgoing dashboard stays saved with its auth intact, but its runtime
+    /// ownership (client, sessions, speech) is retired IMMEDIATELY through
+    /// the authoritative `prepareChatResumeForConnection` boundary — a
+    /// switch that then fails to authenticate must not leave the outgoing
+    /// server streaming behind the new target's sign-in surface. The target
+    /// becomes the selected dashboard BEFORE connecting, so a failed switch
+    /// leaves it selected; no other dashboard is auto-connected.
     func switchDashboard(to id: UUID) async {
         guard let dashboard = savedDashboardRegistry.dashboard(with: id) else { return }
         if id == activeDashboardID && (isConnected || isConnecting) {
             // Already there: a same-dashboard reconnect is not a switch.
             return
         }
+        dashboardSwitchGeneration &+= 1
+        let generation = dashboardSwitchGeneration
         selectDashboardTarget(id)
         rememberDashboardURL(dashboard.normalizedURL)
+        _ = prepareChatResumeForConnection(to: dashboard.normalizedURL, dashboardID: id)
+        retireConnectionRuntimeForDashboardSwitch()
         if let credentials = KeychainHelper.loadCredentials(dashboardID: id) {
-            await restoreSavedCredentials(credentials, dashboardID: id)
+            await restoreSavedCredentials(credentials, dashboardID: id, switchGeneration: generation)
             return
         }
         if let saved = KeychainHelper.loadConnection(dashboardID: id) {
@@ -3077,12 +3087,43 @@ final class AppState: ObservableObject {
             showLogin = false
             isConnecting = true
             turnState = .synchronizing
-            await restoreSavedConnection(saved)
+            await restoreSavedConnection(saved, switchGeneration: generation)
             return
         }
         // No reusable auth: present the sign-in surface seeded for this
         // dashboard's address.
+        turnState = .idle
         showLogin = true
+    }
+
+    /// Runtime-only teardown of the live connection when switching
+    /// dashboards. `prepareChatResumeForConnection` (called just before) owns
+    /// the server-replacement state retirement; this retires the transport
+    /// and connection-scoped surfaces it does not touch. Deliberately NOT
+    /// disconnect(): no saved auth, cookie mirror, or registry state is
+    /// cleared — the outgoing dashboard stays signed in while saved.
+    private func retireConnectionRuntimeForDashboardSwitch() {
+        cancelChatResumeTransportRecovery()
+        cancelScenePhaseAttempt()
+        lastConnectionFailure = nil
+        client?.disconnect()
+        client = nil
+        connection = nil
+        isConnected = false
+        isConnecting = false
+        connectedAt = nil
+        dashboardTicketBridge?.invalidate()
+        dashboardTicketBridge = nil
+        messageReadAloudController.setGateway(nil)
+        readAloudGatewayBridge = nil
+        voiceConversationController.setGateway(nil)
+        voiceCapabilitySnapshot = .unavailable
+        isVoiceEnabled = false
+        retireOutstandingPreferredReturnSurfaceRequests()
+    }
+
+    private func switchGenerationIsCurrent(_ generation: UInt64) -> Bool {
+        generation == dashboardSwitchGeneration
     }
 
     /// Marks a dashboard as the selected target without connecting. A failed
@@ -3172,12 +3213,25 @@ final class AppState: ObservableObject {
     /// only needed to mint a replacement ticket after that socket actually
     /// disconnects or fails. Requiring a freshly restored WebKit cookie before
     /// every launch was what turned a healthy saved Hermes session into login.
-    private func restoreSavedConnection(_ saved: HermesConnection) async {
+    private func restoreSavedConnection(_ saved: HermesConnection, switchGeneration: UInt64? = nil) async {
+        if let switchGeneration, !switchGenerationIsCurrent(switchGeneration) {
+            return
+        }
         prepareDashboardBridge(for: saved.baseUrl)
         await connect(with: saved, profile: activeProfile)
     }
 
-    private func restoreSavedCredentials(_ credentials: DashboardCredentials, dashboardID: UUID? = nil) async {
+    private func restoreSavedCredentials(
+        _ credentials: DashboardCredentials,
+        dashboardID: UUID? = nil,
+        switchGeneration: UInt64? = nil
+    ) async {
+        // A superseded dashboard switch owns the flow; this stale restore
+        // must not prompt, spend network, or install its connection — and it
+        // must not touch presentation state the newer switch now owns.
+        if let switchGeneration, !switchGenerationIsCurrent(switchGeneration) {
+            return
+        }
         let scopedDashboardID = dashboardID ?? activeDashboardID
         rememberDashboardURL(credentials.baseURL)
 
@@ -14470,10 +14524,11 @@ enum KeychainHelper {
     // MARK: Dashboard-scoped secure records (multi-server, #148)
     //
     // Every reusable authentication record gains a dashboard-scoped variant
-    // whose Keychain account embeds the dashboard UUID. Scoped reads NEVER
-    // fall back to the legacy global records — dashboard A's state must not
-    // be readable through dashboard B, and only the migration path touches
-    // the legacy layout (see LegacyDashboardReader).
+    // whose Keychain account embeds the dashboard UUID. Scoped accounts can
+    // never collide with the legacy global accounts (the UUID suffix is
+    // globally unique), so the load-time legacy-query fallback below cannot
+    // cross dashboards — and only the migration path intentionally reads the
+    // legacy layout (see LegacyDashboardReader).
 
     static func scopedAccount(_ base: String, dashboardID: UUID) -> String {
         "\(base).\(dashboardID.uuidString)"

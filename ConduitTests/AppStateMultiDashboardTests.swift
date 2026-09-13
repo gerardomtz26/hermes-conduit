@@ -334,3 +334,77 @@ final class AppStateMultiDashboardTests: XCTestCase {
         XCTAssertEqual(SavedDashboardRegistryStore.load()?.activeDashboardID, vps.id)
     }
 }
+
+// MARK: - Switch retirement (review hardening)
+
+extension AppStateMultiDashboardTests {
+
+    func testSwitchToAuthlessDashboardRetiresOutgoingConnectionRuntime() async {
+        let mac = dashboard("Mac", "https://mac.tailnet.ts.net")
+        let vps = dashboard("VPS", "https://hermes.example.com")
+        let appState = makeAppState(registry: SavedDashboardRegistry(activeDashboardID: mac.id, dashboards: [mac, vps]))
+        // A live-looking outgoing session (as a real connection leaves it).
+        appState.isConnected = true
+        appState.isConnecting = false
+        appState.sessions = [SessionSummary(
+            id: "runtime-1",
+            storedSessionId: nil,
+            alternateIds: [],
+            title: "t",
+            model: "m",
+            updatedLabel: "",
+            profile: nil,
+            source: .chat,
+            isActive: false,
+            isArchived: false,
+            lineageRootId: nil
+        )]
+
+        await appState.switchDashboard(to: vps.id)
+
+        // The outgoing dashboard's runtime is retired, not left streaming
+        // behind the new target's sign-in surface...
+        XCTAssertFalse(appState.isConnected)
+        XCTAssertNil(appState.connection)
+        XCTAssertTrue(appState.sessions.isEmpty, "the outgoing server's session catalog is retired at the switch boundary")
+        // ...the target is selected and presents its sign-in...
+        XCTAssertEqual(appState.activeDashboardID, vps.id)
+        XCTAssertTrue(appState.showLogin)
+        // ...and the outgoing dashboard stays saved with its auth intact.
+        XCTAssertNotNil(appState.savedDashboardRegistry.dashboard(with: mac.id))
+        XCTAssertNotNil(KeychainHelper.loadConnection(dashboardID: mac.id))
+    }
+
+    func testFailedCredentialSwitchDoesNotBlockLaterSelection() async {
+        // Switch to a credential dashboard whose auth fails (closed loopback
+        // port), then switch to an authless dashboard: the later selection
+        // wins, the failure surface belongs to it, and no connection is
+        // installed. This is the sequential shape of the rapid-switch rule;
+        // the in-flight overlap is fenced by the switch-generation guard in
+        // restoreSavedCredentials/restoreSavedConnection.
+        let mac = dashboard("Mac", "https://mac.tailnet.ts.net")
+        let loopback = dashboard("Local", "http://127.0.0.1:1")
+        let desktop = dashboard("Desktop", "https://192.168.1.5:8080")
+        let appState = makeAppState(registry: SavedDashboardRegistry(
+            activeDashboardID: mac.id,
+            dashboards: [mac, loopback, desktop]
+        ))
+        KeychainHelper.saveCredentials(
+            DashboardCredentials(baseURL: "http://127.0.0.1:1", username: "u", password: "p", requiresFaceID: false),
+            dashboardID: loopback.id
+        )
+
+        await appState.switchDashboard(to: loopback.id)
+        XCTAssertEqual(appState.activeDashboardID, loopback.id)
+        XCTAssertTrue(appState.showLogin)
+
+        await appState.switchDashboard(to: desktop.id)
+
+        XCTAssertEqual(appState.activeDashboardID, desktop.id)
+        XCTAssertTrue(appState.showLogin)
+        XCTAssertNil(appState.connection)
+        XCTAssertFalse(appState.isConnected)
+        // All three dashboards remain saved.
+        XCTAssertEqual(appState.savedDashboardRegistry.dashboards.count, 3)
+    }
+}

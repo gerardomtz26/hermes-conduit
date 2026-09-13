@@ -182,7 +182,9 @@ struct ConnectionSetupView: View {
             AuthWebView(
                 url: configuration.serverURL,
                 cloudflareAccess: flow.cloudflareAccessForDraft(),
-                dashboardID: appState.resolveDashboardID(forURL: configuration.serverURL, registerIfMissing: true),
+                dashboardIDProvider: { [appState] in
+                    appState.resolveDashboardID(forURL: configuration.serverURL, registerIfMissing: true)
+                },
                 onTicket: { ticket, baseURL in
                     Task { @MainActor in
                         showRepairSignIn = false

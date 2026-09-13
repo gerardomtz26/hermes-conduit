@@ -80,12 +80,18 @@ enum SavedDashboardLabel {
             .lowercased()
         let base: String
         if let host, !host.isEmpty {
-            let looksLikeIP = host.dropFirst().allSatisfy { $0.isNumber || $0 == "." } && host.first?.isNumber == true
-            if looksLikeIP {
+            // IPv6 literals (any colon) and dotted-quad IPv4 stay whole; a
+            // DNS host contributes its first label.
+            if host.contains(":") {
                 base = host
             } else {
-                let firstLabel = host.split(separator: ".").first.map(String.init) ?? host
-                base = firstLabel.capitalized
+                let looksLikeIP = host.dropFirst().allSatisfy { $0.isNumber || $0 == "." } && host.first?.isNumber == true
+                if looksLikeIP {
+                    base = host
+                } else {
+                    let firstLabel = host.split(separator: ".").first.map(String.init) ?? host
+                    base = firstLabel.localizedCapitalized
+                }
             }
         } else {
             base = AppLocalization.string("Dashboard")
@@ -257,7 +263,7 @@ enum SavedDashboardMigrator {
     /// see `SavedDashboardMigration.outcome`.
     static func loadRegistry(defaults: UserDefaults = .standard) -> SavedDashboardRegistry {
         if let existing = SavedDashboardRegistryStore.load() {
-            if LegacyDashboardReader.hasLegacyState {
+            if !LegacyDashboardReader.read(defaults: defaults).isEmpty {
                 LegacyDashboardReader.retireLegacy()
             }
             return existing
