@@ -113,12 +113,6 @@
     },
     "%@ tasks selected" : {
       "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%lld tasks selected"
-          }
-        },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
@@ -1079,12 +1073,6 @@
     },
     "Archive %@ Tasks?" : {
       "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Archive %lld Tasks?"
-          }
-        },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
@@ -1287,12 +1275,6 @@
     },
     "Assign %@ Tasks" : {
       "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Assign %lld Tasks"
-          }
-        },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
@@ -4235,12 +4217,6 @@
     },
     "Delete %@ Tasks?" : {
       "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Delete %lld Tasks?"
-          }
-        },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
@@ -7275,12 +7251,6 @@
     },
     "Move %@ Tasks" : {
       "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Move %lld Tasks"
-          }
-        },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
@@ -10769,12 +10739,6 @@
     },
     "Set Priority (%@ tasks)" : {
       "localizations" : {
-        "en" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "Set Priority (%lld tasks)"
-          }
-        },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",

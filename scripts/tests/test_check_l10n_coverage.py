@@ -310,6 +310,28 @@ class CatalogProblemTests(unittest.TestCase):
         problems = problems_for(catalog)
         self.assertTrue(any("state is 'new'" in p for p in problems["%lld conversations"]))
 
+    def test_stale_en_unit_with_mismatched_placeholders_is_reported(self):
+        # The KanbanSelectionLayout regression: a key renamed to %@ while its
+        # en unit still read %lld misformatted English at runtime (garbage
+        # integer from the NSString pointer). Every language must validate.
+        catalog = {"strings": {"%@ tasks selected": {"localizations": {
+            "en": {"stringUnit": {"state": "translated",
+                                  "value": "%lld tasks selected"}},
+            "zh-Hans": {"stringUnit": {"state": "translated",
+                                       "value": "已选择 %@ 个任务"}}}}}}
+        problems = problems_for(catalog)
+        self.assertTrue(any("en placeholders" in p for p in problems["%@ tasks selected"]))
+
+    def test_matching_en_unit_passes(self):
+        catalog = {"strings": {"%lld conversations": {"localizations": {
+            "en": {"variations": {"plural": {"one": {
+                "stringUnit": {"state": "translated", "value": "%lld conversation"}},
+                "other": {"stringUnit": {"state": "translated",
+                                         "value": "%lld conversations"}}}}},
+            "zh-Hans": {"variations": {"plural": {"other": {
+                "stringUnit": {"state": "translated", "value": "%lld 个会话"}}}}}}}}}
+        self.assertEqual(problems_for(catalog), {})
+
     def test_exempt_keys_are_not_required(self):
         catalog = {"strings": {"Hermes": {"localizations": {}}}}
         self.assertEqual(problems_for(catalog), {})

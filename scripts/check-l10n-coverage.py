@@ -404,38 +404,38 @@ def placeholders_compatible(key_specs, value_specs) -> bool:
 
 
 def catalog_problems(catalog: dict) -> dict:
-    """Return {key: [problems]} for every required-language violation."""
+    """Return {key: [problems]} for every localization violation.
+
+    zh-Hans must exist and be usable; EVERY language's units (en included)
+    must carry placeholders compatible with the key, so a stale en value
+    like "%lld" under a "%@" key cannot survive (it misformats at runtime).
+    """
     problems = {}
     for key, entry in catalog.get("strings", {}).items():
         if key in EXEMPT_KEYS:
             continue
-        localization = entry.get("localizations", {}).get(REQUIRED_LANGUAGE)
-        if localization is None:
+        localizations = entry.get("localizations", {})
+        if REQUIRED_LANGUAGE not in localizations:
             problems.setdefault(key, []).append(
                 f"missing {REQUIRED_LANGUAGE} localization")
-            continue
-        leaves = string_unit_leaves(localization)
-        if not leaves:
-            problems.setdefault(key, []).append(
-                f"{REQUIRED_LANGUAGE} localization has no string units")
-            continue
         key_specs = placeholder_specs(key)
-        for unit in leaves:
-            value = unit.get("value")
-            if unit.get("state") != "translated":
-                problems.setdefault(key, []).append(
-                    f"{REQUIRED_LANGUAGE} state is {unit.get('state')!r}, not 'translated'")
-            elif not value or not value.strip():
-                problems.setdefault(key, []).append(
-                    f"{REQUIRED_LANGUAGE} value is empty")
-            elif MALFORMED_ESCAPE_RE.search(value):
-                problems.setdefault(key, []).append(
-                    f"{REQUIRED_LANGUAGE} value contains malformed literal "
-                    f"Unicode escape sequences (double-escaped authoring bug)")
-            elif not placeholders_compatible(key_specs, placeholder_specs(value)):
-                problems.setdefault(key, []).append(
-                    f"{REQUIRED_LANGUAGE} placeholders {placeholder_specs(value)} "
-                    f"do not match key placeholders {key_specs}")
+        for language, localization in localizations.items():
+            for unit in string_unit_leaves(localization):
+                value = unit.get("value")
+                if unit.get("state") != "translated":
+                    problems.setdefault(key, []).append(
+                        f"{language} state is {unit.get('state')!r}, not 'translated'")
+                elif not value or not value.strip():
+                    problems.setdefault(key, []).append(
+                        f"{language} value is empty")
+                elif MALFORMED_ESCAPE_RE.search(value):
+                    problems.setdefault(key, []).append(
+                        f"{language} value contains malformed literal "
+                        f"Unicode escape sequences (double-escaped authoring bug)")
+                elif not placeholders_compatible(key_specs, placeholder_specs(value)):
+                    problems.setdefault(key, []).append(
+                        f"{language} placeholders {placeholder_specs(value)} "
+                        f"do not match key placeholders {key_specs}")
     return problems
 
 
