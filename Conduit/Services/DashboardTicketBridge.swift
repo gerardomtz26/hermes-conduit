@@ -771,15 +771,20 @@ extension DashboardTicketBridge: WKNavigationDelegate {
             // Late cookie capture after disconnect must not resurrect the
             // durable mirror AppState just cleared: the write guard runs at
             // the moment of the keychain save, after the cookie-store await.
-            Task { @MainActor in
-                await DashboardCookiePersistence.capture(
-                    from: webView.configuration.websiteDataStore.httpCookieStore,
-                    for: expectedURL,
-                    shouldPersist: { [weak self] in
-                        guard let self else { return false }
-                        return !self.isInvalidated
-                    }
-                )
+            // The mirror is dashboard-owned: without a dashboard identity
+            // there is no record to write.
+            if let dashboardID = self.dashboardID {
+                Task { @MainActor in
+                    await DashboardCookiePersistence.capture(
+                        from: webView.configuration.websiteDataStore.httpCookieStore,
+                        for: expectedURL,
+                        shouldPersist: { [weak self] in
+                            guard let self else { return false }
+                            return !self.isInvalidated
+                        },
+                        dashboardID: dashboardID
+                    )
+                }
             }
         }
     }

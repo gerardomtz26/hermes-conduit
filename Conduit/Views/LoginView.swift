@@ -718,8 +718,10 @@ struct AuthWebView: UIViewRepresentable {
     let url: String
     let cloudflareAccess: CloudflareAccessCredentials?
     /// The saved dashboard being signed into: the cookie mirror captured on
-    /// successful sign-in is written to this dashboard's scoped record.
-    let dashboardID: UUID?
+    /// successful sign-in is written to this dashboard's scoped record. Nil
+    /// (callers without a registry context, e.g. tests) captures nothing —
+    /// no identity, no durable mirror.
+    var dashboardID: UUID? = nil
     let onTicket: (String, String) -> Void
     /// Classified failure + raw diagnostic detail. The dashboard controls the
     /// detail text (e.g. `payload["error"]`), so it is never rendered — the

@@ -147,10 +147,10 @@ struct LegacyDashboardState: Equatable {
     /// the remembered dashboard URL is the last resort. Cookies alone can
     /// never establish an address.
     var derivedDashboardURL: String? {
-        if let credentials?.baseURL { return credentials?.baseURL }
-        if let connection?.baseUrl { return connection?.baseUrl }
-        if let cloudflare?.origin, !cloudflare?.origin.isEmpty ?? false { return cloudflare?.origin }
-        if let rememberedDashboardURL, !rememberedDashboardURL.isEmpty { return rememberedDashboardURL }
+        if let baseURL = credentials?.baseURL, !baseURL.isEmpty { return baseURL }
+        if let baseURL = connection?.baseUrl, !baseURL.isEmpty { return baseURL }
+        if let origin = cloudflare?.origin, !origin.isEmpty { return origin }
+        if let remembered = rememberedDashboardURL, !remembered.isEmpty { return remembered }
         return nil
     }
 }
@@ -210,7 +210,7 @@ enum SavedDashboardMigration {
         storedServerIdentity: String?,
         normalizedLegacyURL: String?
     ) -> Outcome {
-        if let existingRegistry {
+        if existingRegistry != nil {
             // Registry present: migration already committed. The only work
             // left is retiring whatever legacy records still exist.
             return .alreadyMigrated(retireLegacy: !legacy.isEmpty)

@@ -17,12 +17,15 @@ final class AppStateMultiDashboardTests: XCTestCase {
 
     private var defaultsSuite: String!
     private var defaults: UserDefaults!
+    private var backend: InMemoryKeychainBackend!
     private var createdDashboardIDs: [UUID] = []
 
     override func setUp() {
         super.setUp()
         defaultsSuite = "AppStateMultiDashboardTests.\(UUID().uuidString)"
         defaults = UserDefaults(suiteName: defaultsSuite)!
+        backend = InMemoryKeychainBackend()
+        KeychainHelper.useBackendForTesting(backend)
         createdDashboardIDs = []
     }
 
@@ -33,6 +36,8 @@ final class AppStateMultiDashboardTests: XCTestCase {
             KeychainHelper.clearCloudflareAccess(dashboardID: id)
             KeychainHelper.clearDashboardCookies(dashboardID: id)
         }
+        KeychainHelper.useBackendForTesting(KeychainHelper.SystemKeychainBackend())
+        backend = nil
         defaults.removePersistentDomain(forName: defaultsSuite)
         super.tearDown()
     }
@@ -123,7 +128,7 @@ final class AppStateMultiDashboardTests: XCTestCase {
         let a = dashboard("Mac", "https://mac.tailnet.ts.net")
         let b = dashboard("Mac2", "https://mac.tailnet.ts.net")
         let appState = makeAppState(registry: SavedDashboardRegistry(activeDashboardID: a.id, dashboards: [a, b]))
-        XCTAssertTrue(appState.prepareChatResumeForConnection(to: a.normalizedURL, dashboardID: a.id))
+        defaults.set(a.id.uuidString, forKey: AppState.chatResumeServerIdentityKey)
         XCTAssertTrue(appState.prepareChatResumeForConnection(to: b.normalizedURL, dashboardID: b.id))
         XCTAssertEqual(
             defaults.string(forKey: AppState.chatResumeServerIdentityKey),
@@ -148,6 +153,7 @@ final class AppStateMultiDashboardTests: XCTestCase {
         // change in both directions.
         let a = dashboard("Mac", "https://mac.tailnet.ts.net")
         let appState = makeAppState(registry: SavedDashboardRegistry(activeDashboardID: a.id, dashboards: [a]))
+        defaults.set(a.id.uuidString, forKey: AppState.chatResumeServerIdentityKey)
         XCTAssertTrue(appState.prepareChatResumeForConnection(to: "https://other.example.com", dashboardID: nil))
         XCTAssertTrue(appState.prepareChatResumeForConnection(to: a.normalizedURL, dashboardID: a.id))
     }

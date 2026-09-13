@@ -45,6 +45,7 @@ struct ConnectionRepairSetupSheet: View {
 struct ConnectionSetupView: View {
     @ObservedObject var appLanguage = AppLanguageStore.shared
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var appState: AppState
     @State private var flow: ConnectionSetupFlow
     @State private var showNotSureGuidance = false
     /// The in-flight staged-test task. Cancelled on any exit from the test
@@ -181,6 +182,7 @@ struct ConnectionSetupView: View {
             AuthWebView(
                 url: configuration.serverURL,
                 cloudflareAccess: flow.cloudflareAccessForDraft(),
+                dashboardID: appState.resolveDashboardID(forURL: configuration.serverURL, registerIfMissing: true),
                 onTicket: { ticket, baseURL in
                     Task { @MainActor in
                         showRepairSignIn = false

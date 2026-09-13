@@ -19,10 +19,20 @@ import XCTest
 @MainActor
 final class SavedDashboardRegistryTests: XCTestCase {
 
+    private var backend: InMemoryKeychainBackend!
+    private var defaults: UserDefaults!
+    private var defaultsSuite: String!
     private var createdDashboardIDs: [UUID] = []
 
     override func setUp() {
         super.setUp()
+        backend = InMemoryKeychainBackend()
+        KeychainHelper.useBackendForTesting(backend)
+        defaultsSuite = "SavedDashboardRegistryTests.\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: defaultsSuite)!
+        addTeardownBlock { [weak self] in
+            self?.defaults.removePersistentDomain(forName: self?.defaultsSuite ?? "")
+        }
         KeychainHelper.clearDashboardRegistry()
         KeychainHelper.clearConnection()
         KeychainHelper.clearCredentials()
@@ -41,6 +51,8 @@ final class SavedDashboardRegistryTests: XCTestCase {
         KeychainHelper.clearConnection()
         KeychainHelper.clearCredentials()
         KeychainHelper.clearCloudflareAccess()
+        KeychainHelper.useBackendForTesting(KeychainHelper.SystemKeychainBackend())
+        backend = nil
         super.tearDown()
     }
 
@@ -199,11 +211,11 @@ final class SavedDashboardRegistryTests: XCTestCase {
             CloudflareAccessCredentials.from(clientID: "cid", clientSecret: "csecret")!,
             origin: legacyURL
         )
-        UserDefaults.standard.set(legacyURL, forKey: "conduit.dashboardURL")
-        UserDefaults.standard.set(legacyURL, forKey: AppState.chatResumeServerIdentityKey)
-        addTeardownBlock { UserDefaults.standard.removeObject(forKey: "conduit.dashboardURL") }
+        defaults.set(legacyURL, forKey: "conduit.dashboardURL")
+        defaults.set(legacyURL, forKey: AppState.chatResumeServerIdentityKey)
+        addTeardownBlock { [defaults] in defaults.removeObject(forKey: "conduit.dashboardURL") }
 
-        let registry = SavedDashboardMigrator.loadRegistry()
+        let registry = SavedDashboardMigrator.loadRegistry(defaults: defaults)
 
         let id = try XCTUnwrap(registry.activeDashboardID)
         track(id)
@@ -228,7 +240,7 @@ final class SavedDashboardRegistryTests: XCTestCase {
 
         // The identity was relabeled so the upgrade triggers no teardown.
         XCTAssertEqual(
-            UserDefaults.standard.string(forKey: AppState.chatResumeServerIdentityKey),
+            defaults.string(forKey: AppState.chatResumeServerIdentityKey),
             id.uuidString
         )
     }
@@ -253,7 +265,7 @@ final class SavedDashboardRegistryTests: XCTestCase {
         KeychainHelper.saveConnection(HermesConnection(baseUrl: legacyURL, ticket: "ticket-1"))
         track(UUID()) // no scoped pre-state; the interruption scenario reuses legacy only
 
-        let registry = SavedDashboardMigrator.loadRegistry()
+        let registry = SavedDashboardMigrator.loadRegistry(defaults: defaults)
         let id = try XCTUnwrap(registry.activeDashboardID)
         track(id)
         XCTAssertEqual(try XCTUnwrap(KeychainHelper.loadConnection(dashboardID: id)).ticket, "ticket-1")
@@ -261,7 +273,7 @@ final class SavedDashboardRegistryTests: XCTestCase {
     }
 
     func testCleanInstallProducesEmptyRegistryWithoutLegacy() throws {
-        let registry = SavedDashboardMigrator.loadRegistry()
+        let registry = SavedDashboardMigrator.loadRegistry(defaults: defaults)
         XCTAssertTrue(registry.dashboards.isEmpty)
         XCTAssertNil(registry.activeDashboardID)
         // Repeated loads are stable and never resurrect dashboards.
@@ -274,7 +286,7 @@ final class SavedDashboardRegistryTests: XCTestCase {
         KeychainHelper.saveConnection(HermesConnection(baseUrl: legacyURL, ticket: "web-ticket"))
         KeychainHelper.saveDashboardCookies(Data("web-cookies".utf8))
 
-        let registry = SavedDashboardMigrator.loadRegistry()
+        let registry = SavedDashboardMigrator.loadRegistry(defaults: defaults)
         let id = try XCTUnwrap(registry.activeDashboardID)
         track(id)
         XCTAssertNil(KeychainHelper.loadCredentials(dashboardID: id))

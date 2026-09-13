@@ -14288,6 +14288,54 @@ final class AppState: ObservableObject {
 // MARK: - Keychain Helper
 
 enum KeychainHelper {
+    /// Storage backend seam. Production storage is the system keychain; tests
+    /// install an in-memory backend because the unsigned simulator test host
+    /// carries no keychain entitlements — every SecItem call fails with
+    /// errSecMissingEntitlement (-34018), which would make any write/read
+    /// round-trip silently useless. All record semantics (accessibility on
+    /// add, scoped-before-legacy reads, two-query deletes) stay ABOVE the
+    /// seam so the seam changes storage, never behavior.
+    protocol Backend {
+        func data(for query: [String: Any]) -> Data?
+        func update(_ data: Data, for query: [String: Any]) -> Int32
+        func add(_ query: [String: Any]) -> Int32
+        func delete(_ query: [String: Any])
+    }
+
+    struct SystemKeychainBackend: Backend {
+        func data(for query: [String: Any]) -> Data? {
+            var read = query
+            read[kSecReturnData as String] = true
+            read[kSecMatchLimit as String] = kSecMatchLimitOne
+            var item: CFTypeRef?
+            guard SecItemCopyMatching(read as CFDictionary, &item) == errSecSuccess,
+                  let data = item as? Data else { return nil }
+            return data
+        }
+
+        func update(_ data: Data, for query: [String: Any]) -> Int32 {
+            SecItemUpdate(query as CFDictionary, [
+                kSecValueData as String: data
+            ] as CFDictionary)
+        }
+
+        func add(_ query: [String: Any]) -> Int32 {
+            SecItemAdd(query as CFDictionary, nil)
+        }
+
+        func delete(_ query: [String: Any]) {
+            SecItemDelete(query as CFDictionary)
+        }
+    }
+
+    nonisolated(unsafe) private(set) static var backend: Backend = SystemKeychainBackend()
+
+    /// Swaps the backend (tests). Not thread-safe by design: XCTest suites
+    /// run serially within a simulator, and the swap is restored in teardown.
+    static func useBackendForTesting(_ backend: Backend) {
+        Self.backend = backend
+    }
+
     private static let key = "hermes-conduit.connection.v1"
     private static let dashboardCookieKey = "hermes-conduit.dashboard-cookies.v1"
     private static let credentialsKey = "hermes-conduit.credentials.v1"
@@ -14497,15 +14545,13 @@ enum KeychainHelper {
         let query = scopedQuery(account: account)
         // Accessibility belongs to a Keychain item at creation. Including it
         // in every update can reject an otherwise valid cookie update.
-        let updateStatus = SecItemUpdate(query as CFDictionary, [
-            kSecValueData as String: data
-        ] as CFDictionary)
+        let updateStatus = backend.update(data, for: query)
         if updateStatus == errSecSuccess { return }
         if updateStatus == errSecItemNotFound {
             var insert = query
             insert[kSecValueData as String] = data
             insert[kSecAttrAccessible as String] = accessibility
-            SecItemAdd(insert as CFDictionary, nil)
+            _ = backend.add(insert)
         }
     }
 
@@ -14519,13 +14565,7 @@ enum KeychainHelper {
     }
 
     private static func load(query: [String: Any]) -> Data? {
-        var query = query
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data else { return nil }
-        return data
+        backend.data(for: query)
     }
 
     static func clearConnection() {
@@ -14534,8 +14574,8 @@ enum KeychainHelper {
     }
 
     private static func delete(account: String) {
-        SecItemDelete(scopedQuery(account: account) as CFDictionary)
-        SecItemDelete(legacyQuery(account: account) as CFDictionary)
+        backend.delete(scopedQuery(account: account))
+        backend.delete(legacyQuery(account: account))
     }
 
     private static func scopedQuery(account: String) -> [String: Any] {
