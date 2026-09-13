@@ -755,6 +755,9 @@ final class PushNotificationService: ObservableObject {
             // Approvals answer through the gateway's approval.respond
             // directly; the relay discriminator is never involved.
             break
+        case .none:
+            // A plain routing push carries no decision at all.
+            break
         }
     }
 
