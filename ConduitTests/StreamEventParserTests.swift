@@ -678,6 +678,13 @@ final class StreamEventParserTests: XCTestCase {
         XCTAssertEqual(text, "✓ Context compression complete")
     }
 
+    func testStatusUpdateWithoutSessionIDIsRejected() {
+        let event = parse(#"""
+        {"type": "status.update", "session_id": "", "payload": {"kind": "compacted"}}
+        """#)
+        XCTAssertNil(event, "A session-less status edge must not drive conversation-scoped state")
+    }
+
     func testStatusUpdateUnrelatedKindsNeverMasqueradeAsCompaction() {
         // The in-process manual compression path emits `compressing` and bare
         // `status` kinds; drivers use arbitrary strings. None of them may

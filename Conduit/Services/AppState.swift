@@ -529,6 +529,26 @@ final class AppState: ObservableObject {
     /// compressing, and only the `compacted` edge (or an authoritative
     /// reconnect, which invalidates unverified gateway state) clears it.
     @Published private(set) var serverCompactingSessionIDs: Set<String> = []
+    /// Bounded, race-safe lifecycle bookkeeping for the claims above:
+    /// - `generation` is the conversation's terminal-compaction counter at
+    ///   claim time. A `pending` continuation may only (re-)establish its
+    ///   claim while that counter is unchanged, so a `compacted` edge that
+    ///   landed during the RPC await wins over the stale continuation.
+    /// - `expiresAt` bounds the claim to one full compression budget: a lost
+    ///   terminal edge must not keep "Compressing…" alive for the whole
+    ///   connection.
+    private struct ServerCompactionClaim {
+        let generation: Int
+        let expiresAt: Date
+    }
+    private var serverCompactionClaims: [String: ServerCompactionClaim] = [:]
+    /// Scheduled bounded-expiry tasks per claim runtime id; replaced on
+    /// refresh, cancelled when the claim clears early.
+    private var serverCompactionClaimExpiryTasks: [String: Task<Void, Never>] = [:]
+    /// Terminal-compaction generations per conversation runtime id, bumped by
+    /// every authoritative terminal signal (`compacted` edges and terminal
+    /// `session.compress` results).
+    private var serverCompactionTerminalGenerations: [String: Int] = [:]
     /// Whether the active conversation is compressing — either a local
     /// `session.compress` RPC is in flight or the gateway reports server-side
     /// compaction. Alias-aware through the same session-equivalence machinery
@@ -5030,6 +5050,11 @@ final class AppState: ObservableObject {
         // spinner alive on state we can no longer trust. Local RPC claims
         // survive — they are bounded by their own request timeout.
         serverCompactingSessionIDs.removeAll()
+        // The backing claims and their scheduled expiry tasks are unverifiable
+        // gateway state too — a `compacted` edge may never arrive.
+        serverCompactionClaimExpiryTasks.values.forEach { $0.cancel() }
+        serverCompactionClaimExpiryTasks.removeAll()
+        serverCompactionClaims.removeAll()
         guard connection != nil else { return }
         turnState = .reconnecting
 
@@ -9580,11 +9605,16 @@ final class AppState: ObservableObject {
         defer { compressingSessionIDs.remove(activeClaimID) }
         let trimmedTopic = focusTopic.trimmingCharacters(in: .whitespacesAndNewlines)
         let focusTopicParam = trimmedTopic.isEmpty ? nil : trimmedTopic
+        // The conversation's terminal-compaction generation at RPC
+        // invocation: a `pending` response may only establish the server-side
+        // claim when no terminal edge landed during the await.
+        let invocationGeneration = terminalServerCompactionGeneration(for: sessionID)
         do {
             let outcome = try await compressSessionWithRecovery(
                 client: client,
                 sessionID: sessionID,
                 focusTopic: focusTopicParam,
+                invocationGeneration: invocationGeneration,
                 context: context,
                 // A stale-runtime recovery rebound the conversation to a
                 // fresh runtime: move the in-flight claim with it so
@@ -9597,7 +9627,12 @@ final class AppState: ObservableObject {
                 }
             )
             guard isCurrentComposerSubmission(outcome.context) else { return }
-            let disposition = applySessionCompressionResult(outcome.result, sessionID: outcome.sessionID, context: outcome.context)
+            let disposition = applySessionCompressionResult(
+                outcome.result,
+                sessionID: outcome.sessionID,
+                invocationGeneration: invocationGeneration,
+                context: outcome.context
+            )
             if disposition == .adopted {
                 // Fence: a reconcile whose transcript fetch resolved before
                 // the server-side compression committed would otherwise
@@ -9669,6 +9704,7 @@ final class AppState: ObservableObject {
         client: HermesClient,
         sessionID: String,
         focusTopic: String?,
+        invocationGeneration: Int,
         context: ComposerSubmissionContext,
         onRecover: @MainActor (String) -> Void
     ) async throws -> (result: SessionCompressResult, sessionID: String, context: ComposerSubmissionContext) {
@@ -9692,6 +9728,10 @@ final class AppState: ObservableObject {
                 $0.id == sessionID || $0.alternateIds.contains(sessionID)
             }) else { throw originalError }
             let storedSessionID = catalogRow.storedSessionId ?? catalogRow.id
+            // Drift fence BEFORE the resume side effect: a resume mints a
+            // fresh runtime — never mint one for a submission the user has
+            // already abandoned.
+            guard isCurrentComposerSubmission(context) else { throw originalError }
             let resumed: SessionResumeResult
             do {
                 resumed = try await openChatResumeSession(storedSessionID, using: client, compact: true)
@@ -9701,9 +9741,72 @@ final class AppState: ObservableObject {
                 throw originalError
             }
             let recoveredSessionID = resumed.sessionId
-            // Drift fence: identity must still own this submission after the
-            // resume await. If the user navigated away, do not rebind and do
-            // not send compression to the recovered runtime.
+            // A blank runtime id cannot be rebound or retried.
+            guard !recoveredSessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw originalError
+            }
+            // Identity admission — the same gate the resume reconciliation
+            // runs: the recovered runtime must belong to the stored
+            // conversation this recovery intended. A contradictory durable
+            // claim or a runtime positively owned by another catalog row is
+            // rejected without rebind or retry.
+            // Accept everything the catalog row positively anchors — the
+            // same seeding breadth the resume reconciliation uses.
+            let acceptedIDs = Set(
+                [catalogRow.id, storedSessionID, sessionID] + catalogRow.alternateIds
+            )
+            let selectedIdentity = ConversationIdentity(
+                profile: activeProfile,
+                durableSessionID: storedSessionID,
+                runtimeSessionID: sessionID,
+                acceptedSessionIDs: acceptedIDs
+            )
+            let claim = ResumeIdentityClaim(
+                runtimeSessionID: recoveredSessionID,
+                durableSessionID: resumed.storedSessionId
+            )
+            guard case .success = ConversationIdentityGate.admit(
+                claim: claim,
+                selected: selectedIdentity,
+                catalog: sessions + cronSessions
+            ) else {
+                sessionCatalogLog.notice(
+                    "Rejected contradictory recovery resume; requested=\(sessionID, privacy: .public), recovered=\(recoveredSessionID, privacy: .public)"
+                )
+                throw originalError
+            }
+            // Record the authoritative runtime → durable mappings BEFORE the
+            // retry: the recovered runtime becomes a positively confirmed
+            // alias of the stored conversation, and the superseded runtime's
+            // mapping keeps late alias-addressed lifecycle signals on the
+            // same compaction generation.
+            conversationIdentityIndex.recordAuthoritative(
+                runtimeID: recoveredSessionID,
+                durableID: storedSessionID,
+                profile: activeProfile,
+                source: .resume
+            )
+            conversationIdentityIndex.recordAuthoritative(
+                runtimeID: sessionID,
+                durableID: storedSessionID,
+                profile: activeProfile,
+                source: .resume
+            )
+            // Migrate the invocation generation onto the recovered
+            // conversation's durable key: the pending fence compares against
+            // this counter, and without the migration a terminal edge that
+            // landed under the superseded runtime's key during the recovery
+            // await would be invisible to it.
+            let recoveredKey = serverCompactionGenerationKey(for: recoveredSessionID)
+            let supersededKey = serverCompactionGenerationKey(for: sessionID)
+            serverCompactionTerminalGenerations[recoveredKey] = max(
+                serverCompactionTerminalGenerations[recoveredKey] ?? 0,
+                serverCompactionTerminalGenerations[supersededKey] ?? 0,
+                invocationGeneration
+            )
+            // Drift fence after the resume await (must remain): identity must
+            // still own this submission. If the user navigated away, do not
+            // rebind and do not send compression to the recovered runtime.
             guard isCurrentComposerSubmission(context) else { throw originalError }
             // Rebind through the canonical state helper: updates
             // `activeSessionId` and re-anchors the persisted identity.
@@ -9794,6 +9897,7 @@ final class AppState: ObservableObject {
     private func applySessionCompressionResult(
         _ result: SessionCompressResult,
         sessionID: String,
+        invocationGeneration: Int,
         context: ComposerSubmissionContext
     ) -> CompressionTranscriptDisposition {
         if result.lockHeld {
@@ -9814,17 +9918,27 @@ final class AppState: ObservableObject {
             // NOT the compression finishing: record the server-side
             // compaction so the spinner stays truthful until the `compacted`
             // edge (or an authoritative reconnect) clears it.
-            if !serverCompactingSessionIDs.contains(where: {
-                composerSessionIDsAreEquivalent($0, sessionID)
-            }) {
-                serverCompactingSessionIDs.insert(sessionID)
+            //
+            // Pending-resurrection fence: if a terminal `compacted` edge
+            // landed while this RPC was in flight, it already processed the
+            // completion — the stale continuation must not resurrect the
+            // claim. Conversation-level generation cost: another client's
+            // terminal edge during our await also suppresses this row (the
+            // transcript still refreshes via that edge's own handling).
+            if terminalServerCompactionGeneration(for: sessionID) == invocationGeneration {
+                establishServerCompactionClaim(
+                    sessionId: sessionID,
+                    generation: invocationGeneration
+                )
+                appendSlashOutput(
+                    result.message ?? AppLocalization.string("Compression continues in the background; the transcript will refresh when it finishes."),
+                    context: context
+                )
             }
-            appendSlashOutput(
-                result.message ?? AppLocalization.string("Compression continues in the background; the transcript will refresh when it finishes."),
-                context: context
-            )
             return .untouched
         }
+        // Any authoritative terminal result ends the server-side claim.
+        clearServerCompactionClaim(sessionId: sessionID)
         let record = Self.compressionRecord(for: result)
         guard result.hasMessagesPayload else {
             appendSlashOutput(record, context: context)
@@ -12708,24 +12822,121 @@ final class AppState: ObservableObject {
         // is driven by the kind, not by gateway copy.
         switch kind {
         case .compacting:
-            // Insert deduped across equivalent ids so a re-homed runtime
-            // never leaves two live entries for one conversation.
-            guard !serverCompactingSessionIDs.contains(where: {
-                composerSessionIDsAreEquivalent($0, sessionId)
-            }) else { return }
-            serverCompactingSessionIDs.insert(sessionId)
+            establishServerCompactionClaim(
+                sessionId: sessionId,
+                generation: terminalServerCompactionGeneration(for: sessionId)
+            )
         case .compacted:
             // Equivalence-aware: a terminal edge addressed to any runtime
             // alias of the conversation clears its server-side claim.
-            let cleared = serverCompactingSessionIDs.filter {
-                composerSessionIDsAreEquivalent($0, sessionId)
-            }
-            serverCompactingSessionIDs.subtract(cleared)
+            clearServerCompactionClaim(sessionId: sessionId)
             applyCompactionCompleted(sessionId: sessionId)
         case .other:
             break
         }
     }
+
+    /// The storage key for a conversation's compaction generation: the
+    /// positively confirmed durable identity when the index knows one, else
+    /// the canonical catalog id. Keying by durable identity makes
+    /// alias-addressed terminal edges and pending continuations share one
+    /// counter across runtime rebinds.
+    private func serverCompactionGenerationKey(for sessionId: String) -> String {
+        if let durable = conversationIdentityIndex.durableID(
+            forRuntime: sessionId,
+            profile: activeProfile
+        ) {
+            return durable
+        }
+        return canonicalSessionID(for: sessionId) ?? sessionId
+    }
+
+    /// The conversation's terminal-compaction generation: the value stored
+    /// under its durable-generation key.
+    private func terminalServerCompactionGeneration(for sessionId: String) -> Int {
+        serverCompactionTerminalGenerations[serverCompactionGenerationKey(for: sessionId)] ?? 0
+    }
+
+    /// A terminal compaction signal (the gateway's `compacted` edge, or an
+    /// authoritative terminal `session.compress` result) ends any server-side
+    /// claim for the conversation and bumps its terminal generation so a
+    /// stale `pending` continuation cannot resurrect the claim.
+    private func clearServerCompactionClaim(sessionId: String) {
+        let key = serverCompactionGenerationKey(for: sessionId)
+        serverCompactionTerminalGenerations[key, default: 0] += 1
+        // Cancel expiry tasks for every equivalent alias, not just the
+        // addressed id — a re-homed runtime's task is inert after this.
+        for (taskKey, task) in serverCompactionClaimExpiryTasks
+        where composerSessionIDsAreEquivalent(taskKey, sessionId) {
+            task.cancel()
+            serverCompactionClaimExpiryTasks.removeValue(forKey: taskKey)
+        }
+        let cleared = serverCompactingSessionIDs.filter {
+            composerSessionIDsAreEquivalent($0, sessionId)
+        }
+        serverCompactingSessionIDs.subtract(cleared)
+        serverCompactionClaims = serverCompactionClaims.filter {
+            !composerSessionIDsAreEquivalent($0.key, sessionId)
+        }
+    }
+
+    /// Establishes (or refreshes) the server-side claim for `sessionId`.
+    /// Callers decide freshness: a `pending` continuation only reaches here
+    /// when no terminal edge landed during its RPC await. `lifetime` bounds
+    /// the claim (see `expireServerCompactionClaim`); production always uses
+    /// the compression budget, tests shrink it to observe the expiry.
+    func establishServerCompactionClaim(
+        sessionId: String,
+        generation: Int,
+        lifetime: TimeInterval = HermesClient.sessionCompressTimeout
+    ) {
+        if !serverCompactingSessionIDs.contains(where: {
+            composerSessionIDsAreEquivalent($0, sessionId)
+        }) {
+            serverCompactingSessionIDs.insert(sessionId)
+        }
+        serverCompactionClaims[sessionId] = ServerCompactionClaim(
+            generation: generation,
+            expiresAt: Date().addingTimeInterval(lifetime)
+        )
+        // Replace any prior expiry task for this conversation so repeated
+        // compactions never accumulate sleeping tasks.
+        serverCompactionClaimExpiryTasks[sessionId]?.cancel()
+        let expiryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(lifetime))
+            guard let self, !Task.isCancelled else { return }
+            self.expireServerCompactionClaim(sessionId: sessionId, generation: generation)
+        }
+        serverCompactionClaimExpiryTasks[sessionId] = expiryTask
+    }
+
+    /// Bounded expiry for a lost terminal edge: a claim that reaches the end
+    /// of one full compression budget without a `compacted` edge (or a newer
+    /// terminal result) is dropped — the gateway either lost the edge or the
+    /// session, and neither may keep "Compressing…" alive for the whole
+    /// connection. Session-scoped: only the claim whose generation still
+    /// matches is removed, so unrelated conversations are never touched, and
+    /// genuinely active local RPC claims (`compressingSessionIDs`) are never
+    /// affected — they are bounded by their own request timeout.
+    private func expireServerCompactionClaim(sessionId: String, generation: Int) {
+        guard let claim = serverCompactionClaims[sessionId],
+              claim.generation == generation,
+              claim.expiresAt <= Date() else { return }
+        serverCompactionClaims.removeValue(forKey: sessionId)
+        serverCompactionClaimExpiryTasks.removeValue(forKey: sessionId)
+        // Keep the spinner only while a newer equivalent claim (established
+        // under another runtime alias) is still live.
+        let equivalentStillClaimed = serverCompactionClaims.contains {
+            composerSessionIDsAreEquivalent($0.key, sessionId)
+        }
+        if !equivalentStillClaimed {
+            let stale = serverCompactingSessionIDs.filter {
+                composerSessionIDsAreEquivalent($0, sessionId)
+            }
+            serverCompactingSessionIDs.subtract(stale)
+        }
+    }
+
 
     /// The `compacted` edge means the gateway just rewrote that
     /// conversation's persisted history — the same server-side rewrite PR
