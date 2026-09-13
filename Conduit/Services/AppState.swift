@@ -450,6 +450,13 @@ final class AppState: ObservableObject {
     @Published private(set) var activeProfile: String = "default" {
         didSet { refreshActiveChatScrollSessionIdentity() }
     }
+    /// The saved multi-dashboard registry (#148). `activeDashboardID` is the
+    /// dashboard the user last chose — set at switch intent, kept on failed
+    /// switches, so a selected target never silently falls back to another
+    /// server.
+    @Published private(set) var savedDashboardRegistry: SavedDashboardRegistry
+    /// The dashboard a connection currently belongs to (the selected target).
+    var activeDashboardID: UUID? { savedDashboardRegistry.activeDashboardID }
     @Published private(set) var defaultProfileName: String
     @Published private(set) var profileAvatarURLs: [String: URL]
     @Published private(set) var isProfileSwitching = false
@@ -1358,7 +1365,9 @@ final class AppState: ObservableObject {
     private let sessionFilterOrderKey = "conduit.sessionFilterOrder.v1"
     private let reviewSummaryCacheKey = "conduit.reviewSummaryCache.v1"
     private let knownProfilesKey = "conduit.knownProfiles.v1"
-    private let chatResumeServerIdentityKey = "conduit.chatResumeServerIdentity.v1"
+    /// Shared with the saved-dashboard migration (which relabels a legacy
+    /// URL identity to the dashboard UUID), so it is a static.
+    static let chatResumeServerIdentityKey = "conduit.chatResumeServerIdentity.v1"
     private var activeSessionTitlesByProfile: [String: String] = [:]
     private var pinnedSessionIDsByProfile: [String: [String]] = [:]
     private let chatResumeCoordinator: ChatResumeCoordinator
@@ -1409,6 +1418,7 @@ final class AppState: ObservableObject {
         chatResumeCoordinator: ChatResumeCoordinator? = nil,
         recoverySequence: ChatResumeRecoverySequence = ChatResumeRecoverySequence(),
         loadSavedConnection shouldLoadSavedConnection: Bool = true,
+        dashboardRegistry preloadedRegistry: SavedDashboardRegistry? = nil,
         clearSessionPresentationCache: @escaping () -> Void = {
             SessionPresentationCache.shared.clear()
         },
@@ -1427,6 +1437,10 @@ final class AppState: ObservableObject {
             presentationCacheDebounceSuspension
             ?? { duration in try await Task.sleep(for: duration) }
         self.defaults = defaults
+        // The registry (and its legacy migration) loads before any connection
+        // hydration: scoped auth records are meaningless without it.
+        self.savedDashboardRegistry = preloadedRegistry
+            ?? SavedDashboardMigrator.loadRegistry(defaults: defaults)
         self.sessionPresentationCache = sessionPresentationCache
         self.sessionYoloStore = sessionYoloStore ?? SessionYoloStore(defaults: defaults)
         self.conversationIdentityIndex = conversationIdentityIndex ?? ConversationIdentityIndex()
@@ -1441,8 +1455,8 @@ final class AppState: ObservableObject {
         self.reconnectExecutor = reconnectExecutor
         self.chatResumeLifecycleOperations = chatResumeLifecycleOperations
         self.initialChatResumeServerIdentity = defaults
-            .string(forKey: "conduit.chatResumeServerIdentity.v1")
-            .flatMap(Self.normalizedChatResumeServerIdentity)
+            .string(forKey: Self.chatResumeServerIdentityKey)
+            .flatMap(Self.normalizedStoredChatResumeIdentity)
             ?? defaults.string(forKey: "conduit.dashboardURL")
                 .flatMap(Self.normalizedChatResumeServerIdentity)
         chatResumeBehavior = self.chatResumeCoordinator.behavior
@@ -2112,11 +2126,32 @@ final class AppState: ObservableObject {
 
     @discardableResult
     func prepareChatResumeForConnection(to baseURL: String) -> Bool {
-        guard let identity = Self.normalizedChatResumeServerIdentity(baseURL) else { return false }
-        let previousIdentity = defaults.string(forKey: chatResumeServerIdentityKey)
-            .flatMap(Self.normalizedChatResumeServerIdentity)
+        prepareChatResumeForConnection(to: baseURL, dashboardID: nil)
+    }
+
+    /// The authoritative server-change boundary. The dashboard UUID is the
+    /// server identity when the target is a saved dashboard: URL spellings
+    /// can collide across servers and a dashboard's address can move, while
+    /// the UUID is stable. Same-dashboard reconnects (same UUID) are never
+    /// treated as a server switch; every identity change retires the
+    /// outgoing server's runtime ownership exactly once, through this one
+    /// state machine.
+    @discardableResult
+    func prepareChatResumeForConnection(to baseURL: String, dashboardID: UUID?) -> Bool {
+        let identity: String
+        if let dashboardID {
+            identity = dashboardID.uuidString
+        } else if let normalized = Self.normalizedChatResumeServerIdentity(baseURL) {
+            identity = normalized
+        } else {
+            // An unparseable, dashboard-less URL is the caller's mistake; the
+            // stored identity must not be overwritten with garbage.
+            return false
+        }
+        let previousIdentity = defaults.string(forKey: Self.chatResumeServerIdentityKey)
+            .flatMap(Self.normalizedStoredChatResumeIdentity)
             ?? initialChatResumeServerIdentity
-        defaults.set(identity, forKey: chatResumeServerIdentityKey)
+        defaults.set(identity, forKey: Self.chatResumeServerIdentityKey)
         guard let previousIdentity, previousIdentity != identity else { return false }
 
         retireSpeechOperationsForServerReplacement(previousIdentity: previousIdentity, identity: identity)
@@ -2213,7 +2248,9 @@ final class AppState: ObservableObject {
         showVoiceSheet = false
     }
 
-    private static func normalizedChatResumeServerIdentity(_ baseURL: String) -> String? {
+    /// Internal so the saved-dashboard migration can normalize the legacy
+    /// identity key the same way the runtime boundary does.
+    static func normalizedChatResumeServerIdentity(_ baseURL: String) -> String? {
         guard let normalized = try? ConnectionURLPolicy.normalizedBaseURL(baseURL),
               var components = URLComponents(string: normalized),
               let scheme = components.scheme?.lowercased(),
@@ -2225,6 +2262,17 @@ final class AppState: ObservableObject {
             components.port = nil
         }
         return components.string
+    }
+
+    /// Stored chat-resume identities are either a normalized server URL
+    /// (legacy builds) or a dashboard UUID string (multi-server). UUID
+    /// strings pass through untouched; URL shapes normalize as before. A
+    /// UUID-shaped stored value must never be URL-parsed into nil — that
+    /// would make every cold start look like a server switch.
+    static func normalizedStoredChatResumeIdentity(_ stored: String) -> String? {
+        let trimmed = stored.trimmingCharacters(in: .whitespacesAndNewlines)
+        if UUID(uuidString: trimmed) != nil { return trimmed }
+        return Self.normalizedChatResumeServerIdentity(stored)
     }
 
     private func refreshActiveChatScrollSessionIdentity(
@@ -2337,7 +2385,7 @@ final class AppState: ObservableObject {
             chatResumeBehavior: chatResumeBehavior,
             chatReturnSurface: chatReturnSurface,
             displayPreferences: displayPreferences,
-            cloudflareAccess: KeychainHelper.loadCloudflareAccess(for: connection?.baseUrl)
+            cloudflareAccess: dashboardScopedCloudflareAccess(for: connection?.baseUrl)
         )
     }
 
@@ -2345,15 +2393,19 @@ final class AppState: ObservableObject {
         if let baseURL = connection?.baseUrl,
            let access = CloudflareAccessCredentials.from(clientID: clientID, clientSecret: clientSecret) {
             let normalized = (try? ConnectionURLPolicy.normalizedBaseURL(baseURL)) ?? baseURL
-            KeychainHelper.saveCloudflareAccess(access, origin: normalized)
-        } else {
-            KeychainHelper.clearCloudflareAccess()
+            if let dashboardID = resolveDashboardID(forNormalizedURL: normalized, registerIfMissing: true) {
+                KeychainHelper.saveCloudflareAccess(access, origin: normalized, dashboardID: dashboardID)
+            }
+        } else if let dashboardID = activeDashboardID {
+            KeychainHelper.clearCloudflareAccess(dashboardID: dashboardID)
         }
         if let baseURL = connection?.baseUrl { prepareDashboardBridge(for: baseURL) }
     }
 
     func removeCloudflareAccess() {
-        KeychainHelper.clearCloudflareAccess()
+        if let dashboardID = activeDashboardID {
+            KeychainHelper.clearCloudflareAccess(dashboardID: dashboardID)
+        }
         if let baseURL = connection?.baseUrl { prepareDashboardBridge(for: baseURL) }
     }
 
@@ -2498,10 +2550,17 @@ final class AppState: ObservableObject {
             return
         }
         #endif
-        if let credentials = KeychainHelper.loadCredentials() {
-            Task { await restoreSavedCredentials(credentials) }
-        } else if let saved = KeychainHelper.loadConnection() {
-            rememberDashboardURL(saved.baseUrl)
+        guard let activeID = savedDashboardRegistry.activeDashboardID,
+              let dashboard = savedDashboardRegistry.dashboard(with: activeID) else {
+            // No saved dashboards (clean install) or none selected: present
+            // the sign-in / add-dashboard flow.
+            showLogin = true
+            return
+        }
+        rememberDashboardURL(dashboard.normalizedURL)
+        if let credentials = KeychainHelper.loadCredentials(dashboardID: activeID) {
+            Task { await restoreSavedCredentials(credentials, dashboardID: activeID) }
+        } else if let saved = KeychainHelper.loadConnection(dashboardID: activeID) {
             // Keep the authenticated app shell in place while WebKit restores
             // its cookie process. A cold WebKit launch is not evidence that the
             // dashboard sign-in expired.
@@ -2510,9 +2569,13 @@ final class AppState: ObservableObject {
             isConnecting = true
             turnState = .synchronizing
             Task { await restoreSavedConnection(saved) }
+        } else {
+            // The selected dashboard has no reusable auth left (signed out or
+            // removed on another surface): present its sign-in, seeded with
+            // its own address.
+            showLogin = true
         }
     }
-
     func connect(with conn: HermesConnection, profile: String = "default") async {
         await connect(
             with: conn,
@@ -2546,7 +2609,12 @@ final class AppState: ObservableObject {
             pendingLoginFailure = .presenting(ConnectionFailureClassifier.classify(error))
             return
         }
-        prepareChatResumeForConnection(to: normalizedBaseURL)
+        // Adoption resolves the saved dashboard this connection belongs to
+        // (registering it when new) BEFORE the server-change boundary runs,
+        // so the boundary's identity is the dashboard UUID and the bridge
+        // built below can read this dashboard's scoped Cloudflare token.
+        let adoptedDashboardID = adoptDashboard(forNormalizedURL: normalizedBaseURL)
+        prepareChatResumeForConnection(to: normalizedBaseURL, dashboardID: adoptedDashboardID)
         let automaticWorkToken = syncPurpose == .automaticReturn
             ? (existingAutomaticWorkToken ?? beginAutomaticChatResumeWork())
             : nil
@@ -2620,7 +2688,7 @@ final class AppState: ObservableObject {
             lastConnectionFailure = nil
             reconnectAttempts = 0
             connectedAt = Date()
-            KeychainHelper.saveConnection(conn)
+            KeychainHelper.saveConnection(conn, dashboardID: adoptedDashboardID)
 
             await loadChatResumeProfiles()
             guard let continuation = transportContinuation(
@@ -2704,14 +2772,16 @@ final class AppState: ObservableObject {
     /// the normal seeding rules (a Face ID-protected record surrenders its
     /// username only).
     func makeSavedConnectionRepairContext() -> ConnectionRepairContext? {
-        guard let credentials = KeychainHelper.loadCredentials() else { return nil }
+        guard let activeID = activeDashboardID,
+              let credentials = KeychainHelper.loadCredentials(dashboardID: activeID) else { return nil }
         return repairContext(for: credentials.baseURL)
     }
 
     private func repairContext(for failedURL: String) -> ConnectionRepairContext {
+        let scopedCredentials = activeDashboardID.flatMap { KeychainHelper.loadCredentials(dashboardID: $0) }
         let seeded = ConnectionSetupSeeding.wizardCredentials(
             for: failedURL,
-            saved: KeychainHelper.loadCredentials()
+            saved: scopedCredentials
         )
         return ConnectionRepairContext(
             draft: ConnectionSetupDraft(
@@ -2719,7 +2789,7 @@ final class AppState: ObservableObject {
                 username: seeded?.username ?? "",
                 password: seeded?.password ?? ""
             ),
-            cloudflareAccess: KeychainHelper.loadCloudflareAccess(for: failedURL),
+            cloudflareAccess: dashboardScopedCloudflareAccess(for: failedURL),
             cloudflareOriginURL: failedURL,
             failure: lastConnectionFailure
         )
@@ -2783,7 +2853,12 @@ final class AppState: ObservableObject {
             // (login and ticket mint both succeeded first) — they are
             // naturally superseded by the next explicit test or sign-in and
             // are deliberately not rolled back.
-            candidate.nativeConnection.commitCookies()
+            if let dashboardID = resolveDashboardID(
+                forURL: candidate.configuration.serverURL,
+                registerIfMissing: true
+            ) {
+                candidate.nativeConnection.commitCookies(dashboardID: dashboardID)
+            }
             outcome = await activateRepairedConnection(with: HermesConnection(
                 baseUrl: candidate.configuration.serverURL,
                 ticket: candidate.nativeConnection.ticket
@@ -2843,8 +2918,8 @@ final class AppState: ObservableObject {
             let plan = ConnectionSetupApplication.plan(
                 result: candidate.configuration,
                 currentDashboardURL: anchor,
-                savedCredentials: KeychainHelper.loadCredentials(),
-                savedCloudflareAccess: KeychainHelper.loadCloudflareAccess(for: anchor)
+                savedCredentials: savedCredentialsForDashboard(at: anchor),
+                savedCloudflareAccess: dashboardScopedCloudflareAccess(for: anchor)
             )
             plan.perform(appState: self)
         case .browserSignIn(_, let baseURL, _):
@@ -2852,7 +2927,9 @@ final class AppState: ObservableObject {
             // stale native credentials are cleared, the activated dashboard
             // is remembered, and same-origin Cloudflare rules are untouched.
             rememberDashboardURL(baseURL)
-            KeychainHelper.clearCredentials()
+            if let dashboardID = resolveDashboardID(forURL: baseURL, registerIfMissing: false) {
+                KeychainHelper.clearCredentials(dashboardID: dashboardID)
+            }
         }
     }
 
@@ -2871,9 +2948,17 @@ final class AppState: ObservableObject {
         isConnected = false
         isConnecting = false
         connectedAt = nil
-        KeychainHelper.clearConnection()
-        KeychainHelper.clearCredentials()
-        KeychainHelper.clearCloudflareAccess()
+        // Sign Out of This Dashboard: only the active dashboard's reusable
+        // auth is cleared. Its SavedDashboard metadata and every other
+        // dashboard's records are untouched. The dashboard identity is
+        // captured BEFORE any state is nulled so the web/native session is
+        // cleared even when there is no live connection.
+        let signingOutDashboardID = activeDashboardID
+        if let dashboardID = signingOutDashboardID {
+            KeychainHelper.clearConnection(dashboardID: dashboardID)
+            KeychainHelper.clearCredentials(dashboardID: dashboardID)
+            KeychainHelper.clearCloudflareAccess(dashboardID: dashboardID)
+        }
         // The Keychain mirror of the dashboard cookies is cleared above, but
         // the live session cookies live on in WebKit's persistent default data
         // store and the shared Foundation cookie store. Without removing them,
@@ -2881,6 +2966,7 @@ final class AppState: ObservableObject {
         // session could be silently resumed on the next authentication flow.
         // Capture the origin before nulling `connection` and purge both stores.
         let dashboardBaseURL = connection?.baseUrl
+            ?? signingOutDashboardID.flatMap { savedDashboardRegistry.dashboard(with: $0)?.normalizedURL }
         connection = nil
         client = nil
         dashboardTicketBridge?.invalidate()
@@ -2922,19 +3008,28 @@ final class AppState: ObservableObject {
         activeSessionTitlesByProfile = [:]
         pinnedSessionIDsByProfile = [:]
         defaults.removeObject(forKey: activeProfileKey)
-        clearDashboardWebSession(for: dashboardBaseURL)
+        clearDashboardWebSession(dashboardID: signingOutDashboardID, baseURL: dashboardBaseURL)
     }
 
-    /// Removes the dashboard origin's cookies from the WebKit default data
-    /// store and the shared Foundation cookie store. The Foundation store is
-    /// cleared synchronously first so no rapid reconnect can reuse the native
-    /// session cookie; the WebKit store can only be mutated asynchronously, so
-    /// it is dispatched as a background task.
-    private func clearDashboardWebSession(for dashboardBaseURL: String?) {
-        guard let dashboardBaseURL else { return }
-        DashboardCookiePersistence.clearNativeCookies(for: dashboardBaseURL)
+    /// Clears a dashboard's web session at Sign Out / Remove. With a
+    /// dashboard identity the session is DASHBOARD-OWNED (#148): the
+    /// identified WebKit store is removed entirely and the dashboard's native
+    /// jar is wiped (plus exact-host residue in the shared jar — parent-domain
+    /// cookies shared with a sibling dashboard are never touched). Without an
+    /// identity (legacy/test shapes) the origin-scoped default-store cleanup
+    /// remains.
+    private func clearDashboardWebSession(dashboardID: UUID?, baseURL: String?) {
+        if let dashboardID {
+            Task { await DashboardCookiePersistence.clearWebKitSession(for: dashboardID) }
+            if let baseURL {
+                DashboardCookiePersistence.clearNativeCookies(dashboardID: dashboardID, baseURL: baseURL)
+            }
+            return
+        }
+        guard let baseURL else { return }
+        DashboardCookiePersistence.clearNativeCookies(for: baseURL)
         Task { @MainActor in
-            if let url = URL(string: dashboardBaseURL) {
+            if let url = URL(string: baseURL) {
                 await DashboardCookiePersistence.clear(
                     from: WKWebsiteDataStore.default().httpCookieStore,
                     for: url
@@ -2943,8 +3038,229 @@ final class AppState: ObservableObject {
         }
     }
 
+    // MARK: - Saved dashboards (#148)
+
+    /// Resolves the saved dashboard reached at this URL. Normalized URLs are
+    /// unique in the registry; `registerIfMissing` creates (but does not
+    /// activate) an entry, for pre-connection writes such as the browser
+    /// sign-in's Cloudflare token save.
+    @discardableResult
+    func resolveDashboardID(forNormalizedURL normalized: String, registerIfMissing: Bool) -> UUID? {
+        if let existing = savedDashboardRegistry.dashboardID(atNormalizedURL: normalized) {
+            return existing
+        }
+        guard registerIfMissing else { return nil }
+        return registerDashboard(forNormalizedURL: normalized)
+    }
+
+    /// Registers a saved dashboard for this address (if missing) and returns
+    /// its UUID — never optional, so adoption and pre-connection writes have
+    /// one non-failable registration path.
+    @discardableResult
+    func registerDashboard(forNormalizedURL normalized: String) -> UUID {
+        if let existing = savedDashboardRegistry.dashboardID(atNormalizedURL: normalized) {
+            return existing
+        }
+        var registry = savedDashboardRegistry
+        let id = UUID()
+        let label = SavedDashboardLabel.derive(from: normalized, existingLabels: registry.dashboards.map(\.label))
+        registry.dashboards.append(SavedDashboard(id: id, label: label, normalizedURL: normalized))
+        savedDashboardRegistry = registry
+        SavedDashboardRegistryStore.save(registry)
+        return id
+    }
+
+    func resolveDashboardID(forURL baseURL: String, registerIfMissing: Bool) -> UUID? {
+        let normalized = (try? ConnectionURLPolicy.normalizedBaseURL(baseURL))
+            ?? baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        return resolveDashboardID(forNormalizedURL: normalized, registerIfMissing: registerIfMissing)
+    }
+
+    /// Connection adoption: resolves the dashboard this connection belongs
+    /// to (registering it when new) and makes it the active/selected target.
+    /// Idempotent for reconnects. When the stored chat-resume identity still
+    /// names this server by URL (the pre-adoption boundary ran before the
+    /// dashboard existed), it is relabeled to the UUID so the next
+    /// connection to this dashboard is recognized as same-server.
+    @discardableResult
+    func adoptDashboard(forNormalizedURL normalized: String) -> UUID {
+        let id = registerDashboard(forNormalizedURL: normalized)
+        if savedDashboardRegistry.activeDashboardID != id {
+            var registry = savedDashboardRegistry
+            registry.activeDashboardID = id
+            savedDashboardRegistry = registry
+            SavedDashboardRegistryStore.save(registry)
+        }
+        if let stored = defaults.string(forKey: Self.chatResumeServerIdentityKey),
+           let normalizedStored = Self.normalizedChatResumeServerIdentity(stored),
+           normalizedStored == normalized {
+            defaults.set(id.uuidString, forKey: Self.chatResumeServerIdentityKey)
+        }
+        return id
+    }
+
+    /// The origin-matched Cloudflare token for the dashboard reached at this
+    /// URL, read from that dashboard's scoped record only.
+    func dashboardScopedCloudflareAccess(for baseURL: String?) -> CloudflareAccessCredentials? {
+        guard let baseURL else { return nil }
+        let normalized = (try? ConnectionURLPolicy.normalizedBaseURL(baseURL))
+            ?? baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let dashboardID = resolveDashboardID(forNormalizedURL: normalized, registerIfMissing: false) else { return nil }
+        return KeychainHelper.loadCloudflareAccess(dashboardID: dashboardID, for: baseURL)
+    }
+
+    /// Saved password credentials for the dashboard reached at this URL.
+    func savedCredentialsForDashboard(at baseURL: String) -> DashboardCredentials? {
+        guard let dashboardID = resolveDashboardID(forURL: baseURL, registerIfMissing: false) else { return nil }
+        return KeychainHelper.loadCredentials(dashboardID: dashboardID)
+    }
+
+    /// Bumped on every dashboard switch; a restore that started under an
+    /// older generation must not install its connection underneath a newer
+    /// switch.
+    private var dashboardSwitchGeneration: UInt64 = 0
+
+    /// Switch to a saved dashboard. Switching is NOT disconnecting: the
+    /// outgoing dashboard stays saved with its auth intact, but its runtime
+    /// ownership (client, sessions, speech) is retired IMMEDIATELY through
+    /// the authoritative `prepareChatResumeForConnection` boundary — a
+    /// switch that then fails to authenticate must not leave the outgoing
+    /// server streaming behind the new target's sign-in surface. The target
+    /// becomes the selected dashboard BEFORE connecting, so a failed switch
+    /// leaves it selected; no other dashboard is auto-connected.
+    func switchDashboard(to id: UUID) async {
+        guard let dashboard = savedDashboardRegistry.dashboard(with: id) else { return }
+        if id == activeDashboardID && (isConnected || isConnecting) {
+            // Already there: a same-dashboard reconnect is not a switch.
+            return
+        }
+        dashboardSwitchGeneration &+= 1
+        let generation = dashboardSwitchGeneration
+        selectDashboardTarget(id)
+        rememberDashboardURL(dashboard.normalizedURL)
+        _ = prepareChatResumeForConnection(to: dashboard.normalizedURL, dashboardID: id)
+        retireConnectionRuntimeForDashboardSwitch()
+        if let credentials = KeychainHelper.loadCredentials(dashboardID: id) {
+            await restoreSavedCredentials(credentials, dashboardID: id, switchGeneration: generation)
+            return
+        }
+        if let saved = KeychainHelper.loadConnection(dashboardID: id) {
+            // Cookie/ticket-based resume: keep the app shell up while the
+            // bridge restores the dashboard's own cookie mirror.
+            connection = saved
+            showLogin = false
+            isConnecting = true
+            turnState = .synchronizing
+            await restoreSavedConnection(saved, switchGeneration: generation)
+            return
+        }
+        // No reusable auth: present the sign-in surface seeded for this
+        // dashboard's address.
+        turnState = .idle
+        showLogin = true
+    }
+
+    /// Runtime-only teardown of the live connection when switching
+    /// dashboards. `prepareChatResumeForConnection` (called just before) owns
+    /// the server-replacement state retirement; this retires the transport
+    /// and connection-scoped surfaces it does not touch. Deliberately NOT
+    /// disconnect(): no saved auth, cookie mirror, or registry state is
+    /// cleared — the outgoing dashboard stays signed in while saved.
+    private func retireConnectionRuntimeForDashboardSwitch() {
+        cancelChatResumeTransportRecovery()
+        cancelScenePhaseAttempt()
+        cancelScheduledReconnect()
+        lastConnectionFailure = nil
+        pendingLoginFailure = nil
+        errorMessage = nil
+        client?.disconnect()
+        client = nil
+        // Fence already-queued callbacks from the outgoing server: they are
+        // epoch-gated, and no new client is created on the authless path.
+        activeClientEpoch = UUID()
+        connection = nil
+        isConnected = false
+        isConnecting = false
+        connectedAt = nil
+        dashboardTicketBridge?.invalidate()
+        dashboardTicketBridge = nil
+        // A flush scheduled under the outgoing server must not write through
+        // after the switch; the boundary already cleared the cache it would
+        // resurrect content into.
+        presentationCacheFlushTask?.cancel()
+        presentationCacheFlushTask = nil
+        messageReadAloudController.setGateway(nil)
+        readAloudGatewayBridge = nil
+        voiceConversationController.setGateway(nil)
+        voiceCapabilitySnapshot = .unavailable
+        isVoiceEnabled = false
+        retireOutstandingPreferredReturnSurfaceRequests()
+    }
+
+    private func switchGenerationIsCurrent(_ generation: UInt64) -> Bool {
+        generation == dashboardSwitchGeneration
+    }
+
+    /// Marks a dashboard as the selected target without connecting. A failed
+    /// switch leaves the target selected — retry/repair is presented for it,
+    /// and no other dashboard is auto-connected.
+    func selectDashboardTarget(_ id: UUID) {
+        guard savedDashboardRegistry.dashboard(with: id) != nil else { return }
+        guard savedDashboardRegistry.activeDashboardID != id else { return }
+        var registry = savedDashboardRegistry
+        registry.activeDashboardID = id
+        savedDashboardRegistry = registry
+        SavedDashboardRegistryStore.save(registry)
+    }
+
+    /// Sign Out of This Dashboard: clears the dashboard's reusable
+    /// auth/session/cookie material — and nothing else. SavedDashboard
+    /// metadata and every other dashboard's state are untouched. For the
+    /// active dashboard this is the full Disconnect teardown, scoped.
+    func signOutDashboard(_ id: UUID) {
+        guard let dashboard = savedDashboardRegistry.dashboard(with: id) else { return }
+        if id == activeDashboardID {
+            disconnect()
+            return
+        }
+        KeychainHelper.clearConnection(dashboardID: id)
+        KeychainHelper.clearCredentials(dashboardID: id)
+        KeychainHelper.clearCloudflareAccess(dashboardID: id)
+        // The dashboard is not connected, but its OWN web session may still
+        // hold live cookies from an earlier session; sign-out removes the
+        // identified WebKit store and the dashboard's native jar (plus
+        // exact-host shared-jar residue). Sibling dashboards sharing a parent
+        // domain are untouched.
+        Task { await DashboardCookiePersistence.clearWebKitSession(for: id) }
+        DashboardCookiePersistence.clearNativeCookies(dashboardID: id, baseURL: dashboard.normalizedURL)
+    }
+
+    /// Remove Dashboard: deletes the SavedDashboard and clears ONLY its
+    /// secure state. Removing the active dashboard leaves Conduit
+    /// disconnected with the dashboard selection/add flow presented — no
+    /// other saved dashboard is auto-connected.
+    func removeDashboard(_ id: UUID) {
+        guard savedDashboardRegistry.dashboard(with: id) != nil else { return }
+        let wasActive = id == activeDashboardID
+        if wasActive {
+            // Full scoped teardown of the active dashboard's auth and live
+            // session (including its origin's cookies).
+            disconnect()
+        } else {
+            signOutDashboard(id)
+        }
+        var registry = savedDashboardRegistry
+        registry.dashboards.removeAll { $0.id == id }
+        if registry.activeDashboardID == id { registry.activeDashboardID = nil }
+        savedDashboardRegistry = registry
+        SavedDashboardRegistryStore.save(registry)
+        if wasActive {
+            showLogin = true
+        }
+    }
+
     private func makeClient(connection: HermesConnection, profile: String) -> HermesClient {
-        let client = HermesClient(connection: connection, profile: profile, cloudflareAccess: KeychainHelper.loadCloudflareAccess(for: connection.baseUrl))
+        let client = HermesClient(connection: connection, profile: profile, cloudflareAccess: dashboardScopedCloudflareAccess(for: connection.baseUrl))
         let epoch = UUID()
         activeClientEpoch = epoch
         client.onEvent = { [weak self] event in
@@ -2967,51 +3283,114 @@ final class AppState: ObservableObject {
     /// only needed to mint a replacement ticket after that socket actually
     /// disconnects or fails. Requiring a freshly restored WebKit cookie before
     /// every launch was what turned a healthy saved Hermes session into login.
-    private func restoreSavedConnection(_ saved: HermesConnection) async {
+    private func restoreSavedConnection(_ saved: HermesConnection, switchGeneration: UInt64? = nil) async {
+        if let switchGeneration, !switchGenerationIsCurrent(switchGeneration) {
+            return
+        }
         prepareDashboardBridge(for: saved.baseUrl)
+        // Re-fence after the bridge's async setup window: never install a
+        // stale switch's connection.
+        if let switchGeneration, !switchGenerationIsCurrent(switchGeneration) {
+            return
+        }
         await connect(with: saved, profile: activeProfile)
     }
 
-    private func restoreSavedCredentials(_ credentials: DashboardCredentials) async {
+    private func restoreSavedCredentials(
+        _ credentials: DashboardCredentials,
+        dashboardID: UUID? = nil,
+        switchGeneration: UInt64? = nil
+    ) async {
+        // A superseded dashboard switch owns the flow; this stale restore
+        // must not prompt, spend network, or install its connection — and it
+        // must not touch presentation state the newer switch now owns.
+        if let switchGeneration, !switchGenerationIsCurrent(switchGeneration) {
+            return
+        }
+        let scopedDashboardID = dashboardID ?? activeDashboardID
         rememberDashboardURL(credentials.baseURL)
 
         if credentials.requiresFaceID {
             guard BiometricAuth.isFaceIDAvailable,
                   await BiometricAuth.authenticate(reason: AppLocalization.string("Unlock Conduit")) else {
-                showLogin = true
+                // A superseded switch owns the flow: present nothing.
+                if restoreOwnsFlow(switchGeneration) { showLogin = true }
+                return
+            }
+            // Re-fence after the biometric await: a superseded switch owns
+            // the flow now.
+            if let switchGeneration, !switchGenerationIsCurrent(switchGeneration) {
                 return
             }
         }
 
         do {
-            let authenticatedConnection = try await NativeAuthClient(baseURL: credentials.baseURL, cloudflareAccess: KeychainHelper.loadCloudflareAccess(for: credentials.baseURL)).connect(
+            let access = scopedDashboardID.flatMap {
+                KeychainHelper.loadCloudflareAccess(dashboardID: $0, for: credentials.baseURL)
+            }
+            let authenticatedConnection = try await NativeAuthClient(baseURL: credentials.baseURL, cloudflareAccess: access).connect(
                 username: credentials.username,
                 password: credentials.password
             )
-            authenticatedConnection.commitCookies()
+            // Re-fence after the network await: never install a stale
+            // switch's connection (its adoptDashboard would flip selection).
+            if let switchGeneration, !switchGenerationIsCurrent(switchGeneration) {
+                return
+            }
+            if let scopedDashboardID {
+                authenticatedConnection.commitCookies(dashboardID: scopedDashboardID)
+            }
             await connect(with: HermesConnection(baseUrl: credentials.baseURL, ticket: authenticatedConnection.ticket), profile: activeProfile)
         } catch is CancellationError {
             // A superseded connect owns the flow from here; fall back to the
-            // login screen silently.
-            showLogin = true
+            // login screen silently — but only if THIS restore still owns
+            // the flow. A stale restore (a newer switch won) writes nothing.
+            if restoreOwnsFlow(switchGeneration) { showLogin = true }
         } catch {
             // A rejected saved password falls back to the native login screen
             // without erasing it, allowing the user to correct the account.
             // The typed classified handoff replaces the old string write, so
             // the composer banner never inherits a stale sign-in message.
-            let failure = ConnectionFailureClassifier.classify(error)
-            lastConnectionFailure = failure
-            showLogin = true
-            pendingLoginFailure = .presenting(failure)
+            presentCredentialRestoreFailure(
+                ConnectionFailureClassifier.classify(error),
+                switchGeneration: switchGeneration
+            )
         }
+    }
+
+    /// Whether a restore that started under this switch generation may still
+    /// write state. Nil generations (non-switch restore paths) always own.
+    private func restoreOwnsFlow(_ generation: UInt64?) -> Bool {
+        guard let generation else { return true }
+        return switchGenerationIsCurrent(generation)
+    }
+
+    /// The fenced failure presentation for a saved-credential restore: a
+    /// superseded restore (a newer dashboard switch won) must not set
+    /// `showLogin`, `pendingLoginFailure`, or `lastConnectionFailure` over
+    /// the winner's state. Returns whether anything was written (test seam).
+    @discardableResult
+    func presentCredentialRestoreFailure(
+        _ failure: ConnectionFailure,
+        switchGeneration: UInt64?
+    ) -> Bool {
+        guard restoreOwnsFlow(switchGeneration) else { return false }
+        lastConnectionFailure = failure
+        showLogin = true
+        pendingLoginFailure = .presenting(failure)
+        return true
     }
 
     private func prepareDashboardBridge(for baseUrl: String) {
         let normalized = baseUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let access = KeychainHelper.loadCloudflareAccess(for: normalized)
+        let access = dashboardScopedCloudflareAccess(for: normalized)
         if dashboardTicketBridge?.baseURL != normalized || dashboardTicketBridge?.cloudflareAccess != access {
             dashboardTicketBridge?.invalidate()
-            dashboardTicketBridge = DashboardTicketBridge(baseURL: normalized, cloudflareAccess: access)
+            dashboardTicketBridge = DashboardTicketBridge(
+                baseURL: normalized,
+                cloudflareAccess: access,
+                dashboardID: resolveDashboardID(forURL: normalized, registerIfMissing: false)
+            )
         }
     }
 
@@ -3073,7 +3452,11 @@ final class AppState: ObservableObject {
         projects = []
         supportsProjects = false
         projectsLoading = false
-        KeychainHelper.clearConnection()
+        if let dashboardID = activeDashboardID {
+            // Forced sign-out is scoped like Disconnect: only the active
+            // dashboard's saved ticket (and cookie mirror) is retired.
+            KeychainHelper.clearConnection(dashboardID: dashboardID)
+        }
         turnState = .idle
         retireOutstandingPreferredReturnSurfaceRequests()
         // The banner content belonged to the session being torn down; with
@@ -4879,6 +5262,13 @@ final class AppState: ObservableObject {
     }
 
 #if DEBUG
+    /// Test seam: the current dashboard-switch generation, so tests can
+    /// construct genuinely-stale (never-current) generation values for the
+    /// restore/renewal fences.
+    func dashboardSwitchGenerationForTesting() -> UInt64 {
+        dashboardSwitchGeneration
+    }
+
     /// Test-only view of pending YOLO write ownership. Each entry maps a key
     /// to the number of active operations holding it; a non-empty dictionary
     /// after all operations settled means the bookkeeping leaked.
@@ -5099,6 +5489,15 @@ final class AppState: ObservableObject {
               Self.uiTestFailedConnectionStub() == nil else { return }
         #endif
         guard let savedConnection = connection else { return }
+        // The renewal's ownership is captured BEFORE any await: the renewed
+        // ticket belongs to exactly this dashboard and this switch
+        // generation. After the mint (or the silent re-auth), the fences
+        // below reject a superseded renewal — a dashboard switch that ran
+        // meanwhile owns the flow, and the stale ticket must neither install
+        // nor resolve against the now-changed selection.
+        let renewalDashboardID = resolveDashboardID(forURL: savedConnection.baseUrl, registerIfMissing: false)
+            ?? activeDashboardID
+        let renewalSwitchGeneration = dashboardSwitchGeneration
         let purpose = beginChatResumeRecovery(purpose: requestedPurpose)
         let automaticWorkToken = purpose == .automaticReturn
             ? beginAutomaticChatResumeWork()
@@ -5144,22 +5543,40 @@ final class AppState: ObservableObject {
         do {
             let ticket = try await mintChatResumeTicket(for: savedConnection)
             guard refreshTransportContinuation() else { return }
+            // Re-fence after the mint await: never install a stale renewal
+            // under a newer dashboard switch, and never resolve its owner
+            // from the now-changed selection.
+            guard switchGenerationIsCurrent(renewalSwitchGeneration),
+                  activeDashboardID == renewalDashboardID else { return }
             connection = HermesConnection(baseUrl: savedConnection.baseUrl, ticket: ticket)
             self.connection = connection
-            KeychainHelper.saveConnection(connection)
+            if let dashboardID = renewalDashboardID {
+                KeychainHelper.saveConnection(connection, dashboardID: dashboardID)
+            }
         } catch {
             guard refreshTransportContinuation() else { return }
             if let bridgeError = error as? DashboardTicketBridgeError, case .signInRequired = bridgeError {
                 var silentRenewalReauthError: Error?
-                if let credentials = KeychainHelper.loadCredentials(),
+                let scopedCredentials = activeDashboardID.flatMap { KeychainHelper.loadCredentials(dashboardID: $0) }
+                if let credentials = scopedCredentials,
                    credentials.baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")) == savedConnection.baseUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/")) {
                     do {
-                        let authenticatedConnection = try await NativeAuthClient(baseURL: credentials.baseURL, cloudflareAccess: KeychainHelper.loadCloudflareAccess(for: credentials.baseURL)).connect(
+                        let access = activeDashboardID.flatMap {
+                            KeychainHelper.loadCloudflareAccess(dashboardID: $0, for: credentials.baseURL)
+                        }
+                        let authenticatedConnection = try await NativeAuthClient(baseURL: credentials.baseURL, cloudflareAccess: access).connect(
                             username: credentials.username,
                             password: credentials.password
                         )
                         guard refreshTransportContinuation() else { return }
-                        authenticatedConnection.commitCookies()
+                        // Re-fence after the re-auth network await: a
+                        // superseded renewal must not commit cookies into
+                        // (or reload a bridge for) the wrong dashboard.
+                        guard switchGenerationIsCurrent(renewalSwitchGeneration),
+                              activeDashboardID == renewalDashboardID else { return }
+                        if let renewalDashboardID {
+                            authenticatedConnection.commitCookies(dashboardID: renewalDashboardID)
+                        }
                         // URLSession and WebKit have separate cookie stores.
                         // Reload the bridge so it receives the fresh session.
                         dashboardTicketBridge?.reload()
@@ -5910,7 +6327,7 @@ final class AppState: ObservableObject {
         using client: HermesClient
     ) async -> ForegroundRuntimeProbe {
         let evidenceProfile = activeProfile
-        let evidenceServerIdentity = defaults.string(forKey: chatResumeServerIdentityKey)
+        let evidenceServerIdentity = defaults.string(forKey: Self.chatResumeServerIdentityKey)
         do {
             let rows: [LiveSessionStatus]
             if let probeActiveSessions = chatResumeLifecycleOperations.probeActiveSessions {
@@ -5925,7 +6342,7 @@ final class AppState: ObservableObject {
             // replacement (reconnect, possibly re-addressed) stays valid
             // while a real server switch discards its in-flight rows.
             guard evidenceProfile == activeProfile,
-                  defaults.string(forKey: chatResumeServerIdentityKey) == evidenceServerIdentity else {
+                  defaults.string(forKey: Self.chatResumeServerIdentityKey) == evidenceServerIdentity else {
                 return .unavailable("Probe superseded by connection change")
             }
             recordActiveListEvidence(rows, profile: evidenceProfile)
@@ -7159,7 +7576,39 @@ final class AppState: ObservableObject {
     /// Routes a notification to its originating profile/session without
     /// allowing the ordinary cold-start session restoration to win first.
     func openNotificationTarget(_ target: ConduitNotificationTarget) async -> Bool {
-        guard connection != nil else { return false }
+        // Dashboard ownership gate (#148 / B3): a push from dashboard A is
+        // never processed against active dashboard B, even when profile,
+        // session, and request ids all collide. A push belonging to another
+        // KNOWN dashboard switches to it first — the decision card is
+        // recorded only after the owning dashboard is active, so it can
+        // never land in the outgoing dashboard's state. Unknown or unscoped
+        // identities fail closed.
+        switch NotificationDashboardOwnership.resolve(
+            targetDashboardID: target.dashboardID,
+            hasMalformedDashboardID: target.hasMalformedDashboardID,
+            activeDashboardID: activeDashboardID,
+            savedDashboardIDs: savedDashboardRegistry.dashboards.map(\.id)
+        ) {
+        case .route:
+            guard connection != nil else { return false }
+        case .switchFirst(let dashboardID):
+            await switchDashboard(to: dashboardID)
+            guard isConnected, activeDashboardID == dashboardID, client != nil else {
+                // The switch failed: the target stays selected with its
+                // sign-in/repair surface, and the notification routes
+                // nowhere. No other dashboard is auto-connected.
+                errorMessage = AppLocalization.string("Could not connect to that dashboard to open this notification.")
+                return false
+            }
+        case .failClosed(let failure):
+            switch failure {
+            case .unrecognizedDashboard:
+                errorMessage = AppLocalization.string("This notification belongs to a dashboard this device doesn't recognize. Add that dashboard again to continue.")
+            case .unscopedPush:
+                errorMessage = AppLocalization.string("This notification predates multi-dashboard pairing. Update the notifier on the sending gateway and pair it again to continue.")
+            }
+            return false
+        }
         let notificationAttemptID = UUID()
         activeNotificationOpenAttemptID = notificationAttemptID
         isOpeningNotificationSession = true
@@ -7903,7 +8352,7 @@ final class AppState: ObservableObject {
         // from the mutable active session afterwards.
         let acceptedIDs = acceptedIdentitySessionIDs(forRequested: sessionId)
         let evidenceProfile = activeProfile
-        let evidenceServerIdentity = defaults.string(forKey: chatResumeServerIdentityKey)
+        let evidenceServerIdentity = defaults.string(forKey: Self.chatResumeServerIdentityKey)
         let rows: [LiveSessionStatus]
         do {
             if let probeActiveSessions = chatResumeLifecycleOperations.probeActiveSessions {
@@ -7914,7 +8363,7 @@ final class AppState: ObservableObject {
             // Currency fence (see probeForegroundRuntime): a server change
             // during the await discards its in-flight rows.
             guard evidenceProfile == activeProfile,
-                  defaults.string(forKey: chatResumeServerIdentityKey) == evidenceServerIdentity else {
+                  defaults.string(forKey: Self.chatResumeServerIdentityKey) == evidenceServerIdentity else {
                 lifecycleLog.notice(
                     "submitComposer: stale-idle probe superseded by connection change; no evidence recorded"
                 )
@@ -8802,7 +9251,7 @@ final class AppState: ObservableObject {
         // The alias set was captured from the ORIGINAL submission before any
         // await; it is never re-derived from the mutable active session here.
         let evidenceProfile = activeProfile
-        let evidenceServerIdentity = defaults.string(forKey: chatResumeServerIdentityKey)
+        let evidenceServerIdentity = defaults.string(forKey: Self.chatResumeServerIdentityKey)
         let rows: [LiveSessionStatus]
         do {
             if let probeActiveSessions = chatResumeLifecycleOperations.probeActiveSessions {
@@ -8813,7 +9262,7 @@ final class AppState: ObservableObject {
             // Currency fence (see probeForegroundRuntime): a server change
             // during the await discards its in-flight rows.
             guard evidenceProfile == activeProfile,
-                  defaults.string(forKey: chatResumeServerIdentityKey) == evidenceServerIdentity else {
+                  defaults.string(forKey: Self.chatResumeServerIdentityKey) == evidenceServerIdentity else {
                 return (.unresolved, reconnected, lifecycleEvidence)
             }
             recordActiveListEvidence(rows, profile: evidenceProfile)
@@ -11331,7 +11780,9 @@ final class AppState: ObservableObject {
             previousClient?.disconnect()
             isConnected = true
             connectedAt = Date()
-            KeychainHelper.saveConnection(freshConnection)
+            if let dashboardID = activeDashboardID {
+                KeychainHelper.saveConnection(freshConnection, dashboardID: dashboardID)
+            }
             defaults.set(target, forKey: activeProfileKey)
 
             await syncSession(
@@ -14395,6 +14846,54 @@ final class AppState: ObservableObject {
 // MARK: - Keychain Helper
 
 enum KeychainHelper {
+    /// Storage backend seam. Production storage is the system keychain; tests
+    /// install an in-memory backend because the unsigned simulator test host
+    /// carries no keychain entitlements — every SecItem call fails with
+    /// errSecMissingEntitlement (-34018), which would make any write/read
+    /// round-trip silently useless. All record semantics (accessibility on
+    /// add, scoped-before-legacy reads, two-query deletes) stay ABOVE the
+    /// seam so the seam changes storage, never behavior.
+    protocol Backend {
+        func data(for query: [String: Any]) -> Data?
+        func update(_ data: Data, for query: [String: Any]) -> Int32
+        func add(_ query: [String: Any]) -> Int32
+        func delete(_ query: [String: Any])
+    }
+
+    struct SystemKeychainBackend: Backend {
+        func data(for query: [String: Any]) -> Data? {
+            var read = query
+            read[kSecReturnData as String] = true
+            read[kSecMatchLimit as String] = kSecMatchLimitOne
+            var item: CFTypeRef?
+            guard SecItemCopyMatching(read as CFDictionary, &item) == errSecSuccess,
+                  let data = item as? Data else { return nil }
+            return data
+        }
+
+        func update(_ data: Data, for query: [String: Any]) -> Int32 {
+            SecItemUpdate(query as CFDictionary, [
+                kSecValueData as String: data
+            ] as CFDictionary)
+        }
+
+        func add(_ query: [String: Any]) -> Int32 {
+            SecItemAdd(query as CFDictionary, nil)
+        }
+
+        func delete(_ query: [String: Any]) {
+            SecItemDelete(query as CFDictionary)
+        }
+    }
+
+    nonisolated(unsafe) private(set) static var backend: Backend = SystemKeychainBackend()
+
+    /// Swaps the backend (tests). Not thread-safe by design: XCTest suites
+    /// run serially within a simulator, and the swap is restored in teardown.
+    static func useBackendForTesting(_ backend: Backend) {
+        Self.backend = backend
+    }
+
     private static let key = "hermes-conduit.connection.v1"
     private static let dashboardCookieKey = "hermes-conduit.dashboard-cookies.v1"
     private static let credentialsKey = "hermes-conduit.credentials.v1"
@@ -14455,6 +14954,14 @@ enum KeychainHelper {
         delete(account: cloudflareAccessKey)
     }
 
+    /// The raw legacy global Cloudflare record (origin included), read only
+    /// by the legacy migration.
+    static func loadCloudflareKeychainRecord() -> CloudflareAccessKeychainRecord? {
+        guard let data = load(account: cloudflareAccessKey),
+              let stored = try? JSONDecoder().decode(CloudflareAccessKeychainRecord.self, from: data) else { return nil }
+        return stored
+    }
+
     static func savePushRegistration(_ data: Data) {
         save(data, account: pushRegistrationKey)
     }
@@ -14467,6 +14974,128 @@ enum KeychainHelper {
         delete(account: pushRegistrationKey)
     }
 
+    // MARK: Dashboard registry (multi-server, #148)
+
+    static let dashboardRegistryAccount = "hermes-conduit.dashboard-registry.v1"
+
+    static func saveDashboardRegistryData(_ data: Data) {
+        save(data, account: dashboardRegistryAccount)
+    }
+
+    static func loadDashboardRegistryData() -> Data? {
+        load(account: dashboardRegistryAccount)
+    }
+
+    /// Removes the registry record. Used by tests to reset cross-test
+    /// Keychain state; production never deletes the registry (migration
+    /// idempotency depends on its presence).
+    static func clearDashboardRegistry() {
+        delete(account: dashboardRegistryAccount)
+    }
+
+    // MARK: Dashboard-scoped secure records (multi-server, #148)
+    //
+    // Every reusable authentication record gains a dashboard-scoped variant
+    // whose Keychain account embeds the dashboard UUID. Scoped accounts can
+    // never collide with the legacy global accounts (the UUID suffix is
+    // globally unique), so the load-time legacy-query fallback below cannot
+    // cross dashboards — and only the migration path intentionally reads the
+    // legacy layout (see LegacyDashboardReader).
+
+    static func scopedAccount(_ base: String, dashboardID: UUID) -> String {
+        "\(base).\(dashboardID.uuidString)"
+    }
+
+    static func saveConnection(_ conn: HermesConnection, dashboardID: UUID) {
+        guard let data = try? JSONEncoder().encode(conn) else { return }
+        save(data, account: scopedAccount(key, dashboardID: dashboardID))
+    }
+
+    static func loadConnection(dashboardID: UUID) -> HermesConnection? {
+        guard let data = load(account: scopedAccount(key, dashboardID: dashboardID)) else { return nil }
+        return try? JSONDecoder().decode(HermesConnection.self, from: data)
+    }
+
+    /// Clears the scoped connection ticket AND the dashboard's durable cookie
+    /// mirror, mirroring the legacy `clearConnection()` pairing.
+    static func clearConnection(dashboardID: UUID) {
+        delete(account: scopedAccount(key, dashboardID: dashboardID))
+        delete(account: scopedAccount(dashboardCookieKey, dashboardID: dashboardID))
+    }
+
+    static func saveDashboardCookies(_ data: Data, dashboardID: UUID) {
+        save(data, account: scopedAccount(dashboardCookieKey, dashboardID: dashboardID))
+    }
+
+    static func loadDashboardCookies(dashboardID: UUID) -> Data? {
+        load(account: scopedAccount(dashboardCookieKey, dashboardID: dashboardID))
+    }
+
+    static func clearDashboardCookies(dashboardID: UUID) {
+        delete(account: scopedAccount(dashboardCookieKey, dashboardID: dashboardID))
+    }
+
+    static func saveCredentials(_ credentials: DashboardCredentials, dashboardID: UUID) {
+        guard let data = try? JSONEncoder().encode(credentials) else { return }
+        save(
+            data,
+            account: scopedAccount(credentialsKey, dashboardID: dashboardID),
+            accessibility: kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+        )
+    }
+
+    static func loadCredentials(dashboardID: UUID) -> DashboardCredentials? {
+        guard let data = load(account: scopedAccount(credentialsKey, dashboardID: dashboardID)) else { return nil }
+        return try? JSONDecoder().decode(DashboardCredentials.self, from: data)
+    }
+
+    static func clearCredentials(dashboardID: UUID) {
+        delete(account: scopedAccount(credentialsKey, dashboardID: dashboardID))
+    }
+
+    static func saveCloudflareAccess(_ access: CloudflareAccessCredentials, origin: String, dashboardID: UUID) {
+        let stored = CloudflareAccessKeychainRecord(clientID: access.clientID, clientSecret: access.clientSecret, origin: origin)
+        guard let data = try? JSONEncoder().encode(stored) else { return }
+        save(
+            data,
+            account: scopedAccount(cloudflareAccessKey, dashboardID: dashboardID),
+            accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        )
+    }
+
+    /// Returns the dashboard's stored token only when the stored origin
+    /// matches the given base URL — the same origin fence the global record
+    /// applies, now scoped per dashboard.
+    static func loadCloudflareAccess(dashboardID: UUID, for baseURL: String? = nil) -> CloudflareAccessCredentials? {
+        guard let record = loadCloudflareKeychainRecord(dashboardID: dashboardID) else { return nil }
+        if let baseURL {
+            let normalized = (try? ConnectionURLPolicy.normalizedBaseURL(baseURL)) ?? baseURL
+            guard record.origin == normalized else { return nil }
+        }
+        return record.credentials
+    }
+
+    static func clearCloudflareAccess(dashboardID: UUID) {
+        delete(account: scopedAccount(cloudflareAccessKey, dashboardID: dashboardID))
+    }
+
+    /// The raw Cloudflare record (origin included) for a dashboard, without
+    /// origin matching.
+    static func loadCloudflareKeychainRecord(dashboardID: UUID) -> CloudflareAccessKeychainRecord? {
+        guard let data = load(account: scopedAccount(cloudflareAccessKey, dashboardID: dashboardID)),
+              let stored = try? JSONDecoder().decode(CloudflareAccessKeychainRecord.self, from: data) else { return nil }
+        return stored
+    }
+
+    static func saveCloudflareKeychainRecord(_ record: CloudflareAccessKeychainRecord, dashboardID: UUID) {
+        guard let data = try? JSONEncoder().encode(record) else { return }
+        save(
+            data,
+            account: scopedAccount(cloudflareAccessKey, dashboardID: dashboardID),
+            accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        )
+    }
+
     private static func save(
         _ data: Data,
         account: String,
@@ -14475,15 +15104,13 @@ enum KeychainHelper {
         let query = scopedQuery(account: account)
         // Accessibility belongs to a Keychain item at creation. Including it
         // in every update can reject an otherwise valid cookie update.
-        let updateStatus = SecItemUpdate(query as CFDictionary, [
-            kSecValueData as String: data
-        ] as CFDictionary)
+        let updateStatus = backend.update(data, for: query)
         if updateStatus == errSecSuccess { return }
         if updateStatus == errSecItemNotFound {
             var insert = query
             insert[kSecValueData as String] = data
             insert[kSecAttrAccessible as String] = accessibility
-            SecItemAdd(insert as CFDictionary, nil)
+            _ = backend.add(insert)
         }
     }
 
@@ -14497,13 +15124,7 @@ enum KeychainHelper {
     }
 
     private static func load(query: [String: Any]) -> Data? {
-        var query = query
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data else { return nil }
-        return data
+        backend.data(for: query)
     }
 
     static func clearConnection() {
@@ -14512,8 +15133,8 @@ enum KeychainHelper {
     }
 
     private static func delete(account: String) {
-        SecItemDelete(scopedQuery(account: account) as CFDictionary)
-        SecItemDelete(legacyQuery(account: account) as CFDictionary)
+        backend.delete(scopedQuery(account: account))
+        backend.delete(legacyQuery(account: account))
     }
 
     private static func scopedQuery(account: String) -> [String: Any] {
