@@ -2469,6 +2469,26 @@
         }
       }
     },
+    "Compressing…" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在压缩…"
+          }
+        }
+      }
+    },
+    "Compression is already in progress for this conversation." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此对话已在进行压缩。"
+          }
+        }
+      }
+    },
     "Compression target" : {
       "localizations" : {
         "zh-Hans" : {
