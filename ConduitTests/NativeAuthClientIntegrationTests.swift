@@ -89,7 +89,7 @@ final class NativeAuthClientIntegrationTests: XCTestCase {
             "An expired cookie must never be published."
         )
         XCTAssertFalse(
-            (HTTPCookieStorage.shared.cookies ?? []).contains {
+            (jar.cookies ?? []).contains {
                 $0.domain.trimmingCharacters(in: CharacterSet(charactersIn: ".")) == "conduit-auth-poison.invalid"
             },
             "A response must not publish a cookie for an unrelated domain."
@@ -563,16 +563,13 @@ final class NativeAuthClientIntegrationTests: XCTestCase {
         ]) else {
             return XCTFail("Could not create loopback fixture cookie")
         }
-        HTTPCookieStorage.shared.setCookie(cookie)
+        jar.setCookie(cookie)
     }
 
     private func clearLoopbackCookies() {
-        let fixtureDomains = Set(["127.0.0.1", "localhost", "conduit-auth-poison.invalid"])
-        for cookie in HTTPCookieStorage.shared.cookies ?? [] {
-            let domain = cookie.domain.trimmingCharacters(in: CharacterSet(charactersIn: "."))
-            if fixtureDomains.contains(domain) {
-                HTTPCookieStorage.shared.deleteCookie(cookie)
-            }
+        // The dashboard-owned jar is exclusively this test's; wipe it whole.
+        for cookie in jar.cookies ?? [] {
+            jar.deleteCookie(cookie)
         }
     }
 }
