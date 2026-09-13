@@ -506,9 +506,11 @@ final class AppStateSessionCompressTests: XCTestCase {
         // offset=0 hydration response — a pre-compression nextOffset must
         // never survive.
         var page = Self.persistedPagePayload(rowIDs: ["row-1", "row-2", "row-3"], limit: 3)
+        var rehydrationQueries: [String] = []
         let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
-            persistedTranscript: { _, _ in
-                .payload(page)
+            persistedTranscript: { _, _, query in
+                rehydrationQueries.append(query)
+                return .payload(page)
             },
             compressSession: { _, _, _ in
                 Self.compressedResult()
@@ -539,13 +541,72 @@ final class AppStateSessionCompressTests: XCTestCase {
         )
         XCTAssertEqual(window.canLoadEarlier, false, "A short page retires the backfill affordance")
         XCTAssertFalse(harness.appState.canLoadEarlierMessagesForActiveConversation)
+        // Both rehydrations must have requested the validated latest tail at
+        // offset 0 — never any pre-compression offset. The first entry is
+        // hardcoded so a regression in the query builder itself cannot pass
+        // tautologically.
+        XCTAssertEqual(
+            rehydrationQueries,
+            [
+                "?limit=120&offset=0&order=latest&include_compacted=true",
+                PersistedTranscriptPagination.tailQuery(offset: 0)
+            ],
+            "Rehydration must request order=latest offset=0 after every adoption"
+        )
+    }
+
+    func testDeferredCompressionInvalidatesBackfillWindow() async throws {
+        // A deferred adoption (a live turn owns the transcript) still rewrites
+        // persisted history server-side: the pre-compression Load Earlier
+        // window must not remain usable, and no rehydration may run while the
+        // turn owns the transcript — the authoritative reconciliation
+        // re-establishes pagination and provenance later.
+        var page = Self.persistedPagePayload(rowIDs: ["row-1", "row-2", "row-3"], limit: 3)
+        var hydrationCalls = 0
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            persistedTranscript: { _, _, _ in
+                hydrationCalls += 1
+                return .payload(page)
+            },
+            compressSession: { _, _, _ in
+                Self.compressedResult()
+            }
+        ))
+        installComposerClient(in: harness)
+        let origin = session("composer-origin")
+        harness.appState.sessions = [origin]
+        harness.appState.activeSessionId = origin.id
+
+        let firstSubmitted = await harness.appState.submitComposer(text: "/compress")
+        XCTAssertTrue(firstSubmitted)
+        XCTAssertNotNil(harness.appState.persistedTranscriptWindow)
+        XCTAssertTrue(harness.appState.canLoadEarlierMessagesForActiveConversation)
+        XCTAssertEqual(hydrationCalls, 1)
+
+        // A turn starts; the next compression's adoption defers to it.
+        harness.appState.handleStreamEvent(.sessionBusy(sessionId: origin.id, busy: true))
+        XCTAssertEqual(harness.appState.turnState, .running)
+        harness.appState.messages = [
+            ChatMessage(id: "m1", role: .user, content: "Fresh local row", timestamp: "1")
+        ]
+
+        let secondSubmitted = await harness.appState.submitComposer(text: "/compress")
+        XCTAssertTrue(secondSubmitted)
+        // The pre-compression Load Earlier window cannot remain usable.
+        XCTAssertNil(harness.appState.persistedTranscriptWindow)
+        XCTAssertFalse(harness.appState.canLoadEarlierMessagesForActiveConversation)
+        XCTAssertTrue(harness.appState.transcriptFreshnessIsStale)
+        // The live turn's rows survive, and the deferred branch must NOT
+        // rehydrate: the authoritative reconciliation does that later.
+        XCTAssertEqual(harness.appState.messages.first?.content, "Fresh local row")
+        XCTAssertEqual(hydrationCalls, 1)
     }
 
     func testFailedRehydrationLeavesBackfillDisabled() async throws {
         var hydrationCalls = 0
         let goodPage = Self.persistedPagePayload(rowIDs: ["row-1", "row-2", "row-3"], limit: 3)
         let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
-            persistedTranscript: { _, _ in
+            persistedTranscript: { _, _, _ in
                 hydrationCalls += 1
                 if hydrationCalls == 1 {
                     return .payload(goodPage)

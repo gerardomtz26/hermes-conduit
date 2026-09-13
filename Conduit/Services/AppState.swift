@@ -39,13 +39,17 @@ struct ChatResumeLifecycleOperations {
     var loadCatalog: (@MainActor (HermesClient, Bool) async throws -> [SessionSummary])?
     var mintTicket: (@MainActor (String) async throws -> String)?
     var openSession: (@MainActor (HermesClient, String, Bool) async throws -> SessionResumeResult)?
-    /// Seam for the initial persisted-history fetch. Receives BOTH the
-    /// bounded tail-page request and the legacy one-shot re-read (an echo
-    /// without the `order=latest` contract) — the query argument is built by
-    /// the production path builder and is not threaded through the seam, so
-    /// callables distinguish the two requests by call order (bounded first,
-    /// one-shot re-read second, at most once).
-    var persistedTranscript: (@MainActor (String, String) async -> PersistedTranscriptFetchOutcome)?
+    /// Seam for the initial persisted-history fetch. Receives the session id,
+    /// profile, AND the exact query the production path builder built —
+    /// `order=latest offset=0` for the bounded tail page, the legacy one-shot
+    /// request for the re-read — so callables can observe the request shape,
+    /// not just the call order (bounded first, one-shot re-read second, at
+    /// most once).
+    var persistedTranscript: (@MainActor (
+        String,
+        String,
+        String
+    ) async -> PersistedTranscriptFetchOutcome)?
     /// Seam for older-page backfill requests only (`offset` = the window's
     /// next offset). Distinct from `persistedTranscript` so backfill tests
     /// never collide with initial-hydration fixtures.
@@ -98,7 +102,11 @@ struct ChatResumeLifecycleOperations {
         loadCatalog: (@MainActor (HermesClient, Bool) async throws -> [SessionSummary])? = nil,
         mintTicket: (@MainActor (String) async throws -> String)? = nil,
         openSession: (@MainActor (HermesClient, String, Bool) async throws -> SessionResumeResult)? = nil,
-        persistedTranscript: (@MainActor (String, String) async -> PersistedTranscriptFetchOutcome)? = nil,
+        persistedTranscript: (@MainActor (
+            String,
+            String,
+            String
+        ) async -> PersistedTranscriptFetchOutcome)? = nil,
         loadEarlierTranscriptPage: (@MainActor (String, String, Int) async -> PersistedTranscriptFetchOutcome)? = nil,
         branchSession: (@MainActor (
             HermesClient,
@@ -9689,8 +9697,20 @@ final class AppState: ObservableObject {
         // rows and streaming text (Desktop decouples this via per-runtime
         // session state). Mark the window stale so the next authoritative
         // sync converges, and leave the in-flight turn alone.
-        if turnState == .running || locallyOwnedInFlightTurn != nil {
+            // Leave `locallyOwnedInFlightTurn` alone: the live turn still
+            // owns the transcript, and settlement records its ordering debt.
+            if turnState == .running || locallyOwnedInFlightTurn != nil {
             transcriptFreshnessIsStale = true
+            // Compression rewrote the persisted history server-side even
+            // though adoption is deferred: a pre-compression backfill window
+            // must not stay usable — "Load earlier" would page offsets from
+            // a row universe that no longer exists. Invalidate here and do
+            // NOT rehydrate: the live turn is why adoption was deferred, and
+            // the next authoritative reconcile (or pre-send freshness gate)
+            // re-establishes pagination and provenance.
+            persistedTranscriptWindow = nil
+            durablePersistedRowIDs = []
+            persistedOrderingFrontier = PersistedOrderingFrontier()
             appendSlashOutput(record, context: context)
             return .deferred
         }
@@ -10628,7 +10648,7 @@ final class AppState: ObservableObject {
         using bridge: DashboardTicketBridge?
     ) async -> PersistedTranscriptFetchOutcome {
         if let persistedTranscript = chatResumeLifecycleOperations.persistedTranscript {
-            return await persistedTranscript(sessionId, profile)
+            return await persistedTranscript(sessionId, profile, query)
         }
         guard let bridge else { return .unavailable }
         do {
