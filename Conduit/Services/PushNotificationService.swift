@@ -18,6 +18,12 @@ struct ConduitNotificationTarget: Equatable, Identifiable {
     /// (multi-server routing, #148). Nil for pre-dashboard relays and
     /// gateways.
     let dashboardID: UUID?
+    /// The authenticated relay gateway's opaque id — the decision-routing
+    /// discriminator. Retained with a pushed relay decision and echoed back
+    /// when answering it, so same-id decisions parked by two gateways can
+    /// never be cross-answered. Purely relay-routing metadata: it is NOT
+    /// Conduit's saved-dashboard identity (that is `dashboardID`).
+    let relayGatewayID: String?
     /// The payload carried a `dashboard_id` that is not a valid UUID. That
     /// identity cannot be matched to any saved dashboard, so routing must
     /// fail closed instead of degrading to the legacy unscoped route.
@@ -28,7 +34,7 @@ struct ConduitNotificationTarget: Equatable, Identifiable {
     /// the one-shot gateway stream event was missed while the app was
     /// backgrounded. Nil for non-decision notifications.
     let decision: PendingDecisionPayload?
-    var id: String { "\(dashboardID?.uuidString ?? "none"):\(profile ?? "default"):\(sessionId):\(type ?? "")" }
+    var id: String { "\(dashboardID?.uuidString ?? "none"):\(relayGatewayID ?? "nogw"):\(profile ?? "default"):\(sessionId):\(type ?? "")" }
 
     init(
         profile: String?,
@@ -36,6 +42,7 @@ struct ConduitNotificationTarget: Equatable, Identifiable {
         durableSessionID: String? = nil,
         dashboardID: UUID? = nil,
         hasMalformedDashboardID: Bool = false,
+        relayGatewayID: String? = nil,
         type: String?,
         decision: PendingDecisionPayload? = nil
     ) {
@@ -44,6 +51,7 @@ struct ConduitNotificationTarget: Equatable, Identifiable {
         self.durableSessionID = durableSessionID
         self.dashboardID = dashboardID
         self.hasMalformedDashboardID = hasMalformedDashboardID
+        self.relayGatewayID = relayGatewayID
         self.type = type
         self.decision = decision
     }
@@ -360,6 +368,34 @@ final class PushNotificationService: ObservableObject {
     @Published private(set) var relayMeta: RelayMetaInfo?
     @Published private(set) var isFetchingMeta = false
 
+    /// Relay decision-routing discriminators retained from parsed pushes:
+    /// request id → the authenticated relay gateway id the push arrived
+    /// from. Answering a parked decision echoes this back so two gateways
+    /// holding same-id decisions can never be cross-answered. Session-only:
+    /// a card restored after relaunch answers through the relay's legacy
+    /// resolution (unambiguous → answered; ambiguous → fail closed).
+    private var relayGatewayIDsByRequestID: [String: String] = [:]
+
+    /// The discriminator to echo for this request id, if one was retained.
+    func relayGatewayID(forRequestID requestID: String) -> String? {
+        relayGatewayIDsByRequestID[requestID]
+    }
+
+    /// The respond body for a relay decision answer: answer, optional batch
+    /// question scoping, and the retained gateway discriminator. Static so
+    /// the wire contract is testable without the singleton.
+    static func respondBody(
+        requestID: String,
+        answer: String,
+        questionID: String? = nil,
+        relayGatewayID: String?
+    ) -> [String: String] {
+        var body = ["answer": answer]
+        if let questionID { body["question_id"] = questionID }
+        if let relayGatewayID { body["gateway_id"] = relayGatewayID }
+        return body
+    }
+
     private var relayURL: URL {
         if let saved = UserDefaults.standard.string(forKey: "conduit.relayURL"),
            let url = URL(string: saved) {
@@ -517,7 +553,12 @@ final class PushNotificationService: ObservableObject {
         requestId: String,
         answer: String
     ) async throws -> RelayDecisionOutcome {
-        switch try await relayDecisionRespond(requestId: requestId, body: ["answer": answer]) {
+        let body = Self.respondBody(
+            requestID: requestId,
+            answer: answer,
+            relayGatewayID: relayGatewayID(forRequestID: requestId)
+        )
+        switch try await relayDecisionRespond(requestId: requestId, body: body) {
         case .accepted: return .answered
         case .alreadyLocked: return .alreadyAnsweredElsewhere
         case .released, .noLongerActive: return .noLongerActive
@@ -533,9 +574,15 @@ final class PushNotificationService: ObservableObject {
         questionId: String,
         answer: String
     ) async throws -> RelayQuestionOutcome {
+        let body = Self.respondBody(
+            requestID: requestId,
+            answer: answer,
+            questionID: questionId,
+            relayGatewayID: relayGatewayID(forRequestID: requestId)
+        )
         switch try await relayDecisionRespond(
             requestId: requestId,
-            body: ["question_id": questionId, "answer": answer]
+            body: body
         ) {
         case .accepted(let remaining): return .locked(remaining: remaining)
         case .alreadyLocked: return .questionAlreadyLocked
@@ -687,11 +734,28 @@ final class PushNotificationService: ObservableObject {
 
     func receiveNotificationPayload(_ userInfo: [AnyHashable: Any]) {
         guard let target = Self.parseNotificationTarget(from: userInfo) else { return }
+        retainRelayGatewayID(for: target)
         navigationRetryTask?.cancel()
         navigationRetryTask = nil
         pendingTarget = target
         pendingRetryCount = 0
         navigationAttempt += 1
+    }
+
+    /// Retains the push's relay gateway discriminator for every relay
+    /// request id the decision carries, so a later answer echoes it.
+    private func retainRelayGatewayID(for target: ConduitNotificationTarget) {
+        guard let gatewayID = target.relayGatewayID else { return }
+        switch target.decision {
+        case .clarify(let requestID, _, _):
+            relayGatewayIDsByRequestID[requestID] = gatewayID
+        case .clarifyBatch(let requestID, _):
+            relayGatewayIDsByRequestID[requestID] = gatewayID
+        case .approval:
+            // Approvals answer through the gateway's approval.respond
+            // directly; the relay discriminator is never involved.
+            break
+        }
     }
 
     func clearPendingTarget(_ target: ConduitNotificationTarget) {
@@ -767,12 +831,17 @@ final class PushNotificationService: ObservableObject {
             dashboardID = nil
             hasMalformedDashboardID = false
         }
+        // The relay gateway discriminator is opaque routing metadata from
+        // the authenticated-gateway-stamped payload; retained verbatim.
+        let rawRelayGatewayID = (payload["gateway_id"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         return ConduitNotificationTarget(
             profile: profile?.isEmpty == false ? profile : nil,
             sessionId: sessionId,
             durableSessionID: durableSessionID,
             dashboardID: dashboardID,
             hasMalformedDashboardID: hasMalformedDashboardID,
+            relayGatewayID: rawRelayGatewayID?.isEmpty == false ? rawRelayGatewayID : nil,
             type: type?.isEmpty == false ? type : nil,
             decision: pendingDecision(from: payload)
         )
