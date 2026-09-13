@@ -2504,7 +2504,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "压缩正在后台继续；完成后转录将刷新。"
+            "value" : "压缩正在后台继续；完成后对话记录将刷新。"
           }
         }
       }
@@ -2930,7 +2930,7 @@
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "上下文压缩已中止；转录未发生更改。"
+            "value" : "上下文压缩已中止；对话记录未发生更改。"
           }
         }
       }
