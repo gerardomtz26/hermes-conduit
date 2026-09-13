@@ -521,13 +521,24 @@ final class AppState: ObservableObject {
     /// Desktop's `compressInFlightRef`: compressions of different
     /// conversations run concurrently.
     @Published private(set) var compressingSessionIDs: Set<String> = []
-    /// Whether the active conversation is the one compressing (drives the
-    /// composer's "Compressing…" notice). Plain runtime-id membership is fine
-    /// for an in-flight notice; the aliasing machinery matters for adoption
-    /// guards, not for hiding a spinner.
+    /// Conversations the GATEWAY reports as actively compacting
+    /// (`status.update` `kind: "compacting"`), or whose manual compression
+    /// answered `status: "pending"` — server-side compression still running
+    /// after the local RPC ended. Distinct from `compressingSessionIDs`
+    /// (local RPC in-flight): the RPC can return while the host keeps
+    /// compressing, and only the `compacted` edge (or an authoritative
+    /// reconnect, which invalidates unverified gateway state) clears it.
+    @Published private(set) var serverCompactingSessionIDs: Set<String> = []
+    /// Whether the active conversation is compressing — either a local
+    /// `session.compress` RPC is in flight or the gateway reports server-side
+    /// compaction. Alias-aware through the same session-equivalence machinery
+    /// duplicate detection uses, so a runtime rebind mid-compression
+    /// (runtime-old → runtime-new of one conversation) keeps the
+    /// "Compressing…" affordance visible.
     var isCompressingActiveSession: Bool {
         guard let activeSessionId else { return false }
-        return compressingSessionIDs.contains(activeSessionId)
+        return compressingSessionIDs.contains(where: { composerSessionIDsAreEquivalent($0, activeSessionId) })
+            || serverCompactingSessionIDs.contains(where: { composerSessionIDsAreEquivalent($0, activeSessionId) })
     }
     @Published private(set) var turnState: TurnState = .idle
     /// Whether `turnState` may have missed server-side turn edges. Set at
@@ -5013,6 +5024,12 @@ final class AppState: ObservableObject {
     private func handleDisconnect() {
         let wasRunning = isBusy
         isConnected = false
+        // Gateway compaction lifecycle state is unverifiable across a socket
+        // loss (the orphan reaper may have torn the compressing session
+        // down, and a `compacted` edge may never arrive): never keep a
+        // spinner alive on state we can no longer trust. Local RPC claims
+        // survive — they are bounded by their own request timeout.
+        serverCompactingSessionIDs.removeAll()
         guard connection != nil else { return }
         turnState = .reconnecting
 
@@ -9558,21 +9575,29 @@ final class AppState: ObservableObject {
             errorMessage = AppLocalization.string("Compression is already in progress for this conversation.")
             return
         }
-        compressingSessionIDs.insert(sessionID)
-        defer { compressingSessionIDs.remove(sessionID) }
+        var activeClaimID = sessionID
+        compressingSessionIDs.insert(activeClaimID)
+        defer { compressingSessionIDs.remove(activeClaimID) }
         let trimmedTopic = focusTopic.trimmingCharacters(in: .whitespacesAndNewlines)
+        let focusTopicParam = trimmedTopic.isEmpty ? nil : trimmedTopic
         do {
-            let result: SessionCompressResult
-            if let compressSession = chatResumeLifecycleOperations.compressSession {
-                result = try await compressSession(client, sessionID, trimmedTopic.isEmpty ? nil : trimmedTopic)
-            } else {
-                result = try await client.compressSession(
-                    sessionId: sessionID,
-                    focusTopic: trimmedTopic.isEmpty ? nil : trimmedTopic
-                )
-            }
-            guard isCurrentComposerSubmission(context) else { return }
-            let disposition = applySessionCompressionResult(result, sessionID: sessionID, context: context)
+            let outcome = try await compressSessionWithRecovery(
+                client: client,
+                sessionID: sessionID,
+                focusTopic: focusTopicParam,
+                context: context,
+                // A stale-runtime recovery rebound the conversation to a
+                // fresh runtime: move the in-flight claim with it so
+                // coalescing and the spinner follow the recovered identity
+                // for the whole retry window (no orphaned old-id entry).
+                onRecover: { recoveredSessionID in
+                    compressingSessionIDs.remove(activeClaimID)
+                    activeClaimID = recoveredSessionID
+                    compressingSessionIDs.insert(activeClaimID)
+                }
+            )
+            guard isCurrentComposerSubmission(outcome.context) else { return }
+            let disposition = applySessionCompressionResult(outcome.result, sessionID: outcome.sessionID, context: outcome.context)
             if disposition == .adopted {
                 // Fence: a reconcile whose transcript fetch resolved before
                 // the server-side compression committed would otherwise
@@ -9584,27 +9609,133 @@ final class AppState: ObservableObject {
                 // own the fence.
                 reconciliationToken = UUID()
                 await reestablishPersistedHistoryAfterCompression(
-                    requestedSessionID: sessionID,
-                    context: context
+                    requestedSessionID: outcome.sessionID,
+                    context: outcome.context
                 )
             }
         } catch {
-            guard isCurrentComposerSubmission(context) else { return }
-            if HermesClient.isMissingRPCMethod(error) {
+            // A recovery that rebound the session carries the REBASED
+            // context: classification, fences, and the legacy fallback must
+            // evaluate against the recovered identity, not the dead runtime.
+            let errorForReporting: Error
+            let reportingContext: ComposerSubmissionContext
+            if let recoveryFailure = error as? CompressionRecoveryContextError {
+                errorForReporting = recoveryFailure.underlying
+                reportingContext = recoveryFailure.context
+            } else {
+                errorForReporting = error
+                reportingContext = context
+            }
+            guard isCurrentComposerSubmission(reportingContext) else { return }
+            if HermesClient.isMissingRPCMethod(errorForReporting) {
                 await runLegacyCompressionFallback(
                     legacyCommand: legacyCommand,
                     aliasArgument: focusTopic,
                     client: client,
-                    sessionID: sessionID,
-                    context: context
+                    sessionID: activeClaimID,
+                    context: reportingContext
                 )
             } else {
                 appendSlashOutput(
-                    "⚠️ Compression failed: \(error.localizedDescription)",
-                    context: context
+                    "⚠️ Compression failed: \(errorForReporting.localizedDescription)",
+                    context: reportingContext
                 )
             }
         }
+    }
+
+    /// One `session.compress` call with upstream Desktop's stale-runtime
+    /// recovery (`withSessionNotFoundResume`, minus the runtime cache): if —
+    /// and only if — the gateway answers `4001 "session not found"` for a
+    /// reaped/detached runtime, resume the conversation's durable stored id
+    /// once, rebind the active runtime through the canonical state helper,
+    /// and retry ONCE against the fresh runtime. Timeouts (compression is
+    /// legitimately LLM-bound), busy rejections, connection loss, and
+    /// compression errors are never recovery signals; a resume failure
+    /// rethrows the ORIGINAL compression error, which is the more meaningful
+    /// one. The returned context is re-based onto the recovered runtime so
+    /// the caller's post-retry fences validate the NEW identity.
+    /// A stale-runtime recovery rebound the submission to a fresh runtime;
+    /// failures after that rebind fence against the RECOVERED identity, so
+    /// reporters must unwrap `underlying` and fence with `context`.
+    private struct CompressionRecoveryContextError: Error {
+        let underlying: Error
+        let context: ComposerSubmissionContext
+    }
+
+    private func compressSessionWithRecovery(
+        client: HermesClient,
+        sessionID: String,
+        focusTopic: String?,
+        context: ComposerSubmissionContext,
+        onRecover: @MainActor (String) -> Void
+    ) async throws -> (result: SessionCompressResult, sessionID: String, context: ComposerSubmissionContext) {
+        do {
+            let result = try await performCompressSession(
+                client: client,
+                sessionID: sessionID,
+                focusTopic: focusTopic
+            )
+            return (result, sessionID, context)
+        } catch {
+            // Bind the ORIGINAL error first: the recovery steps below have
+            // their own failure modes, and the original compression error is
+            // the one that stays meaningful. (An inner `catch { throw error }`
+            // would rethrow the RESUME failure instead.)
+            let originalError = error
+            guard HermesClient.isSessionNotFoundError(originalError) else { throw originalError }
+            // Recovery needs the durable stored id the catalog anchors this
+            // conversation to; an unanchored runtime has nowhere to resume.
+            guard let catalogRow = (sessions + cronSessions).first(where: {
+                $0.id == sessionID || $0.alternateIds.contains(sessionID)
+            }) else { throw originalError }
+            let storedSessionID = catalogRow.storedSessionId ?? catalogRow.id
+            let resumed: SessionResumeResult
+            do {
+                resumed = try await openChatResumeSession(storedSessionID, using: client, compact: true)
+            } catch {
+                // Resume failure: surface the ORIGINAL compression error
+                // (upstream Desktop rethrows it too).
+                throw originalError
+            }
+            let recoveredSessionID = resumed.sessionId
+            // Drift fence: identity must still own this submission after the
+            // resume await. If the user navigated away, do not rebind and do
+            // not send compression to the recovered runtime.
+            guard isCurrentComposerSubmission(context) else { throw originalError }
+            // Rebind through the canonical state helper: updates
+            // `activeSessionId` and re-anchors the persisted identity.
+            setActiveSessionState(id: recoveredSessionID)
+            onRecover(recoveredSessionID)
+            // Re-base the submission onto the recovered runtime: the old
+            // context describes the dead runtime and would fail every
+            // post-retry ownership fence.
+            let reboundContext = composerSubmissionContext()
+            do {
+                let result = try await performCompressSession(
+                    client: client,
+                    sessionID: recoveredSessionID,
+                    focusTopic: focusTopic
+                )
+                return (result, recoveredSessionID, reboundContext)
+            } catch {
+                // A second failure is a real error (upstream Desktop), but it
+                // belongs to the RECOVERED identity: fence and report there,
+                // never against the dead runtime.
+                throw CompressionRecoveryContextError(underlying: error, context: reboundContext)
+            }
+        }
+    }
+
+    private func performCompressSession(
+        client: HermesClient,
+        sessionID: String,
+        focusTopic: String?
+    ) async throws -> SessionCompressResult {
+        if let compressSession = chatResumeLifecycleOperations.compressSession {
+            return try await compressSession(client, sessionID, focusTopic)
+        }
+        return try await client.compressSession(sessionId: sessionID, focusTopic: focusTopic)
     }
 
     /// Older gateways predate `session.compress`; keep today's generic slash
@@ -9666,7 +9797,7 @@ final class AppState: ObservableObject {
             // automatic one — already holds the compression lock. Not an
             // error, and never retried from here.
             appendSlashOutput(
-                result.message ?? "Compression is already in progress.",
+                result.message ?? AppLocalization.string("Compression is already in progress."),
                 context: context
             )
             return .untouched
@@ -9674,10 +9805,18 @@ final class AppState: ObservableObject {
         if result.isPending {
             // The gateway's bounded compute-host wait expired while the host
             // is still compressing; it pushes `session.info` plus a
-            // `compacted` status edge when the host finishes. Not an error,
-            // and never retried (upstream #97948).
+            // `compacted` status.update edge when the host finishes. Not an
+            // error, and never retried (upstream #97948). The RPC ending is
+            // NOT the compression finishing: record the server-side
+            // compaction so the spinner stays truthful until the `compacted`
+            // edge (or an authoritative reconnect) clears it.
+            if !serverCompactingSessionIDs.contains(where: {
+                composerSessionIDsAreEquivalent($0, sessionID)
+            }) {
+                serverCompactingSessionIDs.insert(sessionID)
+            }
             appendSlashOutput(
-                result.message ?? "Compression continues in the background; the transcript will refresh when it finishes.",
+                result.message ?? AppLocalization.string("Compression continues in the background; the transcript will refresh when it finishes."),
                 context: context
             )
             return .untouched
@@ -9697,9 +9836,10 @@ final class AppState: ObservableObject {
         // rows and streaming text (Desktop decouples this via per-runtime
         // session state). Mark the window stale so the next authoritative
         // sync converges, and leave the in-flight turn alone.
-            // Leave `locallyOwnedInFlightTurn` alone: the live turn still
-            // owns the transcript, and settlement records its ordering debt.
-            if turnState == .running || locallyOwnedInFlightTurn != nil {
+        //
+        // Leave `locallyOwnedInFlightTurn` alone: the live turn still owns
+        // the transcript, and settlement records its ordering debt.
+        if turnState == .running || locallyOwnedInFlightTurn != nil {
             transcriptFreshnessIsStale = true
             // Compression rewrote the persisted history server-side even
             // though adoption is deferred: a pre-compression backfill window
@@ -9708,9 +9848,7 @@ final class AppState: ObservableObject {
             // NOT rehydrate: the live turn is why adoption was deferred, and
             // the next authoritative reconcile (or pre-send freshness gate)
             // re-establishes pagination and provenance.
-            persistedTranscriptWindow = nil
-            durablePersistedRowIDs = []
-            persistedOrderingFrontier = PersistedOrderingFrontier()
+            invalidatePersistedHistoryInvariants()
             appendSlashOutput(record, context: context)
             return .deferred
         }
@@ -9726,7 +9864,8 @@ final class AppState: ObservableObject {
     private static func compressionRecord(for result: SessionCompressResult) -> String {
         if result.isAborted {
             let detail = result.summaryHeadline ?? result.summaryNote ?? result.message
-            return detail.map { "⚠️ \($0)" } ?? "⚠️ Context compression was aborted; the transcript is unchanged."
+            return detail.map { "⚠️ \($0)" }
+                ?? AppLocalization.string("⚠️ Context compression was aborted; the transcript is unchanged.")
         }
         let summaryLines = [result.summaryHeadline, result.summaryTokenLine, result.summaryNote]
             .compactMap { $0 }
@@ -9737,7 +9876,20 @@ final class AppState: ObservableObject {
             return hostOutput
         }
         let removed = result.removed ?? 0
-        return removed > 0 ? "Compressed \(removed) messages." : "Nothing to compress."
+        return removed > 0
+            ? AppLocalization.string("Compressed \(Int(removed)) messages.")
+            : AppLocalization.string("Nothing to compress.")
+    }
+
+    /// The persisted-history invariants that describe "which persisted rows
+    /// the local transcript covers". A server-side compression rewrites that
+    /// row universe, so any pre-compression window offset, durable-row
+    /// provenance, and ordering frontier is obsolete the moment the rewrite
+    /// lands — they are re-established only by a fresh validated hydration.
+    private func invalidatePersistedHistoryInvariants() {
+        persistedTranscriptWindow = nil
+        durablePersistedRowIDs = []
+        persistedOrderingFrontier = PersistedOrderingFrontier()
     }
 
     /// Adopt the gateway's post-compress transcript for the current
@@ -9780,12 +9932,10 @@ final class AppState: ObservableObject {
         // Compression rewrote the persisted history server-side: window
         // offsets, durable-row provenance, and the ordering frontier from
         // BEFORE the compression describe history that no longer exists.
-        // They are re-established only from a fresh validated offset=0
-        // hydration (reestablishPersistedHistoryAfterCompression); until
+        // They are re-established only from a fresh validated hydration
+        // (reestablishPersistedHistoryAfterCompression); until
         // that succeeds, backfill stays disabled.
-        persistedTranscriptWindow = nil
-        durablePersistedRowIDs = []
-        persistedOrderingFrontier = PersistedOrderingFrontier()
+        invalidatePersistedHistoryInvariants()
         noteChatViewportTranscriptReplacement()
         cacheMessagePresentation()
     }
@@ -12533,8 +12683,72 @@ final class AppState: ObservableObject {
             )
             return
         }
+        // Compaction lifecycle edges are session-scoped bookkeeping, not
+        // transcript projection: they must run for background conversations
+        // too (clearing state, driving the active conversation's refresh)
+        // and are never buffered into a reconcile.
+        if case .statusUpdate(let sessionId, let kind, let text) = event {
+            applyStatusUpdate(sessionId: sessionId, kind: kind, text: text)
+            return
+        }
         if bufferIfReconciling(event) { return }
         applyStreamEvent(event)
+    }
+
+    /// Gateway compression lifecycle edges (`status.update`):
+    /// - `compacting` — server-side compaction active for that conversation.
+    /// - `compacted` — terminal edge: the persisted history was rewritten.
+    /// Unrelated kinds are ignored; they never masquerade as compaction.
+    private func applyStatusUpdate(sessionId: String, kind: StatusUpdateKind, text: String?) {
+        // `text` is display-only upstream; Conduit's compression affordance
+        // is driven by the kind, not by gateway copy.
+        switch kind {
+        case .compacting:
+            // Insert deduped across equivalent ids so a re-homed runtime
+            // never leaves two live entries for one conversation.
+            guard !serverCompactingSessionIDs.contains(where: {
+                composerSessionIDsAreEquivalent($0, sessionId)
+            }) else { return }
+            serverCompactingSessionIDs.insert(sessionId)
+        case .compacted:
+            // Equivalence-aware: a terminal edge addressed to any runtime
+            // alias of the conversation clears its server-side claim.
+            let cleared = serverCompactingSessionIDs.filter {
+                composerSessionIDsAreEquivalent($0, sessionId)
+            }
+            serverCompactingSessionIDs.subtract(cleared)
+            applyCompactionCompleted(sessionId: sessionId)
+        case .other:
+            break
+        }
+    }
+
+    /// The `compacted` edge means the gateway just rewrote that
+    /// conversation's persisted history — the same server-side rewrite PR
+    /// #168's adoption path guards against, minus the local RPC. Upstream
+    /// Desktop drives a transcript refresh here because a manual `/compress`
+    /// may have returned `pending`: with no normal turn-end event, nothing
+    /// else would surface the summarized transcript.
+    private func applyCompactionCompleted(sessionId: String) {
+        // Only the affected conversation's invariants die with the rewrite.
+        // A background conversation's next open/resume hydrates
+        // authoritatively.
+        guard composerSessionIDsAreEquivalent(sessionId, activeSessionId) else { return }
+        invalidatePersistedHistoryInvariants()
+        // A live turn owns the transcript: never replace it underneath the
+        // turn. Freshness-stale routes the post-turn authoritative path here.
+        if turnState == .running || locallyOwnedInFlightTurn != nil {
+            transcriptFreshnessIsStale = true
+            // Fence: a reconcile that fetched pre-compaction rows must not
+            // commit them underneath the live turn after this rewrite.
+            reconciliationToken = UUID()
+            return
+        }
+        // Idle: drive the authoritative transcript reconciliation now — the
+        // user sees the compressed transcript without leaving the session.
+        Task { [weak self] in
+            await self?.syncSession()
+        }
     }
 
     private func bufferIfReconciling(_ event: StreamEvent) -> Bool {
@@ -12557,7 +12771,9 @@ final class AppState: ObservableObject {
                 .approval(let sessionId, _),
                 .contextUpdate(let sessionId, _, _, _), .cwdUpdate(let sessionId, _),
                 .modelUpdate(let sessionId, _, _), .agentCount(let sessionId, _),
-                .delegateAgent(let sessionId, _):
+                .delegateAgent(let sessionId, _), .statusUpdate(let sessionId, _, _):
+            // Unreachable through bufferIfReconciling (status.update returns
+            // early); kept for switch completeness.
             return sessionId
         case .unparsed:
             return ""
@@ -12801,6 +13017,11 @@ final class AppState: ObservableObject {
                 delegateAgents.append(activity)
             }
             activeAgents = delegateAgents.filter { $0.status.isActive }.count
+
+        case .statusUpdate:
+            // Lifecycle bookkeeping — handled in handleStreamEvent before
+            // the active-session gate; never a transcript projection.
+            break
 
         case .unparsed:
             break

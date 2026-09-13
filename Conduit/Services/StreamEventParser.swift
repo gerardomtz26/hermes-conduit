@@ -61,6 +61,16 @@ enum StreamEventParser {
         case "session.info":
             return .sessionInfo(sessionId: sessionId, snapshot: SessionRuntimeSnapshot(object: payload ?? [:]))
 
+        case "status.update":
+            let kindRaw = payload?["kind"]?.stringValue ?? ""
+            let kind: StatusUpdateKind
+            switch kindRaw {
+            case "compacting": kind = .compacting
+            case "compacted": kind = .compacted
+            default: kind = .other(kindRaw)
+            }
+            return .statusUpdate(sessionId: sessionId, kind: kind, text: payload?["text"]?.stringValue)
+
         case "session.title":
             let storedSessionId = payload?["session_id"]?.stringValue ?? ""
             let title = payload?["title"]?.stringValue?
