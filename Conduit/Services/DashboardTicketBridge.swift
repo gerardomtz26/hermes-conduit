@@ -53,8 +53,16 @@ enum DashboardCookiePersistence {
         }
     }
 
-    static func restore(into cookieStore: WKHTTPCookieStore) async {
-        guard let data = KeychainHelper.loadDashboardCookies(),
+    static func restore(into cookieStore: WKHTTPCookieStore, dashboardID: UUID? = nil) async {
+        // Dashboard-scoped mirror first (#148); the legacy global record is
+        // only consulted when the caller has no dashboard identity (tests).
+        let data: Data?
+        if let dashboardID {
+            data = KeychainHelper.loadDashboardCookies(dashboardID: dashboardID)
+        } else {
+            data = KeychainHelper.loadDashboardCookies()
+        }
+        guard let data,
               let saved = try? JSONDecoder().decode([StoredCookie].self, from: data) else { return }
         for cookie in saved.compactMap(\.cookie) {
             await cookieStore.setCookie(cookie)
@@ -75,7 +83,8 @@ enum DashboardCookiePersistence {
     static func capture(
         from cookieStore: WKHTTPCookieStore,
         for url: URL?,
-        shouldPersist: (() -> Bool)? = nil
+        shouldPersist: (() -> Bool)? = nil,
+        dashboardID: UUID
     ) async {
         guard let host = url?.host?.lowercased() else { return }
         let cookies = await cookieStore.allCookies().filter { cookie in
@@ -86,7 +95,7 @@ enum DashboardCookiePersistence {
         // the durable mirror survives, so consult the guard here.
         if let shouldPersist, !shouldPersist() { return }
         guard let data = try? JSONEncoder().encode(cookies.map(StoredCookie.init)) else { return }
-        KeychainHelper.saveDashboardCookies(data)
+        KeychainHelper.saveDashboardCookies(data, dashboardID: dashboardID)
     }
 
     /// Removes dashboard-origin cookies from a WebKit cookie store. Disconnect
@@ -212,6 +221,10 @@ final class DashboardTicketBridge: NSObject {
     let baseURL: String
     let webView: WKWebView
     let cloudflareAccess: CloudflareAccessCredentials?
+    /// The saved dashboard this bridge authenticates against, when one
+    /// exists — decides which dashboard's scoped cookie mirror is restored
+    /// into the WebKit store on load.
+    let dashboardID: UUID?
 
     private var isReady = false
     /// Whether the current dashboard page load has terminally failed (as
@@ -260,6 +273,7 @@ final class DashboardTicketBridge: NSObject {
     init(
         baseURL: String,
         cloudflareAccess: CloudflareAccessCredentials? = nil,
+        dashboardID: UUID? = nil,
         pendingRequests: DashboardTicketBridgePendingRequests = DashboardTicketBridgePendingRequests(),
         readinessPollAttempts: Int = 30,
         readinessPollInterval: Duration = .milliseconds(100),
@@ -268,6 +282,7 @@ final class DashboardTicketBridge: NSObject {
         let normalizedBaseURL = (try? ConnectionURLPolicy.normalizedBaseURL(baseURL)) ?? ""
         self.baseURL = normalizedBaseURL
         self.cloudflareAccess = cloudflareAccess
+        self.dashboardID = dashboardID ?? SavedDashboardRegistryStore.load()?.dashboardID(atNormalizedURL: normalizedBaseURL)
         self.pendingRequests = pendingRequests
         // A negative count would build an invalid Range in the polling loops.
         self.readinessPollAttempts = max(0, readinessPollAttempts)
@@ -286,7 +301,10 @@ final class DashboardTicketBridge: NSObject {
         webView.navigationDelegate = self
         Task { [weak self] in
             guard let self else { return }
-            await DashboardCookiePersistence.restore(into: self.webView.configuration.websiteDataStore.httpCookieStore)
+            await DashboardCookiePersistence.restore(
+                into: self.webView.configuration.websiteDataStore.httpCookieStore,
+                dashboardID: self.dashboardID
+            )
             await DashboardCookiePersistence.restoreNativeCookies(
                 into: self.webView.configuration.websiteDataStore.httpCookieStore,
                 for: self.baseURL
@@ -344,7 +362,10 @@ final class DashboardTicketBridge: NSObject {
         rejectPending(with: DashboardTicketBridgeError.notReady)
         Task { [weak self] in
             guard let self else { return }
-            await DashboardCookiePersistence.restore(into: self.webView.configuration.websiteDataStore.httpCookieStore)
+            await DashboardCookiePersistence.restore(
+                into: self.webView.configuration.websiteDataStore.httpCookieStore,
+                dashboardID: self.dashboardID
+            )
             await DashboardCookiePersistence.restoreNativeCookies(
                 into: self.webView.configuration.websiteDataStore.httpCookieStore,
                 for: self.baseURL

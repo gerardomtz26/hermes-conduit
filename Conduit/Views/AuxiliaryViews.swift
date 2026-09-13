@@ -654,13 +654,13 @@ private struct SettingsHome: View {
                             identifier: "settings.connection-setup"
                         ) {
                             let seedURL = currentDashboardURL
-                            let saved = KeychainHelper.loadCredentials()
+                            let saved = appState.savedCredentialsForDashboard(at: seedURL)
                             let seeded = ConnectionSetupSeeding.wizardCredentials(for: seedURL, saved: saved)
                             connectionSetupSeed = ConnectionSetupSeed(
                                 url: seedURL,
                                 username: seeded?.username ?? "",
                                 password: seeded?.password ?? "",
-                                cloudflareAccess: KeychainHelper.loadCloudflareAccess(for: seedURL)
+                                cloudflareAccess: appState.dashboardScopedCloudflareAccess(for: seedURL)
                             )
                         }
                     }
@@ -702,8 +702,8 @@ private struct SettingsHome: View {
                 let plan = ConnectionSetupApplication.plan(
                     result: result,
                     currentDashboardURL: seed.url,
-                    savedCredentials: KeychainHelper.loadCredentials(),
-                    savedCloudflareAccess: KeychainHelper.loadCloudflareAccess(for: seed.url)
+                    savedCredentials: appState.savedCredentialsForDashboard(at: seed.url),
+                    savedCloudflareAccess: appState.dashboardScopedCloudflareAccess(for: seed.url)
                 )
                 plan.perform(appState: appState)
                 pendingAppliedNotice = !plan.isEmpty

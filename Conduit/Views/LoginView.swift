@@ -97,7 +97,7 @@ struct LoginView: View {
         .onAppear {
             guard serverUrl.isEmpty else { return }
             serverUrl = appState.lastDashboardURL
-            if let access = KeychainHelper.loadCloudflareAccess(for: serverUrl) {
+            if let access = appState.dashboardScopedCloudflareAccess(for: serverUrl) {
                 cloudflareEnabled = true
                 cloudflareClientID = access.clientID
                 cloudflareClientSecret = access.clientSecret
@@ -154,18 +154,21 @@ struct LoginView: View {
             AuthWebView(
                 url: serverUrl,
                 cloudflareAccess: configuredCloudflareAccess,
+                dashboardID: appState.resolveDashboardID(forURL: serverUrl, registerIfMissing: true),
             onTicket: { ticket, baseUrl in
-                // The dashboard is solely an authentication bridge. Dismiss it
-                // before connection work begins so Conduit, not the dashboard,
-                // becomes the active surface as soon as we have a ticket.
-                showWebView = false
-                Task {
-                    // OAuth and cloud dashboard logins do not provide a
-                    // password credential that Conduit can safely reuse.
-                    KeychainHelper.clearCredentials()
-                    appState.rememberDashboardURL(baseUrl)
-                    await appState.connect(with: HermesConnection(baseUrl: baseUrl, ticket: ticket))
-                }
+                    // The dashboard is solely an authentication bridge. Dismiss it
+                    // before connection work begins so Conduit, not the dashboard,
+                    // becomes the active surface as soon as we have a ticket.
+                    showWebView = false
+                    Task {
+                        // OAuth and cloud dashboard logins do not provide a
+                        // password credential that Conduit can safely reuse.
+                        if let dashboardID = appState.resolveDashboardID(forURL: baseUrl, registerIfMissing: true) {
+                            KeychainHelper.clearCredentials(dashboardID: dashboardID)
+                        }
+                        appState.rememberDashboardURL(baseUrl)
+                        await appState.connect(with: HermesConnection(baseUrl: baseUrl, ticket: ticket))
+                    }
                 },
                 onError: { classifiedFailure, detail in
                     // Fixed classified copy only — the dashboard-provided
@@ -526,22 +529,33 @@ struct LoginView: View {
             }
             if requiresBrowserSignIn {
                 showWebView = true
-                if let access { KeychainHelper.saveCloudflareAccess(access, origin: serverUrl) }
+                // The service token is bound to the dashboard it
+                // authenticates; resolve (or pre-register) that dashboard so
+                // the scoped write cannot land on another server's record.
+                if let access, let dashboardID = appState.resolveDashboardID(forURL: serverUrl, registerIfMissing: true) {
+                    KeychainHelper.saveCloudflareAccess(access, origin: serverUrl, dashboardID: dashboardID)
+                }
                 return
             }
 
             let authenticatedConnection = try await client.connect(username: username, password: password)
-            if saveCredentials {
-                KeychainHelper.saveCredentials(DashboardCredentials(
-                    baseURL: serverUrl,
-                    username: username,
-                    password: password,
-                    requiresFaceID: useFaceID
-                ))
-            } else {
-                KeychainHelper.clearCredentials()
+            if let dashboardID = appState.resolveDashboardID(forURL: serverUrl, registerIfMissing: true) {
+                if saveCredentials {
+                    KeychainHelper.saveCredentials(DashboardCredentials(
+                        baseURL: serverUrl,
+                        username: username,
+                        password: password,
+                        requiresFaceID: useFaceID
+                    ), dashboardID: dashboardID)
+                } else {
+                    KeychainHelper.clearCredentials(dashboardID: dashboardID)
+                }
+                if let access {
+                    KeychainHelper.saveCloudflareAccess(access, origin: serverUrl, dashboardID: dashboardID)
+                } else {
+                    KeychainHelper.clearCloudflareAccess(dashboardID: dashboardID)
+                }
             }
-            if let access { KeychainHelper.saveCloudflareAccess(access, origin: serverUrl) } else { KeychainHelper.clearCloudflareAccess() }
             authenticatedConnection.commitCookies()
             await appState.connect(with: HermesConnection(baseUrl: serverUrl, ticket: authenticatedConnection.ticket))
         } catch is CancellationError {
@@ -703,6 +717,9 @@ enum AuthWebViewNavigationPolicy {
 struct AuthWebView: UIViewRepresentable {
     let url: String
     let cloudflareAccess: CloudflareAccessCredentials?
+    /// The saved dashboard being signed into: the cookie mirror captured on
+    /// successful sign-in is written to this dashboard's scoped record.
+    let dashboardID: UUID?
     let onTicket: (String, String) -> Void
     /// Classified failure + raw diagnostic detail. The dashboard controls the
     /// detail text (e.g. `payload["error"]`), so it is never rendered — the
@@ -858,10 +875,11 @@ struct AuthWebView: UIViewRepresentable {
             let webView = authenticatedWebView
             Task { @MainActor [weak self, weak webView] in
                 guard let self else { return }
-                if let webView {
+                if let webView, let dashboardID = parent.dashboardID {
                     await DashboardCookiePersistence.capture(
                         from: webView.configuration.websiteDataStore.httpCookieStore,
-                        for: self.expectedURL
+                        for: self.expectedURL,
+                        dashboardID: dashboardID
                     )
                 }
                 self.deliver(ticket: ticket)
