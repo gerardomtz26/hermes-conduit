@@ -154,8 +154,8 @@ struct LoginView: View {
             AuthWebView(
                 url: serverUrl,
                 cloudflareAccess: configuredCloudflareAccess,
-                dashboardIDProvider: { [appState] in
-                    appState.resolveDashboardID(forURL: serverUrl, registerIfMissing: true)
+                dashboardIDProvider: { [appState, url = serverUrl] in
+                    appState.resolveDashboardID(forURL: url, registerIfMissing: true)
                 },
             onTicket: { ticket, baseUrl in
                     // The dashboard is solely an authentication bridge. Dismiss it

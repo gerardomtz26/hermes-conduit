@@ -343,7 +343,11 @@ extension AppStateMultiDashboardTests {
         let mac = dashboard("Mac", "https://mac.tailnet.ts.net")
         let vps = dashboard("VPS", "https://hermes.example.com")
         let appState = makeAppState(registry: SavedDashboardRegistry(activeDashboardID: mac.id, dashboards: [mac, vps]))
-        // A live-looking outgoing session (as a real connection leaves it).
+        // A live-looking outgoing session, exactly as a real connection
+        // leaves it: the stored server identity names the outgoing dashboard
+        // and its scoped connection record exists.
+        defaults.set(mac.id.uuidString, forKey: AppState.chatResumeServerIdentityKey)
+        KeychainHelper.saveConnection(HermesConnection(baseUrl: mac.normalizedURL, ticket: "mac-ticket"), dashboardID: mac.id)
         appState.isConnected = true
         appState.isConnecting = false
         appState.sessions = [SessionSummary(

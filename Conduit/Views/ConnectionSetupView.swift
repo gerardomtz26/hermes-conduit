@@ -182,8 +182,8 @@ struct ConnectionSetupView: View {
             AuthWebView(
                 url: configuration.serverURL,
                 cloudflareAccess: flow.cloudflareAccessForDraft(),
-                dashboardIDProvider: { [appState] in
-                    appState.resolveDashboardID(forURL: configuration.serverURL, registerIfMissing: true)
+                dashboardIDProvider: { [appState, url = configuration.serverURL] in
+                    appState.resolveDashboardID(forURL: url, registerIfMissing: true)
                 },
                 onTicket: { ticket, baseURL in
                     Task { @MainActor in

@@ -3105,15 +3105,26 @@ final class AppState: ObservableObject {
     private func retireConnectionRuntimeForDashboardSwitch() {
         cancelChatResumeTransportRecovery()
         cancelScenePhaseAttempt()
+        cancelScheduledReconnect()
         lastConnectionFailure = nil
+        pendingLoginFailure = nil
+        errorMessage = nil
         client?.disconnect()
         client = nil
+        // Fence already-queued callbacks from the outgoing server: they are
+        // epoch-gated, and no new client is created on the authless path.
+        activeClientEpoch = UUID()
         connection = nil
         isConnected = false
         isConnecting = false
         connectedAt = nil
         dashboardTicketBridge?.invalidate()
         dashboardTicketBridge = nil
+        // A flush scheduled under the outgoing server must not write through
+        // after the switch; the boundary already cleared the cache it would
+        // resurrect content into.
+        presentationCacheFlushTask?.cancel()
+        presentationCacheFlushTask = nil
         messageReadAloudController.setGateway(nil)
         readAloudGatewayBridge = nil
         voiceConversationController.setGateway(nil)
@@ -3218,6 +3229,11 @@ final class AppState: ObservableObject {
             return
         }
         prepareDashboardBridge(for: saved.baseUrl)
+        // Re-fence after the bridge's async setup window: never install a
+        // stale switch's connection.
+        if let switchGeneration, !switchGenerationIsCurrent(switchGeneration) {
+            return
+        }
         await connect(with: saved, profile: activeProfile)
     }
 
@@ -3241,6 +3257,11 @@ final class AppState: ObservableObject {
                 showLogin = true
                 return
             }
+            // Re-fence after the biometric await: a superseded switch owns
+            // the flow now.
+            if let switchGeneration, !switchGenerationIsCurrent(switchGeneration) {
+                return
+            }
         }
 
         do {
@@ -3251,6 +3272,11 @@ final class AppState: ObservableObject {
                 username: credentials.username,
                 password: credentials.password
             )
+            // Re-fence after the network await: never install a stale
+            // switch's connection (its adoptDashboard would flip selection).
+            if let switchGeneration, !switchGenerationIsCurrent(switchGeneration) {
+                return
+            }
             authenticatedConnection.commitCookies()
             await connect(with: HermesConnection(baseUrl: credentials.baseURL, ticket: authenticatedConnection.ticket), profile: activeProfile)
         } catch is CancellationError {

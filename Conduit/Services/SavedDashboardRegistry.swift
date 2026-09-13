@@ -347,10 +347,6 @@ enum LegacyDashboardReader {
         )
     }
 
-    static var hasLegacyState: Bool {
-        !read(defaults: .standard).isEmpty
-    }
-
     /// Deletes the legacy global records. The installation-wide push
     /// registration is deliberately untouched: push pairing is per-device,
     /// not per-dashboard.

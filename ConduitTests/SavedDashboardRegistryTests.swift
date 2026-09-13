@@ -102,6 +102,10 @@ final class SavedDashboardRegistryTests: XCTestCase {
         XCTAssertEqual(SavedDashboardLabel.derive(from: "http://192.168.1.5:8080"), "192.168.1.5")
     }
 
+    func testLabelDerivationFromIPv6LiteralKeepsFullAddress() {
+        XCTAssertEqual(SavedDashboardLabel.derive(from: "http://[2001:db8::1]:8080"), "2001:db8::1")
+    }
+
     func testLabelDerivationDisambiguatesDuplicates() {
         let labels = SavedDashboardLabel.derive(
             from: "https://mac.tailnet.ts.net",
@@ -270,6 +274,19 @@ final class SavedDashboardRegistryTests: XCTestCase {
         track(id)
         XCTAssertEqual(try XCTUnwrap(KeychainHelper.loadConnection(dashboardID: id)).ticket, "ticket-1")
         XCTAssertEqual(registry.dashboards[0].normalizedURL, legacyURL)
+    }
+
+    func testLazyRetirementHonorsInjectedDefaults() throws {
+        // Registry already present + legacy records still around (a migration
+        // that died before retirement): loading with the SAME injected
+        // defaults retires the legacy records.
+        KeychainHelper.saveConnection(HermesConnection(baseUrl: legacyURL, ticket: "leftover"))
+        let existing = SavedDashboardRegistry(activeDashboardID: nil, dashboards: [])
+        SavedDashboardRegistryStore.save(existing)
+
+        let registry = SavedDashboardMigrator.loadRegistry(defaults: defaults)
+        XCTAssertEqual(registry, existing)
+        XCTAssertNil(KeychainHelper.loadConnection(), "lazy retirement removes the legacy leftovers")
     }
 
     func testCleanInstallProducesEmptyRegistryWithoutLegacy() throws {
