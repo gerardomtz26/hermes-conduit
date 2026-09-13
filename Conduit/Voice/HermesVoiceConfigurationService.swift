@@ -111,7 +111,7 @@ final class HermesVoiceConfigurationService: ObservableObject {
     init(requester: VoiceConfigurationRequesting, profile: String) {
         self.requester = requester
         self.profile = profile
-        snapshot = .unavailable(profile: profile, reason: "Voice settings have not been loaded.")
+        snapshot = .unavailable(profile: profile, reason: AppLocalization.string("Voice settings have not been loaded."))
     }
 
     convenience init(bridge: DashboardTicketBridge, profile: String) {
@@ -158,7 +158,7 @@ final class HermesVoiceConfigurationService: ObservableObject {
         // Toolset config was added after some public gateways. Its absence is
         // a capability limitation, not a failed text-chat connection.
         if (try? stt.get()) == nil && (try? tts.get()) == nil {
-            errorMessage = "This Hermes gateway is too old to report voice readiness."
+            errorMessage = AppLocalization.string("This Hermes gateway is too old to report voice readiness.")
         }
     }
 
@@ -177,7 +177,7 @@ final class HermesVoiceConfigurationService: ObservableObject {
             // except the canonical managed Nous ID, whose meaning is
             // server-owned and never written raw.
             guard provider.lowercased() != "nous" else {
-                errorMessage = "Hermes must translate this managed selection; its provider endpoint is unavailable."
+                errorMessage = AppLocalization.string("Hermes must translate this managed selection; its provider endpoint is unavailable.")
                 return false
             }
             return await saveVendorSelection(provider, kind: kind)
@@ -206,7 +206,7 @@ final class HermesVoiceConfigurationService: ObservableObject {
     private func saveVendorSelection(_ vendor: String, kind: VoiceProviderDescriptor.Kind) async -> Bool {
         let sectionKey = kind.rawValue
         guard var config = try? await requester.requestJSON(path: profilePath("/api/config"), method: "GET", body: nil) else {
-            errorMessage = "Could not load voice settings to save this change."
+            errorMessage = AppLocalization.string("Could not load voice settings to save this change.")
             return false
         }
         var section = config[sectionKey] as? [String: Any] ?? [:]
@@ -221,7 +221,7 @@ final class HermesVoiceConfigurationService: ObservableObject {
             await reload()
             return true
         } catch {
-            errorMessage = "Could not save \(sectionKey).provider: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not save \(sectionKey).provider: \(error.localizedDescription)")
             return false
         }
     }
@@ -234,7 +234,7 @@ final class HermesVoiceConfigurationService: ObservableObject {
                 body: ["provider": rowName]
             )
             if let error = response["error"] as? String, !error.isEmpty {
-                errorMessage = "Could not select \(rowName): \(error)"
+                errorMessage = AppLocalization.string("Could not select \(rowName): \(error)")
                 return false
             }
             await reload()
@@ -242,11 +242,11 @@ final class HermesVoiceConfigurationService: ObservableObject {
                 // The write landed; Hermes is flagging that the managed route
                 // still needs sign-in. Diagnostic, never a silent failure.
                 let feature = kind == .stt ? "speech-to-text" : "speech"
-                errorMessage = "Hermes saved this selection, but the Nous subscription needs sign-in before \(feature) can use it."
+                errorMessage = AppLocalization.string("Hermes saved this selection, but the Nous subscription needs sign-in before \(feature) can use it.")
             }
             return true
         } catch {
-            errorMessage = "Could not select \(rowName): \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not select \(rowName): \(error.localizedDescription)")
             return false
         }
     }
@@ -258,7 +258,7 @@ final class HermesVoiceConfigurationService: ObservableObject {
         }
         let stored = VoiceConfigurationParser.storedValue(for: value, key: key)
         guard var config = try? await requester.requestJSON(path: profilePath("/api/config"), method: "GET", body: nil) else {
-            errorMessage = "Could not load voice settings to save this change."
+            errorMessage = AppLocalization.string("Could not load voice settings to save this change.")
             return false
         }
         // One clear decision, derived from trimmed input, drives both the
@@ -289,7 +289,7 @@ final class HermesVoiceConfigurationService: ObservableObject {
             if key == "tts.provider" { snapshot.selectedTTSProvider = value }
             return true
         } catch {
-            errorMessage = "Could not save \(key): \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not save \(key): \(error.localizedDescription)")
             return false
         }
     }
@@ -307,7 +307,7 @@ final class HermesVoiceConfigurationService: ObservableObject {
             await reload()
             return true
         } catch {
-            errorMessage = "Could not save credential: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not save credential: \(error.localizedDescription)")
             return false
         }
     }
@@ -413,9 +413,9 @@ enum VoiceConfigurationParser {
         let supportsSpeech = ttsToolsetConfigAvailable && selectedTTSReady
         let unavailableReason: String?
         if !sttEnabled {
-            unavailableReason = "Speech-to-text is disabled for this Hermes profile."
+            unavailableReason = AppLocalization.string("Speech-to-text is disabled for this Hermes profile.")
         } else if !supportsSpeech {
-            unavailableReason = "The selected text-to-speech provider is not ready for this profile."
+            unavailableReason = AppLocalization.string("The selected text-to-speech provider is not ready for this profile.")
         } else {
             unavailableReason = nil
         }
@@ -465,7 +465,7 @@ enum VoiceConfigurationParser {
         case ("nous", .stt), ("openai", .stt):
             // The managed Nous route resolves models from the same
             // OpenAI-compatible catalog as the direct key.
-            return .init(id: id, displayName: id == "nous" ? "Nous Subscription" : "OpenAI", kind: kind, models: ["whisper-1", "gpt-4o-mini-transcribe", "gpt-4o-transcribe", "gpt-transcribe"], supportsStreaming: false)
+            return .init(id: id, displayName: id == "nous" ? AppLocalization.string("Nous Subscription") : "OpenAI", kind: kind, models: ["whisper-1", "gpt-4o-mini-transcribe", "gpt-4o-transcribe", "gpt-transcribe"], supportsStreaming: false)
         case ("groq", .stt):
             return .init(id: id, displayName: "Groq", kind: kind, models: ["whisper-large-v3-turbo", "whisper-large-v3", "distil-whisper-large-v3-en"], supportsStreaming: false)
         case ("xai", .stt):
@@ -475,7 +475,7 @@ enum VoiceConfigurationParser {
         case ("deepinfra", .stt):
             return .init(id: id, displayName: "DeepInfra", kind: kind, supportsStreaming: false)
         case ("nous", .tts):
-            return .init(id: id, displayName: "Nous Subscription", kind: kind, supportsStreaming: true)
+            return .init(id: id, displayName: AppLocalization.string("Nous Subscription"), kind: kind, supportsStreaming: true)
         case ("openai", .tts):
             return .init(id: id, displayName: "OpenAI", kind: kind, supportsStreaming: true)
         // Streaming claims mirror upstream's StreamingTTSProvider registry
@@ -497,9 +497,9 @@ enum VoiceConfigurationParser {
         case ("stepfun", .tts):
             return .init(id: id, displayName: "StepFun", kind: kind, models: ["stepaudio-2.5-tts"], voices: [], supportsStreaming: true)
         case ("xiaomi_mimo", .stt):
-            return .init(id: id, displayName: "Xiaomi MiMo", kind: kind, models: ["mimo-v2.5-asr"], supportsStreaming: false)
+            return .init(id: id, displayName: AppLocalization.string("Xiaomi MiMo"), kind: kind, models: ["mimo-v2.5-asr"], supportsStreaming: false)
         case ("xiaomi_mimo", .tts):
-            return .init(id: id, displayName: "Xiaomi MiMo", kind: kind, models: ["mimo-v2.5-tts"], voices: ["mimo_default", "冰糖", "茉莉", "苏打", "白桦", "Mia", "Chloe", "Milo", "Dean"], supportsStreaming: true)
+            return .init(id: id, displayName: AppLocalization.string("Xiaomi MiMo"), kind: kind, models: ["mimo-v2.5-tts"], voices: ["mimo_default", "冰糖", "茉莉", "苏打", "白桦", "Mia", "Chloe", "Milo", "Dean"], supportsStreaming: true)
         default: return nil
         }
     }
@@ -520,19 +520,19 @@ enum VoiceConfigurationParser {
         // not offered: upstream derives it from base_url when unset.
         if kind == .tts, id == "elevenlabs" {
             return [
-                VoiceTypedField(key: "tts.elevenlabs.voice_id", label: "Voice ID", help: "Voice ID from your ElevenLabs-compatible endpoint. Leave blank for the provider default.", kind: .text, defaultValue: ""),
-                VoiceTypedField(key: "tts.elevenlabs.model_id", label: "Model", help: "You can enter any installed model identifier.", kind: .text, defaultValue: ""),
-                VoiceTypedField(key: "tts.elevenlabs.base_url", label: "Base URL", help: Self.customEndpointHelp("ElevenLabs"), kind: .text, defaultValue: "")
+                VoiceTypedField(key: "tts.elevenlabs.voice_id", label: AppLocalization.string("Voice ID"), help: AppLocalization.string("Voice ID from your ElevenLabs-compatible endpoint. Leave blank for the provider default."), kind: .text, defaultValue: ""),
+                VoiceTypedField(key: "tts.elevenlabs.model_id", label: AppLocalization.string("Model"), help: AppLocalization.string("You can enter any installed model identifier."), kind: .text, defaultValue: ""),
+                VoiceTypedField(key: "tts.elevenlabs.base_url", label: AppLocalization.string("Base URL"), help: Self.customEndpointHelp("ElevenLabs"), kind: .text, defaultValue: "")
             ]
         }
 
         var shared = [
-            VoiceTypedField(key: "\(root).\(modelKey)", label: "Model", help: "You can enter any installed model identifier.", kind: .text, defaultValue: defaultModel),
-            VoiceTypedField(key: "\(root).language", label: "Language", help: "Leave blank for automatic language detection.", kind: .text, defaultValue: "")
+            VoiceTypedField(key: "\(root).\(modelKey)", label: AppLocalization.string("Model"), help: AppLocalization.string("You can enter any installed model identifier."), kind: .text, defaultValue: defaultModel),
+            VoiceTypedField(key: "\(root).language", label: AppLocalization.string("Language"), help: AppLocalization.string("Leave blank for automatic language detection."), kind: .text, defaultValue: "")
         ]
         if kind == .tts {
             shared += [
-                .init(key: "\(root).voice", label: "Voice ID", help: "Built-in voices are suggestions; custom voice IDs remain supported.", kind: .text, defaultValue: "")
+                .init(key: "\(root).voice", label: AppLocalization.string("Voice ID"), help: AppLocalization.string("Built-in voices are suggestions; custom voice IDs remain supported."), kind: .text, defaultValue: "")
             ]
             // OpenAI resolves speaking style through the per-request TTS tool
             // parameter — upstream never reads tts.openai.instruction — so
@@ -541,26 +541,26 @@ enum VoiceConfigurationParser {
             if id != "openai" && id != "nous" {
                 let instructionKey = id == "xiaomi_mimo" ? "delivery_instructions" : "instruction"
                 shared += [
-                    .init(key: "\(root).\(instructionKey)", label: "Delivery instruction", help: "Optional speaking style guidance sent to the provider.", kind: .text, defaultValue: "")
+                    .init(key: "\(root).\(instructionKey)", label: AppLocalization.string("Delivery instruction"), help: AppLocalization.string("Optional speaking style guidance sent to the provider."), kind: .text, defaultValue: "")
                 ]
             }
             if id == "openai" || id == "nous" {
                 shared += [
-                    .init(key: "\(root).base_url", label: "Base URL", help: Self.customEndpointHelp("OpenAI"), kind: .text, defaultValue: ""),
-                    .init(key: "\(root).speed", label: "Speed", help: "Speech rate multiplier (0.25–4.0); Hermes clamps this range. Leave blank to remove the override. Note: applies to Hermes' whole-file synthesis — upstream's current PCM streaming path does not use this setting.", kind: .decimal, defaultValue: "1", numericRange: 0.25...4.0)
+                    .init(key: "\(root).base_url", label: AppLocalization.string("Base URL"), help: Self.customEndpointHelp("OpenAI"), kind: .text, defaultValue: ""),
+                    .init(key: "\(root).speed", label: AppLocalization.string("Speed"), help: AppLocalization.string("Speech rate multiplier (0.25–4.0); Hermes clamps this range. Leave blank to remove the override. Note: applies to Hermes' whole-file synthesis — upstream's current PCM streaming path does not use this setting."), kind: .decimal, defaultValue: "1", numericRange: 0.25...4.0)
                 ]
             }
         }
         if id == "stepfun" {
             shared += [
-                .init(key: "\(root).endpoint_preset", label: "Endpoint", help: "Open Platform, Step Plan, International, or a custom endpoint.", kind: .choice(["open_platform", "step_plan", "international", "custom"]), defaultValue: "open_platform"),
-                .init(key: "\(root).endpoint", label: "Custom endpoint", help: "Used only when Endpoint is Custom.", kind: .text, defaultValue: "")
+                .init(key: "\(root).endpoint_preset", label: AppLocalization.string("Endpoint"), help: AppLocalization.string("Open Platform, Step Plan, International, or a custom endpoint."), kind: .choice(["open_platform", "step_plan", "international", "custom"]), defaultValue: "open_platform"),
+                .init(key: "\(root).endpoint", label: AppLocalization.string("Custom endpoint"), help: AppLocalization.string("Used only when Endpoint is Custom."), kind: .text, defaultValue: "")
             ]
             if kind == .tts {
                 shared += [
-                    .init(key: "\(root).speed", label: "Speed", help: "Provider speech-rate multiplier.", kind: .decimal, defaultValue: "1"),
-                    .init(key: "\(root).volume", label: "Volume", help: "Provider output volume multiplier.", kind: .decimal, defaultValue: "1"),
-                    .init(key: "\(root).sample_rate", label: "Sample rate", help: "PCM sample rate requested from Hermes.", kind: .decimal, defaultValue: "24000")
+                    .init(key: "\(root).speed", label: AppLocalization.string("Speed"), help: AppLocalization.string("Provider speech-rate multiplier."), kind: .decimal, defaultValue: "1"),
+                    .init(key: "\(root).volume", label: AppLocalization.string("Volume"), help: AppLocalization.string("Provider output volume multiplier."), kind: .decimal, defaultValue: "1"),
+                    .init(key: "\(root).sample_rate", label: AppLocalization.string("Sample rate"), help: AppLocalization.string("PCM sample rate requested from Hermes."), kind: .decimal, defaultValue: "24000")
                 ]
             }
         }
@@ -657,8 +657,8 @@ enum VoiceConfigurationParser {
             }
             let status: String
             if let text = row["status"] as? String { status = text }
-            else if let object = row["status"] as? [String: Any] { status = object["state"] as? String ?? object["label"] as? String ?? "Unknown" }
-            else { status = "Unknown" }
+            else if let object = row["status"] as? [String: Any] { status = object["state"] as? String ?? object["label"] as? String ?? AppLocalization.string("Unknown") }
+            else { status = AppLocalization.string("Unknown") }
             // providerID resolves to "nous" only for the managed route (the
             // managed feature marker or the legacy managed-row label), so the
             // canonical ID doubles as the structured managed marker.

@@ -845,6 +845,7 @@ struct LargeMarkdownColumns: View {
 /// lines), with highlighting computed off the MainActor and swapped in per
 /// slice. Copy always uses the complete source.
 struct LargeCodeBlockView: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let source: String
     let language: String
     let usesAccentSurface: Bool
@@ -941,7 +942,7 @@ struct LargeCodeBlockView: View {
 
     private var header: some View {
         HStack {
-            Text(normalizedLanguage == "plain" ? "Code" : normalizedLanguage)
+            Text(normalizedLanguage == "plain" ? AppLocalization.string("Code") : normalizedLanguage)
                 .font(.caption2.monospaced().weight(.semibold))
                 .foregroundStyle(usesAccentSurface ? Color.white.opacity(0.86) : .secondary)
             Spacer()
@@ -955,7 +956,7 @@ struct LargeCodeBlockView: View {
                     copied = false
                 }
             } label: {
-                Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc")
+                Label(copied ? AppLocalization.string("Copied") : AppLocalization.string("Copy"), systemImage: copied ? "checkmark" : "doc.on.doc")
                     .font(.caption2.weight(.semibold))
             }
             .tint(usesAccentSurface ? .white : .conduitAccent)

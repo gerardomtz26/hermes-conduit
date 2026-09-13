@@ -33,7 +33,7 @@ enum SessionSource: String, Codable, CaseIterable {
 
     var label: String {
         switch self {
-        case .chat: return "Chat"
+        case .chat: return AppLocalization.string("Chat")
         case .discord: return "Discord"
         case .telegram: return "Telegram"
         case .api: return "API"
@@ -680,8 +680,8 @@ enum BusyInputMode: String, CaseIterable, Codable, Identifiable {
 
     var title: String {
         switch self {
-        case .steer: return "Steer"
-        case .interrupt: return "Interrupt"
+        case .steer: return AppLocalization.string("Steer")
+        case .interrupt: return AppLocalization.string("Interrupt")
         }
     }
 
@@ -807,7 +807,10 @@ struct CapabilityToolset: Identifiable, Equatable {
 // MARK: - Slash Commands
 
 struct SlashCommand: Identifiable, Equatable {
-    let id = UUID()
+    /// Stable identity: the protocol name. Descriptions are re-resolved per
+    /// App Language, so a UUID minted at construction would make every
+    /// language change look like a full list replacement to ForEach.
+    var id: String { name }
     let name: String
     var aliases: [String] = []
     var description: String

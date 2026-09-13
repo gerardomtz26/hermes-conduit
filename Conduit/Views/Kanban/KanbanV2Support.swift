@@ -115,7 +115,7 @@ struct TaskModelOverride: Equatable {
     }
 
     private func effortCapitalized(_ value: String) -> String {
-        value == "xhigh" ? "Extra High" : value.capitalized
+        value == "xhigh" ? AppLocalization.string("Extra High") : value.capitalized
     }
 
     /// Create-time serialization (upstream `overrideCreateFields`): omit
@@ -420,52 +420,52 @@ enum KanbanActivityFormatter {
             var parts: [String] = []
             if let s = status("status") { parts.append("as \(s)") }
             if let a = string("assignee") { parts.append("for \(a)") }
-            return Row(label: "Task created", detail: parts.isEmpty ? nil : parts.joined(separator: " "))
+            return Row(label: AppLocalization.string("Task created"), detail: parts.isEmpty ? nil : parts.joined(separator: " "))
         case "status":
             let reason = string("reason")
             let detail: String?
             if reason == "parent_reopened" {
-                detail = "parent \(string("parent") ?? "") reopened"
+                detail = AppLocalization.string("parent \(string("parent") ?? "") reopened")
             } else {
                 detail = reason
             }
-            return Row(label: "Moved to \(status("status") ?? "?")", detail: detail)
+            return Row(label: AppLocalization.string("Moved to \(status("status") ?? "?")"), detail: detail)
         case "assigned":
             if let assignee = string("assignee") {
-                return Row(label: "Assigned to \(assignee)", detail: nil)
+                return Row(label: AppLocalization.string("Assigned to \(assignee)"), detail: nil)
             }
-            return Row(label: "Unassigned", detail: nil)
+            return Row(label: AppLocalization.string("Unassigned"), detail: nil)
         case "commented":
-            return Row(label: "Comment from \(string("author") ?? "someone")", detail: nil)
+            return Row(label: AppLocalization.string("Comment from \(string("author") ?? AppLocalization.string("someone"))"), detail: nil)
         case "claimed":
             return Row(
-                label: string("source_status") == "review" ? "Claimed from review" : "Claimed by worker",
+                label: string("source_status") == "review" ? AppLocalization.string("Claimed from review") : AppLocalization.string("Claimed by worker"),
                 detail: nil
             )
         case "spawned":
             let pid = payload["pid"]?.intValue
-            return Row(label: "Worker started", detail: pid.map { "pid \($0)" })
+            return Row(label: AppLocalization.string("Worker started"), detail: pid.map { AppLocalization.string("pid \(String($0))") })
         case "completed":
-            return Row(label: "Completed", detail: nil)
+            return Row(label: AppLocalization.string("Completed"), detail: nil)
         case "blocked":
-            return Row(label: "Blocked", detail: string("reason"))
+            return Row(label: AppLocalization.string("Blocked"), detail: string("reason"))
         case "unblocked":
-            return Row(label: "Unblocked → \(status("status") ?? "")", detail: nil)
+            return Row(label: AppLocalization.string("Unblocked → \(status("status") ?? "")"), detail: nil)
         case "reclaimed":
-            return Row(label: "Reclaimed", detail: string("reason"))
+            return Row(label: AppLocalization.string("Reclaimed"), detail: string("reason"))
         case "specified":
-            return Row(label: "Fleshed out by triage specifier", detail: nil)
+            return Row(label: AppLocalization.string("Fleshed out by triage specifier"), detail: nil)
         case "promoted":
-            return Row(label: "Promoted", detail: nil)
+            return Row(label: AppLocalization.string("Promoted"), detail: nil)
         case "scheduled":
-            return Row(label: "Scheduled", detail: string("reason"))
+            return Row(label: AppLocalization.string("Scheduled"), detail: string("reason"))
         case "archived":
-            return Row(label: "Archived", detail: nil)
+            return Row(label: AppLocalization.string("Archived"), detail: nil)
         case "reprioritized":
             let priority = payload["priority"]?.intValue
-            return Row(label: "Priority set to \(priority.map(String.init) ?? "?")", detail: nil)
+            return Row(label: AppLocalization.string("Priority set to \(priority.map(String.init) ?? "?")"), detail: nil)
         case "edited":
-            return Row(label: "Details edited", detail: nil)
+            return Row(label: AppLocalization.string("Details edited"), detail: nil)
         default:
             // Compact key=value detail over SCALAR payload entries only;
             // nested objects/arrays stay out of the row.

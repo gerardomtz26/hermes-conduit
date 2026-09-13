@@ -23,6 +23,7 @@ enum VoiceLevelMeterMath {
 /// barely moving. Presentation only — it must be driven by the raw capture
 /// level, never by a VAD decision.
 struct VoiceInputLevelMeter: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let level: Float
     let isActive: Bool
 
@@ -63,8 +64,8 @@ struct VoiceInputLevelMeter: View {
 
     private var accessibilityValue: String {
         guard isActive, targetFraction > 0 else { return "Silent" }
-        if targetFraction < 0.3 { return "Low" }
-        if targetFraction < 0.65 { return "Medium" }
-        return "High"
+        if targetFraction < 0.3 { return AppLocalization.string("Low") }
+        if targetFraction < 0.65 { return AppLocalization.string("Medium") }
+        return AppLocalization.string("High")
     }
 }

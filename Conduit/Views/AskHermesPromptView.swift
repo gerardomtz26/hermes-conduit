@@ -11,6 +11,7 @@ import SwiftUI
 import UIKit
 
 struct AskHermesPromptView: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let title: String
     let prompt: String
 
@@ -46,7 +47,7 @@ struct AskHermesPromptView: View {
                         .font(.footnote.weight(.semibold))
                 }
                 .accessibilityIdentifier("setup.copy-prompt")
-                .accessibilityValue(lastCopiedPrompt == prompt ? "Copied" : "")
+                .accessibilityValue(lastCopiedPrompt == prompt ? AppLocalization.string("Copied") : "")
 
                 if copied {
                     Text("Copied")

@@ -142,13 +142,13 @@ enum KanbanBulkResultPolicy {
         var failures: [KanbanBulkFailure] = []
         for id in requestedIDs where !id.isEmpty {
             guard let result = byID[id] else {
-                failures.append(KanbanBulkFailure(id: id, reason: "Hermes returned no result for this task."))
+                failures.append(KanbanBulkFailure(id: id, reason: AppLocalization.string("Hermes returned no result for this task.")))
                 continue
             }
             if result.ok {
                 succeeded.append(id)
             } else {
-                failures.append(KanbanBulkFailure(id: id, reason: result.error ?? "Hermes refused the change."))
+                failures.append(KanbanBulkFailure(id: id, reason: result.error ?? AppLocalization.string("Hermes refused the change.")))
             }
         }
         return KanbanBulkOperationOutcome(succeededIDs: succeeded, failures: failures)
@@ -159,21 +159,21 @@ enum KanbanBulkResultPolicy {
         let failedCount = outcome.failures.count
         switch (updated, failedCount) {
         case (0, 0):
-            return "No tasks updated"
+            return AppLocalization.string("No tasks updated")
         case (1, 0):
-            return "1 task updated"
+            return AppLocalization.string("1 task updated")
         case (0, 1):
-            return "1 task failed"
+            return AppLocalization.string("1 task failed")
         case (0, _):
-            return "\(failedCount) tasks failed"
+            return AppLocalization.string("\(String(failedCount)) tasks failed")
         case (1, 1):
-            return "1 updated, 1 failed"
+            return AppLocalization.string("1 updated, 1 failed")
         case (1, _):
-            return "1 updated, \(failedCount) failed"
+            return AppLocalization.string("1 updated, \(String(failedCount)) failed")
         case (_, 0):
-            return "\(updated) tasks updated"
+            return AppLocalization.string("\(String(updated)) tasks updated")
         default:
-            return "\(updated) updated, \(failedCount) failed"
+            return AppLocalization.string("\(String(updated)) updated, \(String(failedCount)) failed")
         }
     }
 

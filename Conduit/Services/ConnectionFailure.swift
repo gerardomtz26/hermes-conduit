@@ -256,65 +256,62 @@ struct ConnectionFailurePresentation: Equatable {
 extension ConnectionFailure {
     var userTitle: String {
         switch self {
-        case .invalidAddress: return "Check the dashboard address"
-        case .insecureTransport: return "Insecure dashboard address"
-        case .hostNotFound: return "Dashboard not found"
-        case .unreachable, .connectionRefused: return "Couldn’t reach Hermes"
-        case .timedOut: return "Connection timed out"
-        case .offline: return "No network connection"
-        case .tlsUntrusted: return "Secure connection failed"
-        case .tlsBadDate: return "Certificate date problem"
-        case .tlsFailure: return "Secure connection failed"
-        case .authenticationRejected: return "Login failed"
-        case .rateLimited: return "Too many login attempts"
-        case .loginRequired: return "Sign-in required"
-        case .cloudflareTokenRejected: return "Cloudflare rejected the service token"
-        case .sessionTicketFailure: return "Could not start the session"
-        case .dashboardUnavailable: return "Dashboard unavailable"
-        case .unexpectedServerResponse: return "Unexpected response"
-        case .unknown: return "Couldn’t connect"
+        case .invalidAddress: return AppLocalization.string("Check the dashboard address")
+        case .insecureTransport: return AppLocalization.string("Insecure dashboard address")
+        case .hostNotFound: return AppLocalization.string("Dashboard not found")
+        case .unreachable, .connectionRefused: return AppLocalization.string("Couldn’t reach Hermes")
+        case .timedOut: return AppLocalization.string("Connection timed out")
+        case .offline: return AppLocalization.string("No network connection")
+        case .tlsUntrusted: return AppLocalization.string("Secure connection failed")
+        case .tlsBadDate: return AppLocalization.string("Certificate date problem")
+        case .tlsFailure: return AppLocalization.string("Secure connection failed")
+        case .authenticationRejected: return AppLocalization.string("Login failed")
+        case .rateLimited: return AppLocalization.string("Too many login attempts")
+        case .loginRequired: return AppLocalization.string("Sign-in required")
+        case .cloudflareTokenRejected: return AppLocalization.string("Cloudflare rejected the service token")
+        case .sessionTicketFailure: return AppLocalization.string("Could not start the session")
+        case .dashboardUnavailable: return AppLocalization.string("Dashboard unavailable")
+        case .unexpectedServerResponse: return AppLocalization.string("Unexpected response")
+        case .unknown: return AppLocalization.string("Couldn’t connect")
         }
     }
 
     var userMessage: String {
         switch self {
         case .invalidAddress:
-            return "That doesn’t look like a dashboard URL Conduit can use. Check it for typos — it should look like https://hermes.example."
+            return AppLocalization.string("That doesn’t look like a dashboard URL Conduit can use. Check it for typos — it should look like https://hermes.example.")
         case .insecureTransport:
-            return "Remote dashboards must use HTTPS. Plain HTTP is only accepted for local addresses like localhost, private LAN IPs, and Tailscale."
+            return AppLocalization.string("Remote dashboards must use HTTPS. Plain HTTP is only accepted for local addresses like localhost, private LAN IPs, and Tailscale.")
         case .hostNotFound:
-            return "Conduit could not find that host. Check the dashboard address and try again."
+            return AppLocalization.string("Conduit could not find that host. Check the dashboard address and try again.")
         case .unreachable, .connectionRefused:
-            return "Conduit could not connect to the dashboard at this address. Make sure the dashboard is running and that this device can reach it."
+            return AppLocalization.string("Conduit could not connect to the dashboard at this address. Make sure the dashboard is running and that this device can reach it.")
         case .timedOut:
-            return "The dashboard did not respond in time. Check the address, the network connection, and whether the Hermes dashboard is running."
+            return AppLocalization.string("The dashboard did not respond in time. Check the address, the network connection, and whether the Hermes dashboard is running.")
         case .offline:
-            return "This device doesn’t appear to have a network connection. Reconnect to Wi-Fi or cellular and try again."
+            return AppLocalization.string("This device doesn’t appear to have a network connection. Reconnect to Wi-Fi or cellular and try again.")
         case .tlsUntrusted:
-            return "Conduit reached the server, but iOS does not trust its TLS certificate. If you use your own certificate authority, make sure its root certificate is installed and trusted on this device."
+            return AppLocalization.string("Conduit reached the server, but iOS does not trust its TLS certificate. If you use your own certificate authority, make sure its root certificate is installed and trusted on this device.")
         case .tlsBadDate:
-            return "The dashboard certificate is expired or not yet valid. Check the certificate dates and this device’s date and time."
+            return AppLocalization.string("The dashboard certificate is expired or not yet valid. Check the certificate dates and this device’s date and time.")
         case .tlsFailure:
-            return "Conduit could not establish a secure connection to the dashboard. The server’s TLS certificate may be misconfigured."
+            return AppLocalization.string("Conduit could not establish a secure connection to the dashboard. The server’s TLS certificate may be misconfigured.")
         case .authenticationRejected:
-            return "Hermes rejected that username or password. Check your dashboard credentials and try again."
+            return AppLocalization.string("Hermes rejected that username or password. Check your dashboard credentials and try again.")
         case .rateLimited:
-            return "Hermes temporarily blocked additional login attempts. Wait about a minute before trying again."
+            return AppLocalization.string("Hermes temporarily blocked additional login attempts. Wait about a minute before trying again.")
         case .loginRequired:
-            return "Conduit needs you to sign in to the dashboard to reconnect."
+            return AppLocalization.string("Conduit needs you to sign in to the dashboard to reconnect.")
         case .cloudflareTokenRejected:
-            return "Cloudflare Access did not accept the configured service token. "
-                + "Verify the Client ID / Secret and that the token is allowed by a "
-                + "Service Auth policy for this Access application, or turn off "
-                + "\"Use Cloudflare Access service token\" to sign in interactively."
+            return AppLocalization.string("Cloudflare Access did not accept the configured service token. Verify the Client ID / Secret and that the token is allowed by a Service Auth policy for this Access application, or turn off \"Use Cloudflare Access service token\" to sign in interactively.")
         case .sessionTicketFailure:
-            return "Signing in succeeded, but Conduit could not start a Hermes session. The dashboard may be busy, restarting, or it did not accept the new session — try again."
+            return AppLocalization.string("Signing in succeeded, but Conduit could not start a Hermes session. The dashboard may be busy, restarting, or it did not accept the new session — try again.")
         case .dashboardUnavailable:
-            return "The dashboard is reachable but reported a server error. It may be restarting or unhealthy — try again in a moment."
+            return AppLocalization.string("The dashboard is reachable but reported a server error. It may be restarting or unhealthy — try again in a moment.")
         case .unexpectedServerResponse:
-            return "The dashboard responded in a way Conduit didn’t expect. Make sure the address points at a Hermes dashboard."
+            return AppLocalization.string("The dashboard responded in a way Conduit didn’t expect. Make sure the address points at a Hermes dashboard.")
         case .unknown:
-            return "Something went wrong while connecting to the dashboard. Try again."
+            return AppLocalization.string("Something went wrong while connecting to the dashboard. Try again.")
         }
     }
 

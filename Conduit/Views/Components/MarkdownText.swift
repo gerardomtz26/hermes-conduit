@@ -1596,6 +1596,7 @@ struct LargeMarkdownTable: View {
 /// renderers are not chunkable, so past the guard size the presentation is
 /// a bounded source preview plus Copy (the render action is dropped).
 struct GuardedSourceCard: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let title: String
     let icon: String
     let source: String
@@ -1631,7 +1632,7 @@ struct GuardedSourceCard: View {
                     copied = false
                 }
             } label: {
-                Label(copied ? "Copied" : "Copy full source", systemImage: copied ? "checkmark" : "doc.on.doc")
+                Label(copied ? AppLocalization.string("Copied") : AppLocalization.string("Copy full source"), systemImage: copied ? "checkmark" : "doc.on.doc")
                     .font(.caption.weight(.semibold))
             }
             .tint(.conduitAccent)
@@ -1645,6 +1646,7 @@ struct GuardedSourceCard: View {
 }
 
 private struct RemoteMarkdownImage: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let url: String
     let alt: String
     let gatewayMediaDataURL: ((String) async -> String?)?
@@ -1668,7 +1670,7 @@ private struct RemoteMarkdownImage: View {
             case .failure:
                 WebFallbackImage(url: url, alt: alt)
             default:
-                HStack(spacing: 8) { ProgressView(); Text(alt.isEmpty ? "Loading image…" : alt).font(.footnote).foregroundStyle(.secondary) }
+                HStack(spacing: 8) { ProgressView(); Text(alt.isEmpty ? AppLocalization.string("Loading image…") : alt).font(.footnote).foregroundStyle(.secondary) }
                     .padding(12)
             }
                 }
@@ -1700,7 +1702,7 @@ private struct RemoteMarkdownImage: View {
                 .frame(maxHeight: 360)
                 .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
         } else if gatewayLoadFailed {
-            Label(alt.isEmpty ? "Image unavailable" : "\(alt) unavailable", systemImage: "photo.badge.exclamationmark")
+            Label(alt.isEmpty ? AppLocalization.string("Image unavailable") : AppLocalization.string("\(alt) unavailable"), systemImage: "photo.badge.exclamationmark")
                 .font(.footnote.weight(.semibold))
                 .foregroundStyle(.secondary)
                 .padding(12)
@@ -1713,7 +1715,7 @@ private struct RemoteMarkdownImage: View {
     private var loadingLabel: some View {
         HStack(spacing: 8) {
             ProgressView()
-            Text(alt.isEmpty ? "Loading image..." : alt)
+            Text(alt.isEmpty ? AppLocalization.string("Loading image...") : alt)
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
@@ -1879,9 +1881,9 @@ enum WebFallbackImageDestination {
 enum WebFallbackImageLabel {
     static func title(alt: String, destinationAvailable: Bool) -> String {
         if destinationAvailable {
-            return alt.isEmpty ? "Open image" : "\(alt) — image unavailable; open source"
+            return alt.isEmpty ? AppLocalization.string("Open image") : AppLocalization.string("\(alt) — image unavailable; open source")
         }
-        return alt.isEmpty ? "Image unavailable" : "\(alt) unavailable"
+        return alt.isEmpty ? AppLocalization.string("Image unavailable") : AppLocalization.string("\(alt) unavailable")
     }
 }
 
@@ -1998,6 +2000,7 @@ private enum RemoteImageHTML {
 }
 
 struct ChatCodeBlock: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let source: String
     var language: String = ""
     var usesAccentSurface = false
@@ -2027,7 +2030,7 @@ struct ChatCodeBlock: View {
                     copied = true
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { copied = false }
                 } label: {
-                    Label(copied ? "Copied" : "Copy", systemImage: copied ? "checkmark" : "doc.on.doc").font(.caption2.weight(.semibold))
+                    Label(copied ? AppLocalization.string("Copied") : AppLocalization.string("Copy"), systemImage: copied ? "checkmark" : "doc.on.doc").font(.caption2.weight(.semibold))
                 }
                 .tint(usesAccentSurface ? .white : .conduitAccent)
             }
@@ -2073,12 +2076,13 @@ struct ChatCodeBlock: View {
 }
 
 private struct MermaidBlock: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let source: String
     @Environment(\.colorScheme) private var colorScheme
     @State private var preview: MarkupPreview?
 
     var body: some View {
-        RenderCard(title: "Mermaid", icon: "point.3.connected.trianglepath.dotted", source: source, actionTitle: "Render diagram", actionIcon: "play.fill") {
+        RenderCard(title: "Mermaid", icon: "point.3.connected.trianglepath.dotted", source: source, actionTitle: AppLocalization.string("Render diagram"), actionIcon: "play.fill") {
             preview = MarkupPreview(kind: .mermaid, source: source, light: colorScheme == .light)
         }
         .sheet(item: $preview) { MarkupPreviewSheet(preview: $0) }
@@ -2086,12 +2090,13 @@ private struct MermaidBlock: View {
 }
 
 private struct MathBlock: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let source: String
     @Environment(\.colorScheme) private var colorScheme
     @State private var preview: MarkupPreview?
 
     var body: some View {
-        RenderCard(title: "LaTeX", icon: "function", source: source, actionTitle: "Render formula", actionIcon: "function") {
+        RenderCard(title: "LaTeX", icon: "function", source: source, actionTitle: AppLocalization.string("Render formula"), actionIcon: "function") {
             preview = MarkupPreview(kind: .math, source: source, light: colorScheme == .light)
         }
         .sheet(item: $preview) { MarkupPreviewSheet(preview: $0) }
@@ -2163,7 +2168,7 @@ private struct MarkupPreviewSheet: View {
                 }
                     .frame(maxHeight: 96)
             }
-            .navigationTitle(preview.kind == .mermaid ? "Diagram" : "Formula")
+            .navigationTitle(preview.kind == .mermaid ? AppLocalization.string("Diagram") : AppLocalization.string("Formula"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
         }

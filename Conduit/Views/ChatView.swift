@@ -1085,6 +1085,7 @@ struct UserMessageContent: View, Equatable {
 }
 
 private struct UserImageAttachmentPreview: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let attachment: Attachment
     let gatewayResolver: GatewayMediaDataURLResolver?
     @State private var gatewayImage: UIImage?
@@ -1176,7 +1177,7 @@ private struct UserImageAttachmentPreview: View {
                 loadingPlaceholder
             } else {
                 Label(
-                    (gatewayLoadFailed || localPreviewFailed) ? "Image unavailable" : "Image attached",
+                    (gatewayLoadFailed || localPreviewFailed) ? AppLocalization.string("Image unavailable") : AppLocalization.string("Image attached"),
                     systemImage: (gatewayLoadFailed || localPreviewFailed) ? "photo.badge.exclamationmark" : "photo"
                 )
                 .font(.caption.weight(.medium))
@@ -1350,6 +1351,7 @@ struct SettledAssistantMessageContent: View, Equatable {
 /// The dynamic half of an assistant row: copy/branch controls that depend
 /// on busy state, kept small so their per-publish re-evaluation is cheap.
 struct AssistantMessageActions: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let message: ChatMessage
     @EnvironmentObject private var appState: AppState
     @State private var copied = false
@@ -1364,7 +1366,7 @@ struct AssistantMessageActions: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(copied ? Color.conduitAccent : Color.secondary)
-        .accessibilityLabel(copied ? "Response copied" : "Copy response")
+        .accessibilityLabel(copied ? AppLocalization.string("Response copied") : AppLocalization.string("Copy response"))
 
         Button {
             Haptics.medium()
@@ -1398,6 +1400,7 @@ struct AssistantMessageActions: View {
 /// playback state transition re-renders a 34pt button instead of every
 /// response's Markdown in the transcript.
 struct ReadAloudButton: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let message: ChatMessage
     @ObservedObject var controller: MessageReadAloudController
     @EnvironmentObject private var appState: AppState
@@ -1434,7 +1437,7 @@ struct ReadAloudButton: View {
         .foregroundStyle(isActive ? Color.conduitAccent : Color.secondary)
         .disabled(unavailable && !isActive)
         .opacity(unavailable && !isActive ? 0.45 : 1)
-        .accessibilityLabel(isActive ? "Stop reading response" : "Read response aloud")
+        .accessibilityLabel(isActive ? AppLocalization.string("Stop reading response") : AppLocalization.string("Read response aloud"))
     }
 }
 
@@ -1478,6 +1481,7 @@ struct AssistantBubble: View {
 // MARK: - System Message (slash command output)
 
 struct SystemBubble: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let message: ChatMessage
 
     private var isRuntimeNotice: Bool {
@@ -1497,7 +1501,7 @@ struct SystemBubble: View {
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
-                    Text(isRuntimeNotice ? "System" : "Command")
+                    Text(isRuntimeNotice ? AppLocalization.string("System") : AppLocalization.string("Command"))
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.conduitAccent)
                         .textCase(.uppercase)
@@ -1531,6 +1535,7 @@ struct SystemBubble: View {
 /// (Of the system-message surfaces, only `SystemBubble`'s Markdown body
 /// follows `ChatTypography`.)
 private struct ReviewSummaryCard: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let activity: ReviewActivity
     let timestamp: String
     @EnvironmentObject private var appState: AppState
@@ -1574,7 +1579,7 @@ private struct ReviewSummaryCard: View {
             }
             .buttonStyle(.plain)
             .disabled(details.isEmpty)
-            .accessibilityLabel(details.isEmpty ? activity.summary : (expanded ? "Collapse review details" : "Expand review details"))
+            .accessibilityLabel(details.isEmpty ? activity.summary : (expanded ? AppLocalization.string("Collapse review details") : AppLocalization.string("Expand review details")))
 
             if expanded, !details.isEmpty {
                 VStack(alignment: .leading, spacing: 12) {
@@ -1901,6 +1906,7 @@ private struct SettledToolCardContent: View, Equatable {
 }
 
 struct ToolCard: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let message: ChatMessage
     @EnvironmentObject var appState: AppState
     @Environment(\.sizeCategory) private var sizeCategory
@@ -1923,7 +1929,7 @@ struct ToolCard: View {
     static func truncateForDisplay(_ text: String, maxLines: Int) -> String {
         let lines = text.components(separatedBy: "\n")
         guard lines.count > maxLines else { return text }
-        return lines.prefix(maxLines).joined(separator: "\n") + "\n… (\(lines.count - maxLines) more lines)"
+        return lines.prefix(maxLines).joined(separator: "\n") + AppLocalization.string("\n… (\(lines.count - maxLines) more lines)")
     }
 }
 
@@ -1951,7 +1957,7 @@ enum ClarifyCardLayout {
         case .singleQuestion:
             return activity.questions.first?.question ?? ""
         case .batch:
-            return "Hermes asked \(activity.questions.count) questions before it can continue"
+            return AppLocalization.string("Hermes asked \(activity.questions.count) questions before it can continue")
         }
     }
 
@@ -1965,6 +1971,7 @@ enum ClarifyCardLayout {
 }
 
 struct ClarifyCard: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let message: ChatMessage
     @EnvironmentObject var appState: AppState
     // Per-question draft state, keyed by the gateway qid: typed custom text
@@ -2063,11 +2070,11 @@ struct ClarifyCard: View {
 
     private func statusTitle(for status: ClarifyActivity.Status) -> String {
         switch status {
-        case .pending: return "NEEDS YOUR INPUT"
-        case .submitting: return "SENDING ANSWER"
-        case .answered: return "ANSWERED"
-        case .error: return "TRY AGAIN"
-        case .expired: return "EXPIRED"
+        case .pending: return AppLocalization.string("NEEDS YOUR INPUT")
+        case .submitting: return AppLocalization.string("SENDING ANSWER")
+        case .answered: return AppLocalization.string("ANSWERED")
+        case .error: return AppLocalization.string("TRY AGAIN")
+        case .expired: return AppLocalization.string("EXPIRED")
         }
     }
 
@@ -2088,6 +2095,7 @@ struct ClarifyCard: View {
 /// each row draws its own grouped box and title; a single-question card keeps
 /// the legacy flat layout (the card header already carries the title).
 struct ClarifyQuestionRow: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let question: ClarifyQuestion
     var showsTitle: Bool = true
     @Binding var customAnswer: String
@@ -2221,7 +2229,7 @@ struct ClarifyQuestionRow: View {
 
         HStack(spacing: 8) {
             TextField(
-                question.choices.isEmpty ? "Type your answer…" : "Something else…",
+                question.choices.isEmpty ? AppLocalization.string("Type your answer…") : AppLocalization.string("Something else…"),
                 text: $customAnswer,
                 axis: .vertical
             )
@@ -2322,7 +2330,7 @@ struct ClarifyQuestionRow: View {
     }
 
     private var confirmTitle: String {
-        selection.isEmpty ? "Select to confirm" : "Confirm \(selection.count) selected"
+        selection.isEmpty ? AppLocalization.string("Select to confirm") : AppLocalization.string("Confirm \(selection.count) selected")
     }
 
     private var isAnswerable: Bool {
@@ -2354,6 +2362,7 @@ struct ClarifyQuestionRow: View {
 // MARK: - Approval Card
 
 struct ApprovalCard: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let message: ChatMessage
     @EnvironmentObject var appState: AppState
     @State private var confirmAlways = false
@@ -2479,21 +2488,21 @@ struct ApprovalCard: View {
 
     private func decisionTitle(_ choice: String) -> String {
         switch choice {
-        case "once": return "Approved once"
-        case "session": return "Approved for this session"
-        case "always": return "Always allowed"
-        case "deny": return "Rejected"
+        case "once": return AppLocalization.string("Approved once")
+        case "session": return AppLocalization.string("Approved for this session")
+        case "always": return AppLocalization.string("Always allowed")
+        case "deny": return AppLocalization.string("Rejected")
         default: return choice
         }
     }
 
     private func statusTitle(for status: ApprovalActivity.Status) -> String {
         switch status {
-        case .pending: return "APPROVAL NEEDED"
-        case .submitting: return "SENDING DECISION"
-        case .approved: return "APPROVED"
-        case .rejected: return "REJECTED"
-        case .error: return "TRY AGAIN"
+        case .pending: return AppLocalization.string("APPROVAL NEEDED")
+        case .submitting: return AppLocalization.string("SENDING DECISION")
+        case .approved: return AppLocalization.string("APPROVED")
+        case .rejected: return AppLocalization.string("REJECTED")
+        case .error: return AppLocalization.string("TRY AGAIN")
         }
     }
 
@@ -2578,9 +2587,10 @@ struct TypingIndicator: View {
 }
 
 private struct WorkingStatusLabel: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private let text = "Working…"
+    private let text = AppLocalization.string("Working…")
     private let cycleDuration = 1.9
     private let sweepFraction = 0.72
 

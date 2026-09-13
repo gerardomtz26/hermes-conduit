@@ -686,13 +686,13 @@ final class AppState: ObservableObject {
     var composerPlaceholder: String {
         switch turnState {
         case .running:
-            return "\(busyInputMode.title) \(profileDisplayName(activeProfile))…"
+            return AppLocalization.string("\(busyInputMode.title) \(profileDisplayName(activeProfile))…")
         case .synchronizing, .reconnecting:
-            return "Checking agent activity…"
+            return AppLocalization.string("Checking agent activity…")
         case .unsupportedGateway:
-            return "Update Hermes to use chat controls"
+            return AppLocalization.string("Update Hermes to use chat controls")
         case .idle:
-            return "Message \(profileDisplayName(activeProfile))…"
+            return AppLocalization.string("Message \(profileDisplayName(activeProfile))…")
         }
     }
 
@@ -1454,7 +1454,7 @@ final class AppState: ObservableObject {
     func restoreActiveSessionState(for profile: String) {
         clearPendingDecisionRestorationGuard()
         activeSessionId = chatResumeCoordinator.lastSessionID(for: profile)
-        activeSessionTitle = activeSessionTitlesByProfile[profile] ?? "New conversation"
+        activeSessionTitle = activeSessionTitlesByProfile[profile] ?? AppLocalization.string("New conversation")
     }
 
     private func restorePinnedSessions(for profile: String) {
@@ -2102,7 +2102,7 @@ final class AppState: ObservableObject {
         profiles = []
         clearPendingDecisionRestorationGuard()
         activeSessionId = nil
-        activeSessionTitle = "New conversation"
+        activeSessionTitle = AppLocalization.string("New conversation")
         messages = []
         persistedTranscriptWindow = nil
         resetTranscriptLifecycleEvidence()
@@ -2341,7 +2341,7 @@ final class AppState: ObservableObject {
     func selectAppIcon(_ choice: AppIconChoice) async -> Bool {
         guard choice != appIconChoice else { return true }
         guard UIApplication.shared.supportsAlternateIcons else {
-            errorMessage = "This build does not include alternate app icons."
+            errorMessage = AppLocalization.string("This build does not include alternate app icons.")
             return false
         }
 
@@ -2349,7 +2349,7 @@ final class AppState: ObservableObject {
             UIApplication.shared.setAlternateIconName(choice.alternateIconName) { [weak self] error in
                 Task { @MainActor in
                     if let error {
-                        self?.errorMessage = "Could not change the app icon: \(error.localizedDescription)"
+                        self?.errorMessage = AppLocalization.string("Could not change the app icon: \(error.localizedDescription)")
                         continuation.resume(returning: false)
                     } else {
                         self?.appIconChoice = choice
@@ -2450,7 +2450,7 @@ final class AppState: ObservableObject {
             isConnecting = false
             turnState = .reconnecting
             lastConnectionFailure = failureKind
-            errorMessage = "The connection to Hermes was lost. (UI test stub)"
+            errorMessage = AppLocalization.string("The connection to Hermes was lost. (UI test stub)")
             showLogin = false
             return
         }
@@ -2878,7 +2878,7 @@ final class AppState: ObservableObject {
         pinnedSessionIDs = []
         messages = []
         persistedTranscriptWindow = nil
-        setActiveSessionState(id: nil, title: "New conversation")
+        setActiveSessionState(id: nil, title: AppLocalization.string("New conversation"))
         clearStreamingText()
         resetReasoningTurn()
         turnState = .idle
@@ -2942,7 +2942,7 @@ final class AppState: ObservableObject {
 
         if credentials.requiresFaceID {
             guard BiometricAuth.isFaceIDAvailable,
-                  await BiometricAuth.authenticate(reason: "Unlock Conduit") else {
+                  await BiometricAuth.authenticate(reason: AppLocalization.string("Unlock Conduit")) else {
                 showLogin = true
                 return
             }
@@ -3006,7 +3006,7 @@ final class AppState: ObservableObject {
     /// through requireSignIn(failure:) so it is classified, never rendered
     /// raw.
     func requireSignIn(message: String) {
-        performSignInRequired(pendingFailure: .notice(title: "Sign-in didn’t complete", message: message))
+        performSignInRequired(pendingFailure: .notice(title: AppLocalization.string("Sign-in didn’t complete"), message: message))
     }
 
     private func performSignInRequired(pendingFailure: ConnectionFailurePresentation) {
@@ -3322,7 +3322,7 @@ final class AppState: ObservableObject {
                 return chatResumeSyncInterruptionOutcome(for: automaticWorkToken)
             }
             turnState = .reconnecting
-            errorMessage = "Failed to load gateway sessions: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Failed to load gateway sessions: \(error.localizedDescription)")
             settleReconciliation(
                 token,
                 automaticSyncOperationID: automaticOperationID
@@ -3689,7 +3689,7 @@ final class AppState: ObservableObject {
                 if turnState == .synchronizing {
                     turnState = .idle
                 }
-                errorMessage = "Hermes returned a different conversation while resuming this one. Try reopening it."
+                errorMessage = AppLocalization.string("Hermes returned a different conversation while resuming this one. Try reopening it.")
                 settleReconciliation(token, automaticSyncOperationID: automaticSyncOperationID)
                 chatResumeCoordinator.abandonPendingAutomaticSync()
                 return false
@@ -4055,7 +4055,7 @@ final class AppState: ObservableObject {
                 // must not claim the backend lacks pagination).
                 errorMessage = error.localizedDescription
             default:
-                errorMessage = "Failed to restore this conversation: \(error.localizedDescription)"
+                errorMessage = AppLocalization.string("Failed to restore this conversation: \(error.localizedDescription)")
             }
             settleReconciliation(token, automaticSyncOperationID: automaticSyncOperationID)
             chatResumeCoordinator.abandonPendingAutomaticSync()
@@ -4124,7 +4124,7 @@ final class AppState: ObservableObject {
             if let returnedProfile = created.profile,
                !profilesMatch(returnedProfile, profile) {
                 turnState = .idle
-                errorMessage = "Hermes created this conversation in \(profileDisplayName(returnedProfile)), not \(profileDisplayName(profile)). It was not opened."
+                errorMessage = AppLocalization.string("Hermes created this conversation in \(profileDisplayName(returnedProfile)), not \(profileDisplayName(profile)). It was not opened.")
                 settleReconciliation(token, automaticSyncOperationID: automaticSyncOperationID)
                 chatResumeCoordinator.abandonPendingAutomaticSync()
                 await loadSessions(forceRefresh: true)
@@ -4133,7 +4133,7 @@ final class AppState: ObservableObject {
             let runtimeSessionID = created.sessionId.isEmpty ? (created.storedSessionId ?? "") : created.sessionId
             guard !runtimeSessionID.isEmpty else {
                 turnState = .idle
-                errorMessage = "Hermes created a conversation without a session ID."
+                errorMessage = AppLocalization.string("Hermes created a conversation without a session ID.")
                 settleReconciliation(token, automaticSyncOperationID: automaticSyncOperationID)
                 chatResumeCoordinator.abandonPendingAutomaticSync()
                 return
@@ -4144,7 +4144,7 @@ final class AppState: ObservableObject {
             // available immediately, so resuming here races the persistence
             // layer and leaves the composer stuck synchronizing.
             markChatViewportReplacement()
-            setActiveSessionState(id: runtimeSessionID, title: "New conversation")
+            setActiveSessionState(id: runtimeSessionID, title: AppLocalization.string("New conversation"))
             messages = []
             persistedTranscriptWindow = nil
             resetTranscriptLifecycleEvidence()
@@ -4193,7 +4193,7 @@ final class AppState: ObservableObject {
                     .filter { $0 != storedID },
                 title: activeSessionTitle,
                 model: runtime.model.isEmpty ? "Hermes" : runtime.model,
-                updatedLabel: "now",
+                updatedLabel: AppLocalization.string("now"),
                 profile: activeProfile,
                 source: .chat,
                 isActive: true,
@@ -4241,7 +4241,7 @@ final class AppState: ObservableObject {
                 return
             }
             turnState = .idle
-            errorMessage = "Failed to create session: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Failed to create session: \(error.localizedDescription)")
             settleReconciliation(token, automaticSyncOperationID: automaticSyncOperationID)
             chatResumeCoordinator.abandonPendingAutomaticSync()
             if resumePurpose == .automaticReturn {
@@ -4262,7 +4262,7 @@ final class AppState: ObservableObject {
         ) else { return false }
         let retainedRestoredMessages = pendingDecisionRestorationMessages(for: result.sessionId)
         markChatViewportReplacement()
-        setActiveSessionState(id: result.sessionId, title: "New conversation")
+        setActiveSessionState(id: result.sessionId, title: AppLocalization.string("New conversation"))
         updateActiveSessionTitle(
             for: result.sessionId,
             fallbackSessionId: reconciliation?.requestedSessionId
@@ -4401,7 +4401,7 @@ final class AppState: ObservableObject {
             turnState = .running
         } else if TurnState.fromGatewayRunning(result.snapshot.running) == .unsupportedGateway {
             turnState = .unsupportedGateway
-            errorMessage = "This Hermes gateway must support session turn state. Update Hermes to enable message, stop, and steer controls."
+            errorMessage = AppLocalization.string("This Hermes gateway must support session turn state. Update Hermes to enable message, stop, and steer controls.")
             return true
         } else {
             turnState = TurnState.fromGatewayRunning(result.snapshot.running)
@@ -5170,7 +5170,7 @@ final class AppState: ObservableObject {
                 isConnecting = false
                 turnState = .reconnecting
                 lastConnectionFailure = ConnectionFailureClassifier.classify(error)
-                errorMessage = "Failed to refresh the dashboard session: \(error.localizedDescription)"
+                errorMessage = AppLocalization.string("Failed to refresh the dashboard session: \(error.localizedDescription)")
                 scheduleReconnect(purpose: continuationPurpose)
             }
             return
@@ -6701,7 +6701,7 @@ final class AppState: ObservableObject {
                 guard let activeClient, self.client === activeClient else { return false }
             }
             guard requiredViewportTransitionGeneration.map({ chatViewportTransitionIsCurrent(generation: $0) }) ?? true else { return false }
-            errorMessage = "Failed to load sessions: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Failed to load sessions: \(error.localizedDescription)")
             return false
         }
     }
@@ -6732,7 +6732,7 @@ final class AppState: ObservableObject {
             archivedSessions = uniqueSessions(loaded.filter { sessionBelongsToProfile($0, profile: profile) })
         } catch {
             guard profile == activeProfile else { return }
-            errorMessage = "Could not load archived conversations: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not load archived conversations: \(error.localizedDescription)")
         }
     }
 
@@ -6749,7 +6749,7 @@ final class AppState: ObservableObject {
               sessionBelongsToProfile(session, profile: activeProfile),
               let dashboardTicketBridge else { return false }
         if archived, isBusy, sessionMatchesActiveSession(session) {
-            errorMessage = "Stop the active response before archiving this conversation."
+            errorMessage = AppLocalization.string("Stop the active response before archiving this conversation.")
             return false
         }
 
@@ -6782,7 +6782,8 @@ final class AppState: ObservableObject {
             return true
         } catch {
             guard profile == activeProfile else { return false }
-            errorMessage = "Could not \(archived ? "archive" : "restore") this conversation: \(error.localizedDescription)"
+            let archivedAction = AppLocalization.string(archived ? "archive" : "restore")
+            errorMessage = AppLocalization.string("Could not \(archivedAction) this conversation: \(error.localizedDescription)")
             return false
         }
     }
@@ -6870,7 +6871,7 @@ final class AppState: ObservableObject {
               sessionBelongsToProfile(session, profile: activeProfile),
               let dashboardTicketBridge else { return false }
         if isBusy, sessionMatchesActiveSession(session) {
-            errorMessage = "Stop the active response before deleting this conversation."
+            errorMessage = AppLocalization.string("Stop the active response before deleting this conversation.")
             return false
         }
 
@@ -6899,7 +6900,7 @@ final class AppState: ObservableObject {
             return true
         } catch {
             guard profile == activeProfile else { return false }
-            errorMessage = "Could not delete this conversation: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not delete this conversation: \(error.localizedDescription)")
             return false
         }
     }
@@ -7007,7 +7008,7 @@ final class AppState: ObservableObject {
         guard sessionMatchesActiveSession(session) else { return }
         let transitionGeneration = acceptChatResumeConversationReplacement(replacement)
         markChatViewportReplacement()
-        setActiveSessionState(id: nil, title: "New conversation")
+        setActiveSessionState(id: nil, title: AppLocalization.string("New conversation"))
         messages = []
         persistedTranscriptWindow = nil
         resetTranscriptLifecycleEvidence()
@@ -7065,7 +7066,7 @@ final class AppState: ObservableObject {
         if let session = (sessions + cronSessions).first(where: {
             $0.id == sessionId || $0.alternateIds.contains(sessionId)
         }), !sessionBelongsToProfile(session, profile: activeProfile) {
-            errorMessage = "That conversation belongs to another workspace. Switch profiles to open it."
+            errorMessage = AppLocalization.string("That conversation belongs to another workspace. Switch profiles to open it.")
             return false
         }
         let transitionGeneration: UInt64
@@ -7388,7 +7389,7 @@ final class AppState: ObservableObject {
     func createNewSession(cwd: String? = nil) async {
         guard !isProfileSwitching, isConnected, !isConnecting, let client else {
             if isProfileSwitching || isConnecting {
-                errorMessage = "Wait for the workspace switch to finish before starting a conversation."
+                errorMessage = AppLocalization.string("Wait for the workspace switch to finish before starting a conversation.")
             }
             return
         }
@@ -7398,7 +7399,7 @@ final class AppState: ObservableObject {
         }
         let profile = activeProfile
         cacheMessagePresentation()
-        activeSessionTitle = "New conversation"
+        activeSessionTitle = AppLocalization.string("New conversation")
         let token = beginReconciliation()
         turnState = .synchronizing
         await createAndReconcileSession(using: client, profile: profile, token: token, cwd: cwd)
@@ -7448,7 +7449,7 @@ final class AppState: ObservableObject {
             return SessionBranchMessage(role: message.role, content: trimmed)
         }
         guard !prefix.isEmpty else {
-            errorMessage = "There is no message history to branch from."
+            errorMessage = AppLocalization.string("There is no message history to branch from.")
             return
         }
 
@@ -7457,7 +7458,7 @@ final class AppState: ObservableObject {
         let previousTurnState = turnState
         let profile = activeProfile
         turnState = .synchronizing
-        let title = "Branch of \(activeSessionTitle)"
+        let title = AppLocalization.string("Branch of \(activeSessionTitle)")
         let transitionGeneration = acceptChatResumeConversationReplacement(.branch)
         defer {
             cancelChatViewportTransitionIfNoReplacement(generation: transitionGeneration)
@@ -7487,7 +7488,7 @@ final class AppState: ObservableObject {
             if let returnedProfile = branched.profile,
                !profilesMatch(returnedProfile, profile) {
                 turnState = previousTurnState
-                errorMessage = "Hermes created this branch in \(profileDisplayName(returnedProfile)), not \(profileDisplayName(profile)). It was not opened."
+                errorMessage = AppLocalization.string("Hermes created this branch in \(profileDisplayName(returnedProfile)), not \(profileDisplayName(profile)). It was not opened.")
                 guard await loadSessions(
                     forceRefresh: true,
                     requiredViewportTransitionGeneration: transitionGeneration
@@ -7512,7 +7513,7 @@ final class AppState: ObservableObject {
                     .filter { $0 != branched.storedSessionId ?? branched.sessionId },
                 title: title,
                 model: runtime.model.isEmpty ? "Hermes" : runtime.model,
-                updatedLabel: "now",
+                updatedLabel: AppLocalization.string("now"),
                 profile: activeProfile,
                 source: .chat,
                 isActive: true,
@@ -7571,7 +7572,7 @@ final class AppState: ObservableObject {
                   profile == activeProfile,
                   self.client === client else { return }
             turnState = previousTurnState
-            errorMessage = "Could not branch conversation: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not branch conversation: \(error.localizedDescription)")
         }
     }
 
@@ -7745,7 +7746,7 @@ final class AppState: ObservableObject {
 
         if isBusy {
             guard attachments.isEmpty else {
-                errorMessage = "Attachments can only be sent in a new message, after the current response finishes."
+                errorMessage = AppLocalization.string("Attachments can only be sent in a new message, after the current response finishes.")
                 return false
             }
 
@@ -7767,7 +7768,7 @@ final class AppState: ObservableObject {
         if turnState == .idle, turnStateIsStale,
            await correctStaleIdleTurnState(using: submissionContext) {
             guard attachments.isEmpty else {
-                errorMessage = "Attachments can only be sent in a new message, after the current response finishes."
+                errorMessage = AppLocalization.string("Attachments can only be sent in a new message, after the current response finishes.")
                 return false
             }
             switch busyInputMode {
@@ -7787,7 +7788,7 @@ final class AppState: ObservableObject {
         // turn — the same busy-edge rule the freshness gate enforces.
         if turnState.isRunning {
             guard attachments.isEmpty else {
-                errorMessage = "Attachments can only be sent in a new message, after the current response finishes."
+                errorMessage = AppLocalization.string("Attachments can only be sent in a new message, after the current response finishes.")
                 return false
             }
             switch busyInputMode {
@@ -7819,7 +7820,7 @@ final class AppState: ObservableObject {
                 // routes through the configured busy submission, exactly like
                 // a stale-idle correction to running.
                 guard attachments.isEmpty else {
-                    errorMessage = "Attachments can only be sent in a new message, after the current response finishes."
+                    errorMessage = AppLocalization.string("Attachments can only be sent in a new message, after the current response finishes.")
                     return false
                 }
                 switch busyInputMode {
@@ -8002,13 +8003,13 @@ final class AppState: ObservableObject {
             lifecycleLog.notice(
                 "submitComposer: pre-send freshness read superseded by \(self.turnStateLogValue, privacy: .public); blocking send session=\(sessionId, privacy: .public)"
             )
-            return .blocked("Unable to refresh this conversation. Try again.")
+            return .blocked(AppLocalization.string("Unable to refresh this conversation. Try again."))
         }
         switch outcome {
         case .failed:
             // Second transient failure: no loop, no escalation, no silently
             // claimed freshness — block the new-turn prompt instead.
-            return .blocked("Unable to refresh this conversation. Try again.")
+            return .blocked(AppLocalization.string("Unable to refresh this conversation. Try again."))
         case .unavailable:
             // Positively structural: the authoritative reconcile is the
             // recovery path that still converges the transcript (a
@@ -8143,7 +8144,7 @@ final class AppState: ObservableObject {
                     // Unreachable for a `.hydrated` outcome (both are produced
                     // only from the fetch-level cases above); kept as defensive
                     // exhaustiveness. Blocking is the safe direction regardless.
-                    return .blocked("Unable to refresh this conversation. Try again.")
+                    return .blocked(AppLocalization.string("Unable to refresh this conversation. Try again."))
                 }
             }
             return .proceed
@@ -8259,7 +8260,7 @@ final class AppState: ObservableObject {
             lifecycleLog.notice(
                 "submitComposer: pre-send freshness recovery did not converge; blocking send session=\(sessionID, privacy: .public)"
             )
-            return .blocked("Unable to refresh this conversation. Try again.")
+            return .blocked(AppLocalization.string("Unable to refresh this conversation. Try again."))
         }
         return .proceed
     }
@@ -8333,7 +8334,7 @@ final class AppState: ObservableObject {
                 guard isCurrentComposerSubmission(submissionContext) else { return false }
             } catch {
                 guard isCurrentComposerSubmission(submissionContext) else { return false }
-                errorMessage = "Attachment failed: \(error.localizedDescription)"
+                errorMessage = AppLocalization.string("Attachment failed: \(error.localizedDescription)")
                 await recoverComposerSubmission(using: submissionContext)
                 return false
             }
@@ -8593,7 +8594,7 @@ final class AppState: ObservableObject {
                 // failed send must not paint an error onto the session the
                 // user switched to while recovery was suspended.
                 if isCurrentComposerSubmission(submissionContext) {
-                    errorMessage = "Failed to send: \(error.localizedDescription)"
+                    errorMessage = AppLocalization.string("Failed to send: \(error.localizedDescription)")
                 }
                 if !reconnected, isCurrentComposerSubmission(submissionContext) {
                     await recoverComposerSubmission(using: submissionContext)
@@ -8603,7 +8604,7 @@ final class AppState: ObservableObject {
                 return false
             }
             if isCurrentComposerSubmission(submissionContext) {
-                errorMessage = "Failed to send: \(error.localizedDescription)"
+                errorMessage = AppLocalization.string("Failed to send: \(error.localizedDescription)")
             }
             await recoverComposerSubmission(using: submissionContext)
             return false
@@ -9000,7 +9001,7 @@ final class AppState: ObservableObject {
             return true
         } catch {
             guard isCurrentComposerSubmission(submissionContext) else { return false }
-            errorMessage = "Unable to change YOLO mode: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Unable to change YOLO mode: \(error.localizedDescription)")
             return false
         }
     }
@@ -9061,31 +9062,34 @@ final class AppState: ObservableObject {
     /// Keep the common Hermes commands discoverable even when an older gateway
     /// returns only skill entries from `commands.catalog`. Commands Conduit
     /// does not own locally still run through slash.exec / command.dispatch.
-    private static let builtInSlashCommands: [SlashCommand] = [
-        SlashCommand(name: "new", aliases: ["reset"], description: "Start a new conversation", category: "Session"),
-        SlashCommand(name: "branch", aliases: ["fork"], description: "Branch this conversation into a new chat", category: "Session"),
-        SlashCommand(name: "model", description: "Open the model and run settings", category: "Session"),
-        SlashCommand(name: "yolo", description: "Toggle automatic tool approval", category: "Session"),
-        SlashCommand(name: "help", aliases: ["commands"], description: "Show available slash commands", category: "Session"),
-        SlashCommand(name: "approvals", description: "Show or set approval mode", category: "Hermes"),
-        SlashCommand(name: "agents", aliases: ["tasks"], description: "Show active sessions and tasks", category: "Hermes"),
-        SlashCommand(name: "background", aliases: ["bg", "btw"], description: "Run a prompt in the background", category: "Hermes"),
-        SlashCommand(name: "compress", aliases: ["compact"], description: "Compress this conversation context", category: "Hermes"),
-        SlashCommand(name: "debug", description: "Create a debug report", category: "Hermes"),
-        SlashCommand(name: "goal", description: "Manage this session's standing goal", category: "Hermes"),
-        SlashCommand(name: "personality", description: "Switch the session personality", category: "Hermes"),
-        SlashCommand(name: "queue", aliases: ["q"], description: "Queue a prompt for the next turn", category: "Hermes"),
-        SlashCommand(name: "retry", description: "Retry the last user message", category: "Hermes"),
-        SlashCommand(name: "rollback", description: "List or restore filesystem checkpoints", category: "Hermes"),
-        SlashCommand(name: "save", description: "Save the current transcript", category: "Hermes"),
-        SlashCommand(name: "status", description: "Show current session status", category: "Hermes"),
-        SlashCommand(name: "steer", description: "Steer the current run", category: "Hermes"),
-        SlashCommand(name: "stop", description: "Stop running background processes", category: "Hermes"),
-        SlashCommand(name: "tools", description: "List or toggle agent tools", category: "Hermes"),
-        SlashCommand(name: "undo", description: "Remove the last user and assistant exchange", category: "Hermes"),
-        SlashCommand(name: "usage", description: "Show this session's token usage", category: "Hermes"),
-        SlashCommand(name: "version", description: "Show the Hermes Agent version", category: "Hermes")
+    /// Internal so localization tests can pin the protocol-value invariants
+    /// (raw name/aliases, localized display copy) across every App Language.
+    static var builtInSlashCommands: [SlashCommand] { [
+        SlashCommand(name: "new", aliases: ["reset"], description: AppLocalization.string("Start a new conversation"), category: AppLocalization.string("Session")),
+        SlashCommand(name: "branch", aliases: ["fork"], description: AppLocalization.string("Branch this conversation into a new chat"), category: AppLocalization.string("Session")),
+        SlashCommand(name: "model", description: AppLocalization.string("Open the model and run settings"), category: AppLocalization.string("Session")),
+        SlashCommand(name: "yolo", description: AppLocalization.string("Toggle automatic tool approval"), category: AppLocalization.string("Session")),
+        SlashCommand(name: "help", aliases: ["commands"], description: AppLocalization.string("Show available slash commands"), category: AppLocalization.string("Session")),
+        SlashCommand(name: "approvals", description: AppLocalization.string("Show or set approval mode"), category: "Hermes"),
+        SlashCommand(name: "agents", aliases: ["tasks"], description: AppLocalization.string("Show active sessions and tasks"), category: "Hermes"),
+        SlashCommand(name: "background", aliases: ["bg", "btw"], description: AppLocalization.string("Run a prompt in the background"), category: "Hermes"),
+        SlashCommand(name: "compress", aliases: ["compact"], description: AppLocalization.string("Compress this conversation context"), category: "Hermes"),
+        SlashCommand(name: "debug", description: AppLocalization.string("Create a debug report"), category: "Hermes"),
+        SlashCommand(name: "goal", description: AppLocalization.string("Manage this session's standing goal"), category: "Hermes"),
+        SlashCommand(name: "personality", description: AppLocalization.string("Switch the session personality"), category: "Hermes"),
+        SlashCommand(name: "queue", aliases: ["q"], description: AppLocalization.string("Queue a prompt for the next turn"), category: "Hermes"),
+        SlashCommand(name: "retry", description: AppLocalization.string("Retry the last user message"), category: "Hermes"),
+        SlashCommand(name: "rollback", description: AppLocalization.string("List or restore filesystem checkpoints"), category: "Hermes"),
+        SlashCommand(name: "save", description: AppLocalization.string("Save the current transcript"), category: "Hermes"),
+        SlashCommand(name: "status", description: AppLocalization.string("Show current session status"), category: "Hermes"),
+        SlashCommand(name: "steer", description: AppLocalization.string("Steer the current run"), category: "Hermes"),
+        SlashCommand(name: "stop", description: AppLocalization.string("Stop running background processes"), category: "Hermes"),
+        SlashCommand(name: "tools", description: AppLocalization.string("List or toggle agent tools"), category: "Hermes"),
+        SlashCommand(name: "undo", description: AppLocalization.string("Remove the last user and assistant exchange"), category: "Hermes"),
+        SlashCommand(name: "usage", description: AppLocalization.string("Show this session's token usage"), category: "Hermes"),
+        SlashCommand(name: "version", description: AppLocalization.string("Show the Hermes Agent version"), category: "Hermes")
     ]
+    }
 
     private static func normalizedSlashCatalog(_ payload: AnyCodable) -> [SlashCommand] {
         let object = payload.objectValue ?? [:]
@@ -9109,7 +9113,7 @@ final class AppState: ObservableObject {
         }
 
         for pair in object["pairs"]?.arrayValue ?? [] {
-            if let command = slashCommand(from: pair, category: "Skills & extensions") {
+            if let command = slashCommand(from: pair, category: AppLocalization.string("Skills & extensions")) {
                 add(command)
             }
         }
@@ -9141,7 +9145,7 @@ final class AppState: ObservableObject {
             let name = normalizedSlashName(rawName)
             guard !name.isEmpty else { return nil }
             let description = pair.dropFirst().first?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
-            return SlashCommand(name: name, description: description?.isEmpty == false ? description! : "Hermes command", category: category)
+            return SlashCommand(name: name, description: description?.isEmpty == false ? description! : AppLocalization.string("Hermes command"), category: category)
         }
         guard let object = value.objectValue else { return nil }
         let name = normalizedSlashName(object["name"]?.stringValue ?? object["command"]?.stringValue ?? "")
@@ -9152,7 +9156,7 @@ final class AppState: ObservableObject {
                 .compactMap { $0.stringValue }
                 .map { normalizedSlashName($0) }
                 .filter { !$0.isEmpty },
-            description: object["description"]?.stringValue ?? object["desc"]?.stringValue ?? "Hermes command",
+            description: object["description"]?.stringValue ?? object["desc"]?.stringValue ?? AppLocalization.string("Hermes command"),
             category: category,
             argsHint: object["args_hint"]?.stringValue ?? object["argsHint"]?.stringValue
         )
@@ -9182,9 +9186,24 @@ final class AppState: ObservableObject {
         do {
             let result = try await client.commandsCatalog(sessionId: sessionID)
             guard profile == activeProfile, self.client === client else { return }
+            lastSlashCatalogPayload = result
             slashCommands = Self.normalizedSlashCatalog(result)
         } catch {
             // Non-fatal — keep whatever we have
+        }
+    }
+
+    private var lastSlashCatalogPayload: AnyCodable?
+
+    /// Re-resolves the slash command list after an in-app App Language
+    /// change. Built-in descriptions/categories localize per call; the
+    /// server catalog is a stored protocol payload (descriptions are server
+    /// data and stay raw), so only the merge is re-run — no refetch.
+    func appLanguageDidChange() {
+        if let payload = lastSlashCatalogPayload {
+            slashCommands = Self.normalizedSlashCatalog(payload)
+        } else {
+            slashCommands = Self.builtInSlashCommands
         }
     }
 
@@ -9259,7 +9278,7 @@ final class AppState: ObservableObject {
         case "new", "reset":
             guard !isProfileSwitching, isConnected, !isConnecting else {
                 if isProfileSwitching || isConnecting {
-                    errorMessage = "Wait for the workspace switch to finish before starting a conversation."
+                    errorMessage = AppLocalization.string("Wait for the workspace switch to finish before starting a conversation.")
                 }
                 return
             }
@@ -9268,12 +9287,12 @@ final class AppState: ObservableObject {
             return
         case "branch", "fork":
             guard !isBusy else {
-                errorMessage = "Stop the active response before branching this conversation."
+                errorMessage = AppLocalization.string("Stop the active response before branching this conversation.")
                 return
             }
             guard !isBranchingChat, !isProfileSwitching else { return }
             guard let assistantMessage = messages.last(where: { $0.role == .assistant }) else {
-                errorMessage = "There is no assistant response to branch from yet."
+                errorMessage = AppLocalization.string("There is no assistant response to branch from yet.")
                 return
             }
             guard let messageIndex = messages.firstIndex(where: { $0.id == assistantMessage.id }),
@@ -9285,7 +9304,7 @@ final class AppState: ObservableObject {
                           ?? message.content
                       return !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                   }) else {
-                errorMessage = "There is no message history to branch from."
+                errorMessage = AppLocalization.string("There is no message history to branch from.")
                 return
             }
             cancelChatResumeRestoration()
@@ -9596,12 +9615,12 @@ final class AppState: ObservableObject {
                 return false
             }
 
-            errorMessage = "Could not redirect the active response: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not redirect the active response: \(error.localizedDescription)")
             await recoverComposerSubmission(using: submissionContext)
             return false
         } catch {
             guard isCurrentOrAliasedComposerSubmission(submissionContext) else { return false }
-            errorMessage = "Could not redirect the active response: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not redirect the active response: \(error.localizedDescription)")
             await recoverComposerSubmission(using: submissionContext)
             return false
         }
@@ -9677,7 +9696,7 @@ final class AppState: ObservableObject {
             return true
         } catch {
             guard isCurrentOrAliasedComposerSubmission(currentContext) else { return false }
-            errorMessage = "Could not interrupt the active response: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not interrupt the active response: \(error.localizedDescription)")
             await recoverComposerSubmission(using: currentContext)
             return false
         }
@@ -9750,7 +9769,7 @@ final class AppState: ObservableObject {
             markClarifyQuestionError(
                 requestId: requestId,
                 questionId: activity.questions[questionIndex].id,
-                message: "Gateway connection is unavailable."
+                message: AppLocalization.string("Gateway connection is unavailable.")
             )
             return
         }
@@ -9798,7 +9817,7 @@ final class AppState: ObservableObject {
                 markClarifyQuestionError(
                     requestId: requestId,
                     questionId: question.id,
-                    message: "Hermes did not accept that answer.",
+                    message: AppLocalization.string("Hermes did not accept that answer."),
                     globalMessage: error.localizedDescription
                 )
             }
@@ -9921,7 +9940,7 @@ final class AppState: ObservableObject {
             case .noLongerActive:
                 activity.questions[0].status = .error
                 activity.questions[0].answer = nil
-                activity.questions[0].error = "This question is no longer active — it was timed out or already resolved."
+                activity.questions[0].error = AppLocalization.string("This question is no longer active — it was timed out or already resolved.")
             }
             messages[updatedIndex].clarify = activity
             cacheMessagePresentation()
@@ -10974,7 +10993,7 @@ final class AppState: ObservableObject {
             guard chatViewportTransitionIsCurrent(generation: transitionGeneration) else {
                 return false
             }
-            errorMessage = "Could not switch workspace: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not switch workspace: \(error.localizedDescription)")
             clearPendingDecisionRestorationGuard()
             // The pre-switch reset neutralized the approval state; restore it
             // with the rest of the previous profile or a failed switch loses
@@ -11187,7 +11206,7 @@ final class AppState: ObservableObject {
         guard let client else {
             messages[index].approval?.status = .error
             messages[index].approval?.choice = nil
-            messages[index].approval?.error = "Gateway connection is unavailable."
+            messages[index].approval?.error = AppLocalization.string("Gateway connection is unavailable.")
             cacheMessagePresentation()
             return
         }
@@ -11212,7 +11231,7 @@ final class AppState: ObservableObject {
             messages[updatedIndex].approval?.status = .error
             messages[updatedIndex].approval?.choice = nil
             if Self.isExpiredPromptError(error) {
-                messages[updatedIndex].approval?.error = "This approval is no longer active — Hermes timed it out and continued."
+                messages[updatedIndex].approval?.error = AppLocalization.string("This approval is no longer active — Hermes timed it out and continued.")
             } else {
                 messages[updatedIndex].approval?.error = "Hermes did not accept that decision."
                 errorMessage = error.localizedDescription
@@ -11284,7 +11303,7 @@ final class AppState: ObservableObject {
                 projects = []
                 supportsProjects = false
             } else {
-                errorMessage = "Could not load \(project.title): \(error.localizedDescription)"
+                errorMessage = AppLocalization.string("Could not load \(project.title): \(error.localizedDescription)")
             }
             return nil
         }
@@ -11321,7 +11340,7 @@ final class AppState: ObservableObject {
                 projects = []
                 supportsProjects = false
             } else {
-                errorMessage = "Could not create the project: \(error.localizedDescription)"
+                errorMessage = AppLocalization.string("Could not create the project: \(error.localizedDescription)")
             }
             return false
         }
@@ -11338,7 +11357,7 @@ final class AppState: ObservableObject {
         guard let dashboardTicketBridge else { throw DashboardTicketBridgeError.notReady }
         let profile = activeProfile
         guard let encodedPath = DashboardPath.encodedQueryComponent(path) else {
-            throw DashboardTicketBridgeError.requestFailed("The workspace path could not be encoded.")
+            throw DashboardTicketBridgeError.requestFailed(AppLocalization.string("The workspace path could not be encoded."))
         }
         let result = try await dashboardTicketBridge.requestJSON(
             path: DashboardPath.withProfile("/api/fs/list?path=\(encodedPath)", profile: profile)
@@ -11452,8 +11471,8 @@ final class AppState: ObservableObject {
             return .success(profile: profile)
         } catch {
             guard ownsRequest() else { return .superseded(requestedProfile: profile, activeProfile: activeProfile) }
-            errorMessage = "Could not load capabilities: \(error.localizedDescription)"
-            return .failed(profile: profile, message: "Could not load capabilities: \(error.localizedDescription)")
+            errorMessage = AppLocalization.string("Could not load capabilities: \(error.localizedDescription)")
+            return .failed(profile: profile, message: AppLocalization.string("Could not load capabilities: \(error.localizedDescription)"))
         }
     }
 
@@ -11476,7 +11495,7 @@ final class AppState: ObservableObject {
             if let index = skills.firstIndex(where: { $0.name == name }) {
                 skills[index].enabled = !enabled
             }
-            errorMessage = "Could not update skill: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not update skill: \(error.localizedDescription)")
         }
     }
 
@@ -11500,7 +11519,7 @@ final class AppState: ObservableObject {
             if let index = toolsets.firstIndex(where: { $0.name == name }) {
                 toolsets[index].enabled = !enabled
             }
-            errorMessage = "Could not update toolset: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not update toolset: \(error.localizedDescription)")
         }
     }
 
@@ -11551,7 +11570,7 @@ final class AppState: ObservableObject {
             }
         } catch {
             guard profile == activeProfile else { return }
-            errorMessage = "Could not load scheduled jobs: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not load scheduled jobs: \(error.localizedDescription)")
         }
     }
 
@@ -11587,7 +11606,7 @@ final class AppState: ObservableObject {
             }
         } catch {
             guard profile == activeProfile else { return }
-            errorMessage = "Could not load scheduled-job runs: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not load scheduled-job runs: \(error.localizedDescription)")
         }
     }
 
@@ -11613,7 +11632,10 @@ final class AppState: ObservableObject {
             }
             return true
         } catch {
-            errorMessage = "Could not \(action) scheduled job: \(error.localizedDescription)"
+            // The wire token stays raw for the URL path; the sentence shows
+            // the localized verb.
+            let actionVerb = AppLocalization.string(String.LocalizationValue(action))
+            errorMessage = AppLocalization.string("Could not \(actionVerb) scheduled job: \(error.localizedDescription)")
             return false
         }
     }
@@ -11708,7 +11730,7 @@ final class AppState: ObservableObject {
                 profileSettingValue(in: config, key: key).map { (key, $0) }
             })
         } catch {
-            errorMessage = "Could not load profile settings: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not load profile settings: \(error.localizedDescription)")
             return [:]
         }
     }
@@ -11758,7 +11780,7 @@ final class AppState: ObservableObject {
             let reasoning = config["reasoning"] as? String ?? config["reasoning_effort"] as? String ?? "medium"
             return ProfileModelDefaults(providers: providers, model: model, provider: provider, reasoning: reasoning)
         } catch {
-            errorMessage = "Could not load model defaults: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not load model defaults: \(error.localizedDescription)")
             return nil
         }
     }
@@ -11773,7 +11795,7 @@ final class AppState: ObservableObject {
                 body: ["model": model, "provider": provider, "scope": "main", "profile": profile]
             )
             if result["confirm_required"] as? Bool == true {
-                errorMessage = result["confirm_message"] as? String ?? "Hermes requires confirmation before using this model."
+                errorMessage = result["confirm_message"] as? String ?? AppLocalization.string("Hermes requires confirmation before using this model.")
                 return false
             }
             var config = try await dashboardTicketBridge.requestJSON(path: dashboardPath("/api/config", profile: profile))
@@ -11789,7 +11811,7 @@ final class AppState: ObservableObject {
             )
             return true
         } catch {
-            errorMessage = "Could not save model defaults: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not save model defaults: \(error.localizedDescription)")
             return false
         }
     }
@@ -11831,7 +11853,7 @@ final class AppState: ObservableObject {
             }
             return true
         } catch {
-            errorMessage = "Could not save \(key): \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not save \(key): \(error.localizedDescription)")
             return false
         }
     }
@@ -11897,7 +11919,7 @@ final class AppState: ObservableObject {
             return true
         } catch {
             if activeProfile == profile { displayPreferences = previous }
-            errorMessage = "Could not save display preference: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not save display preference: \(error.localizedDescription)")
             return false
         }
     }
@@ -11937,7 +11959,7 @@ final class AppState: ObservableObject {
             return true
         } catch {
             busyInputMode = previous
-            errorMessage = "Could not save message behavior: \(error.localizedDescription)"
+            errorMessage = AppLocalization.string("Could not save message behavior: \(error.localizedDescription)")
             return false
         }
     }
@@ -12585,8 +12607,8 @@ final class AppState: ObservableObject {
 
     private static func clarifyExpiredNotice(for questionCount: Int) -> String {
         questionCount > 1
-            ? "These questions are no longer active — Hermes timed them out and continued."
-            : "This question is no longer active — Hermes timed it out and continued."
+            ? AppLocalization.string("These questions are no longer active — Hermes timed them out and continued.")
+            : AppLocalization.string("This question is no longer active — Hermes timed it out and continued.")
     }
 
     /// Whether a still-pending push-delivered card describes the same logical
@@ -12856,14 +12878,14 @@ final class AppState: ObservableObject {
             ids.contains(session.id) || ids.contains(where: session.alternateIds.contains)
         }) else { return }
         let title = session.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        setActiveSessionTitle(title.isEmpty ? "New conversation" : title)
+        setActiveSessionTitle(title.isEmpty ? AppLocalization.string("New conversation") : title)
     }
 
     // MARK: - Chat support surfaces
 
     func openWorkspace() async {
         guard !runtime.cwd.isEmpty else {
-            errorMessage = "Workspace unavailable: Hermes has not reported a working directory for this session yet."
+            errorMessage = AppLocalization.string("Workspace unavailable: Hermes has not reported a working directory for this session yet.")
             return
         }
         workspaceRoot = runtime.cwd
@@ -12907,7 +12929,7 @@ final class AppState: ObservableObject {
         defer { workspaceFileLoading = false }
         do {
             guard let path = DashboardPath.encodedQueryComponent(entry.path) else {
-                throw DashboardTicketBridgeError.requestFailed("The workspace path could not be encoded.")
+                throw DashboardTicketBridgeError.requestFailed(AppLocalization.string("The workspace path could not be encoded."))
             }
             let result = try await dashboardTicketBridge.requestJSON(
                 path: DashboardPath.withProfile("/api/fs/read-text?path=\(path)", profile: profile)
@@ -12931,7 +12953,7 @@ final class AppState: ObservableObject {
         let profile = activeProfile
         do {
             guard let path = DashboardPath.encodedQueryComponent(entry.path) else {
-                throw DashboardTicketBridgeError.requestFailed("The workspace path could not be encoded.")
+                throw DashboardTicketBridgeError.requestFailed(AppLocalization.string("The workspace path could not be encoded."))
             }
             let result = try await dashboardTicketBridge.requestJSON(
                 path: DashboardPath.withProfile("/api/fs/read-data-url?path=\(path)", profile: profile),
@@ -12940,7 +12962,7 @@ final class AppState: ObservableObject {
             guard profile == activeProfile else { return nil }
             guard let dataURL = result["dataUrl"] as? String,
                   let data = DataURLLimits.decodeBase64DataURL(dataURL) else {
-                throw DashboardTicketBridgeError.requestFailed("The gateway returned an invalid file payload.")
+                throw DashboardTicketBridgeError.requestFailed(AppLocalization.string("The gateway returned an invalid file payload."))
             }
             let directory = FileManager.default.temporaryDirectory.appendingPathComponent("Hermes-Conduit-Downloads", isDirectory: true)
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -12983,7 +13005,7 @@ final class AppState: ObservableObject {
         gatewayDiagnosticsLoading = true
         defer { gatewayDiagnosticsLoading = false }
         guard let dashboardTicketBridge else {
-            gatewayDiagnostics = GatewayDiagnostics(gatewayRunning: isConnected, gatewayState: nil, version: nil, pid: nil, connectors: [], logs: [], error: "Dashboard diagnostics are still loading.")
+            gatewayDiagnostics = GatewayDiagnostics(gatewayRunning: isConnected, gatewayState: nil, version: nil, pid: nil, connectors: [], logs: [], error: AppLocalization.string("Dashboard diagnostics are still loading."))
             return
         }
         async let statusResult = dashboardTicketBridge.requestJSON(path: "/api/status")
@@ -13009,7 +13031,7 @@ final class AppState: ObservableObject {
             pid: status?["gateway_pid"] as? Int,
             connectors: connectors,
             logs: (logs?["lines"] as? [Any] ?? []).map { String(describing: $0) },
-            error: status == nil ? "Could not refresh dashboard status." : nil
+            error: status == nil ? AppLocalization.string("Could not refresh dashboard status.") : nil
         )
     }
 
@@ -13237,13 +13259,13 @@ final class AppState: ObservableObject {
             case .permissionDenied:
                 return "Allow Speech Recognition in iOS Settings to use on-device transcription."
             case .unsupported(let localeIdentifier):
-                return "On-device Apple speech recognition is unavailable for \(localeIdentifier)."
+                return AppLocalization.string("On-device Apple speech recognition is unavailable for \(localeIdentifier).")
             case .ready, .permissionRequired:
                 break
             }
         }
         if voiceTranscriptionMode == .hermes, !voiceCapabilitySnapshot.supportsTranscription {
-            return voiceCapabilitySnapshot.unavailableReason ?? "This Hermes profile has no ready speech-to-text provider."
+            return voiceCapabilitySnapshot.unavailableReason ?? AppLocalization.string("This Hermes profile has no ready speech-to-text provider.")
         }
         if !voiceCapabilitySnapshot.supportsSpeech {
             return "This Hermes profile has no ready text-to-speech provider."
@@ -13262,7 +13284,7 @@ final class AppState: ObservableObject {
         // (mid sign-out, before the connection lands) disable the button
         // instead of failing at tap time. Mirrors makeVoiceGateway().
         guard dashboardTicketBridge != nil, connection != nil else {
-            return "Read aloud needs a connected Hermes gateway."
+            return AppLocalization.string("Read aloud needs a connected Hermes gateway.")
         }
         return MessageReadAloudController.unavailableReason(
             isConnected: isConnected,
@@ -13357,12 +13379,12 @@ final class AppState: ObservableObject {
         if mode == .appleOnDevice, !appleSpeechAvailability.canAttemptRecognition {
             switch appleSpeechAvailability {
             case .permissionDenied:
-                errorMessage = "Speech Recognition permission was denied. Please enable it in Settings > Conduit > Speech Recognition."
+                errorMessage = AppLocalization.string("Speech Recognition permission was denied. Please enable it in Settings > Conduit > Speech Recognition.")
             case .unsupported(let localeIdentifier):
                 let localeName = Locale.current.localizedString(forIdentifier: localeIdentifier) ?? localeIdentifier
-                errorMessage = "On-device speech recognition is not available for \(localeName)."
+                errorMessage = AppLocalization.string("On-device speech recognition is not available for \(localeName).")
             default:
-                errorMessage = "On-device speech recognition is unavailable."
+                errorMessage = AppLocalization.string("On-device speech recognition is unavailable.")
             }
             return false
         }
@@ -13504,8 +13526,8 @@ final class AppState: ObservableObject {
                 await switchProfile(to: requestedProfile)
             }
             guard requestedProfile.isEmpty || requestedProfile == activeProfile else {
-                errorMessage = "Conduit could not open the requested voice profile."
-                return .failed("Conduit could not open the requested voice profile.")
+                errorMessage = AppLocalization.string("Conduit could not open the requested voice profile.")
+                return .failed(AppLocalization.string("Conduit could not open the requested voice profile."))
             }
         }
         guard isConnected else { return .deferred }
@@ -13518,33 +13540,33 @@ final class AppState: ObservableObject {
             // shared Voice session is the attachment, not a conflict.
             guard attachToLiveVoiceConversation() else {
                 return .failed(voiceUnavailableReason
-                    ?? "Hermes could not reattach the live voice conversation.")
+                    ?? AppLocalization.string("Hermes could not reattach the live voice conversation."))
             }
             return .handled
         }
         if turnState.isRunning {
             guard startsFreshConversation else {
-                errorMessage = "Stop the current response before starting voice in this conversation."
-                return .failed("Stop the current response before starting voice in this conversation.")
+                errorMessage = AppLocalization.string("Stop the current response before starting voice in this conversation.")
+                return .failed(AppLocalization.string("Stop the current response before starting voice in this conversation."))
             }
             await cancelCurrent()
         }
         await refreshVoiceCapabilities()
         guard canStartVoiceConversation else {
             errorMessage = voiceUnavailableReason
-            return .failed(voiceUnavailableReason ?? "Voice is unavailable.")
+            return .failed(voiceUnavailableReason ?? AppLocalization.string("Voice is unavailable."))
         }
         let previousSessionID = activeSessionId
         if startsFreshConversation || activeSessionId == nil {
             await createNewSession()
             if startsFreshConversation, activeSessionId == previousSessionID {
-                errorMessage = "Hermes could not create the requested voice conversation."
-                return .failed("Hermes could not create the requested voice conversation.")
+                errorMessage = AppLocalization.string("Hermes could not create the requested voice conversation.")
+                return .failed(AppLocalization.string("Hermes could not create the requested voice conversation."))
             }
         }
         guard let sessionID = activeSessionId, let gateway = makeVoiceGateway() else {
-            errorMessage = "Hermes could not prepare a voice conversation."
-            return .failed("Hermes could not prepare a voice conversation.")
+            errorMessage = AppLocalization.string("Hermes could not prepare a voice conversation.")
+            return .failed(AppLocalization.string("Hermes could not prepare a voice conversation."))
         }
         // A fresh user-initiated open supersedes any stale suspension (e.g.
         // a descriptor retained across sign-out, or one whose reconciliation
@@ -13628,13 +13650,13 @@ final class AppState: ObservableObject {
         messageReadAloudController.stop()
         await refreshVoiceCapabilities()
         guard isVoiceEnabled else {
-            return .failure("Enable voice for this profile before running a speech-to-text test.")
+            return .failure(AppLocalization.string("Enable voice for this profile before running a speech-to-text test."))
         }
         guard selectedTranscriptionIsAvailable else {
-            return .failure(voiceUnavailableReason ?? "The selected speech-to-text option is unavailable.")
+            return .failure(voiceUnavailableReason ?? AppLocalization.string("The selected speech-to-text option is unavailable."))
         }
         guard let gateway = makeVoiceGateway() else {
-            return .failure("Conduit could not connect this test to the selected profile.")
+            return .failure(AppLocalization.string("Conduit could not connect this test to the selected profile."))
         }
         voiceConversationController.setGateway(gateway)
         let result = await voiceConversationController.runTranscriptionTest()
@@ -13646,13 +13668,13 @@ final class AppState: ObservableObject {
     func runVoiceTTSTest() async -> VoiceProviderTestResult {
         await refreshVoiceCapabilities()
         guard isVoiceEnabled else {
-            return .failure("Enable voice for this profile before running a speech playback test.")
+            return .failure(AppLocalization.string("Enable voice for this profile before running a speech playback test."))
         }
         guard voiceCapabilitySnapshot.supportsSpeech else {
-            return .failure(voiceUnavailableReason ?? "The selected assistant speech provider is unavailable.")
+            return .failure(voiceUnavailableReason ?? AppLocalization.string("The selected assistant speech provider is unavailable."))
         }
         guard let gateway = makeVoiceGateway() else {
-            return .failure("Conduit could not connect this test to the selected profile.")
+            return .failure(AppLocalization.string("Conduit could not connect this test to the selected profile."))
         }
         // The speech test speaks through the voice controller's own playback
         // instance (the same AVSpeech infrastructure read aloud uses, but a
@@ -13662,7 +13684,7 @@ final class AppState: ObservableObject {
         messageReadAloudController.stop()
         voiceConversationController.setGateway(gateway)
         return await voiceConversationController.runSpeechTest(
-            text: "Conduit voice is ready for this profile."
+            text: AppLocalization.string("Conduit voice is ready for this profile.")
         )
     }
 

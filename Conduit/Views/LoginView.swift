@@ -12,6 +12,7 @@ import WebKit
 import os
 
 struct LoginView: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     private static let logger = Logger(subsystem: "com.milim.relay", category: "login")
 
     @EnvironmentObject var appState: AppState
@@ -297,8 +298,8 @@ struct LoginView: View {
                             .foregroundStyle(.secondary)
                     } else if saveCredentials {
                         Text(useFaceID
-                            ? "Face ID, with device passcode recovery, is required on launch."
-                            : "Saved credentials reconnect without a Face ID prompt.")
+                            ? AppLocalization.string("Face ID, with device passcode recovery, is required on launch.")
+                            : AppLocalization.string("Saved credentials reconnect without a Face ID prompt."))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -405,7 +406,7 @@ struct LoginView: View {
                 Button {
                     Task { await connect() }
                 } label: {
-                    Label(isConnecting ? "Connecting..." : "Connect", systemImage: "arrow.right")
+                    Label(isConnecting ? AppLocalization.string("Connecting...") : AppLocalization.string("Connect"), systemImage: "arrow.right")
                         .font(.headline)
                         .frame(maxWidth: .infinity)
                         .frame(height: 50)
@@ -469,7 +470,7 @@ struct LoginView: View {
             // button ever being enabled (e.g. a whitespace-only URL).
             // Surface the standard invalid-URL feedback instead of a silent
             // no-op.
-            failure = .notice(title: "Enter a valid dashboard URL.")
+            failure = .notice(title: AppLocalization.string("Enter a valid dashboard URL."))
             focusedField = .server
             return
         }
@@ -479,7 +480,7 @@ struct LoginView: View {
         // password value itself is sent untrimmed.
         guard !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            failure = .notice(title: "Enter your dashboard username and password.")
+            failure = .notice(title: AppLocalization.string("Enter your dashboard username and password."))
             focusedField = username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? .username : .password
             return
         }
@@ -723,13 +724,13 @@ struct AuthWebView: UIViewRepresentable {
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         guard let normalized else {
-            Self.reportConstructionFailure(onError, detail: "dashboard URL failed normalization in AuthWebView")
+            Self.reportConstructionFailure(onError, detail: AppLocalization.string("dashboard URL failed normalization in AuthWebView"))
             return webView
         }
         if let request = try? Self.dashboardRequest(normalizedBaseURL: normalized, cloudflareAccess: cloudflareAccess) {
             webView.load(request)
         } else {
-            Self.reportConstructionFailure(onError, detail: "dashboard sign-in request construction failed")
+            Self.reportConstructionFailure(onError, detail: AppLocalization.string("dashboard sign-in request construction failed"))
         }
         return webView
     }
@@ -847,7 +848,7 @@ struct AuthWebView: UIViewRepresentable {
                 // a session-ticket failure regardless of what the payload
                 // says. Payload text is carried as diagnostic detail only.
                 let detail = payload["error"] as? String
-                    ?? "Unable to start the Hermes session\(status == 0 ? "" : " (\(status))")"
+                    ?? AppLocalization.string("Unable to start the Hermes session\(status == 0 ? "" : " (\(status))")")
                 parent.onError(.sessionTicketFailure, detail)
                 return
             }

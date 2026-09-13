@@ -24,12 +24,15 @@ struct VoiceCapabilitySnapshot: Equatable {
     var supportsSpeech: Bool
     var unavailableReason: String?
 
-    static let unavailable = VoiceCapabilitySnapshot(
-        isGatewayConnected: false,
-        supportsTranscription: false,
-        supportsSpeech: false,
-        unavailableReason: "This Hermes gateway does not expose voice endpoints."
-    )
+    /// Computed so the reason re-resolves under the in-app App Language.
+    static var unavailable: VoiceCapabilitySnapshot {
+        VoiceCapabilitySnapshot(
+            isGatewayConnected: false,
+            supportsTranscription: false,
+            supportsSpeech: false,
+            unavailableReason: AppLocalization.string("This Hermes gateway does not expose voice endpoints.")
+        )
+    }
 }
 
 struct VoiceProviderDescriptor: Codable, Equatable, Identifiable {
@@ -60,8 +63,35 @@ struct VoiceProviderDescriptor: Codable, Equatable, Identifiable {
 /// phrases are normalized the same way, so stored phrases need not be
 /// pre-trimmed or lowercased.
 enum VoiceSpokenCommands {
-    static let defaultStopPhrases = ["stop", "stop talking", "be quiet"]
-    static let defaultEndConversationPhrases = ["goodbye", "bye", "end conversation", "that's all"]
+    /// Built-in spoken commands. Additive across languages BY DESIGN: both
+    /// the English and the Simplified Chinese commands are recognized no
+    /// matter which App Language the interface uses — commands match the
+    /// transcribed utterance, never the UI locale.
+    static let defaultStopPhrases = [
+        "stop", "stop talking", "be quiet",
+        "停止", "别说了", "不要说了",
+    ]
+    static let defaultEndConversationPhrases = [
+        "goodbye", "bye", "end conversation", "that's all",
+        "再见", "拜拜", "结束对话", "就这样吧",
+    ]
+
+    /// Defaults as originally shipped. The spoken-phrase preferences have
+    /// not shipped in a stable release, but development builds may have
+    /// persisted the original lists verbatim.
+    static let previousDefaultStopPhrases = ["stop", "stop talking", "be quiet"]
+    static let previousDefaultEndConversationPhrases = ["goodbye", "bye", "end conversation", "that's all"]
+
+    /// Persistence migration for extended built-ins: a stored list that is
+    /// exactly a previous default (the user never customized it) upgrades
+    /// to the current defaults, so multilingual commands appear for
+    /// existing persisted blobs. A customized list — including one where
+    /// the user deliberately removed a built-in — is preserved untouched.
+    static func migratedDefaultPhrases(_ stored: [String], previous: [String], current: [String]) -> [String] {
+        let canonicalStored = Set(stored.map(canonicalized))
+        let canonicalPrevious = Set(previous.map(canonicalized))
+        return canonicalStored == canonicalPrevious ? current : stored
+    }
 
     /// The single normalization used on both utterances and configured
     /// phrases: case folding, typographic apostrophe folding (ASR emits
@@ -132,10 +162,22 @@ struct VoiceProfilePreferences: Codable, Equatable {
         continuousConversation = try container.decodeIfPresent(Bool.self, forKey: .continuousConversation) ?? true
         continueWakeConversation = try container.decodeIfPresent(Bool.self, forKey: .continueWakeConversation) ?? false
         spokenStopPhrases = try container.decodeIfPresent([String].self, forKey: .spokenStopPhrases)
-            ?? VoiceSpokenCommands.defaultStopPhrases
+            .map {
+                VoiceSpokenCommands.migratedDefaultPhrases(
+                    $0,
+                    previous: VoiceSpokenCommands.previousDefaultStopPhrases,
+                    current: VoiceSpokenCommands.defaultStopPhrases
+                )
+            } ?? VoiceSpokenCommands.defaultStopPhrases
         spokenEndConversationPhrases = try container.decodeIfPresent(
             [String].self, forKey: .spokenEndConversationPhrases
-        ) ?? VoiceSpokenCommands.defaultEndConversationPhrases
+        ).map {
+            VoiceSpokenCommands.migratedDefaultPhrases(
+                $0,
+                previous: VoiceSpokenCommands.previousDefaultEndConversationPhrases,
+                current: VoiceSpokenCommands.defaultEndConversationPhrases
+            )
+        } ?? VoiceSpokenCommands.defaultEndConversationPhrases
         transcriptionMode = try container.decodeIfPresent(VoiceTranscriptionMode.self, forKey: .transcriptionMode)
     }
 }
@@ -160,10 +202,10 @@ enum AppleSpeechRecognitionAvailability: Equatable {
 
     var title: String {
         switch self {
-        case .ready: return "Ready"
-        case .permissionRequired: return "Permission required"
-        case .permissionDenied: return "Permission denied"
-        case .unsupported: return "Unavailable"
+        case .ready: return AppLocalization.string("Ready")
+        case .permissionRequired: return AppLocalization.string("Permission required")
+        case .permissionDenied: return AppLocalization.string("Permission denied")
+        case .unsupported: return AppLocalization.string("Unavailable")
         }
     }
 
@@ -249,8 +291,8 @@ enum VoiceAudioError: LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .microphonePermissionDenied: return "Microphone access is required for voice conversations."
-        case .noAudioCaptured: return "No speech was captured."
+        case .microphonePermissionDenied: return AppLocalization.string("Microphone access is required for voice conversations.")
+        case .noAudioCaptured: return AppLocalization.string("No speech was captured.")
         case .unavailable(let detail): return detail
         }
     }

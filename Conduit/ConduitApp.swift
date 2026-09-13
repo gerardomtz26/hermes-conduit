@@ -66,6 +66,7 @@ struct ConduitApp: App {
     @StateObject private var appState = AppStateRuntimeRegistry.shared.appState
     @ObservedObject private var notifications = PushNotificationService.shared
     @ObservedObject private var pendingVoiceIntents = PendingVoiceIntentStore.shared
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
 
     var body: some Scene {
         // Multi-scene support is enabled in the manifest so the CarPlay
@@ -94,6 +95,20 @@ struct ConduitApp: App {
     private var rootContent: some View {
         RootView()
             .environmentObject(appState)
+            // In-app App Language: literal SwiftUI keys resolve through the
+            // same selection as AppLocalization.string(…). The environment
+            // locale propagates reactively (Text re-renders without identity
+            // changes), and every view holding String-context copy observes
+            // AppLanguageStore itself, so switching language re-renders
+            // exactly those views — the root is never rebuilt, and
+            // navigation/composer/sheet/window-claim state is untouched.
+            .environment(\.locale, appLanguage.resolvedLocale)
+            .onChange(of: appLanguage.selection) { _, _ in
+                // AppState-owned display caches (slash command descriptions)
+                // re-resolve outside SwiftUI state, so view re-renders alone
+                // cannot refresh them.
+                appState.appLanguageDidChange()
+            }
             .preferredColorScheme(appState.themePreference.colorScheme)
             .tint(.conduitAccent)
             .task { await PushNotificationService.shared.refresh() }

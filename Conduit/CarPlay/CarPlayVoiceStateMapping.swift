@@ -24,11 +24,11 @@ enum CarPlayVoiceState: String, CaseIterable, Equatable {
     /// fits; keep them short and free of user content.
     var titleVariants: [String] {
         switch self {
-        case .ready: return ["Ready"]
-        case .listening: return ["Listening…"]
-        case .processing: return ["Thinking…"]
-        case .responding: return ["Responding…"]
-        case .error: return ["Voice unavailable"]
+        case .ready: return [AppLocalization.string("Ready")]
+        case .listening: return [AppLocalization.string("Listening…")]
+        case .processing: return [AppLocalization.string("Thinking…")]
+        case .responding: return [AppLocalization.string("Responding…")]
+        case .error: return [AppLocalization.string("Voice unavailable")]
         }
     }
 

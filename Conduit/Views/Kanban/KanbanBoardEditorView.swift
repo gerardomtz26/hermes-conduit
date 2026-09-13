@@ -20,6 +20,7 @@ enum KanbanBoardEditorMode {
 }
 
 struct KanbanBoardEditorView: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var store: KanbanStore
     @Environment(\.dismiss) private var dismiss
 
@@ -148,18 +149,18 @@ struct KanbanBoardEditorView: View {
                     }
                 }
             }
-            .navigationTitle(isCreate ? "New Board" : "Board Settings")
+            .navigationTitle(isCreate ? AppLocalization.string("New Board") : AppLocalization.string("Board Settings"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(isCreate ? "Cancel" : "Close") { dismiss() }
+                    Button(isCreate ? AppLocalization.string("Cancel") : AppLocalization.string("Close")) { dismiss() }
                         .disabled(isSaving)
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button {
                         submitTapped()
                     } label: {
-                        if isSaving { ProgressView() } else { Text(isCreate ? "Create" : "Save") }
+                        if isSaving { ProgressView() } else { Text(isCreate ? AppLocalization.string("Create") : AppLocalization.string("Save")) }
                     }
                     .disabled(!canSubmit || isSaving)
                 }

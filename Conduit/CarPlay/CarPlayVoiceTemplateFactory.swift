@@ -54,9 +54,9 @@ enum CarPlayVoiceTemplateFactory {
     ) -> [CPButton] {
         switch state {
         case .ready, .error:
-            return [makeButton(title: "Listen", symbol: "mic.fill") { _ in handlers.startListening() }]
+            return [makeButton(title: AppLocalization.string("Listen"), symbol: "mic.fill") { _ in handlers.startListening() }]
         case .listening, .processing, .responding:
-            return [makeButton(title: "End", symbol: "xmark.circle") { _ in handlers.endConversation() }]
+            return [makeButton(title: AppLocalization.string("End"), symbol: "xmark.circle") { _ in handlers.endConversation() }]
         }
     }
 

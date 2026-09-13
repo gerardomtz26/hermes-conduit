@@ -9,8 +9,8 @@ import SwiftUI
 
 private enum ConduitAppVersion {
     static var display: String {
-        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown"
-        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "Unknown"
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? AppLocalization.string("Unknown")
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? AppLocalization.string("Unknown")
         return "\(version) (\(build))"
     }
 }
@@ -19,6 +19,7 @@ import UIKit
 // MARK: - Context Sheet
 
 struct ContextSheet: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject var appState: AppState
     @State private var breakdown: ContextBreakdown?
 
@@ -28,16 +29,16 @@ struct ContextSheet: View {
                 ConduitBackdrop()
                 ScrollView {
                     VStack(spacing: 14) {
-                        ConduitSettingsSection(title: "Context", symbol: "circle.dotted.circle", tint: .conduitAura) {
-                            SettingsMetricRow(label: "Used", value: "\(appState.runtime.contextUsed) tokens")
-                            SettingsMetricRow(label: "Capacity", value: "\(appState.runtime.contextMax) tokens")
+                        ConduitSettingsSection(title: AppLocalization.string("Context"), symbol: "circle.dotted.circle", tint: .conduitAura) {
+                            SettingsMetricRow(label: AppLocalization.string("Used"), value: AppLocalization.string("\(String(appState.runtime.contextUsed)) tokens"))
+                            SettingsMetricRow(label: AppLocalization.string("Capacity"), value: AppLocalization.string("\(String(appState.runtime.contextMax)) tokens"))
                             VStack(alignment: .leading, spacing: 7) {
                                 HStack {
                                     Text("Window usage")
                                         .font(.caption.weight(.medium))
                                         .foregroundStyle(.secondary)
                                     Spacer()
-                                    Text("\(Int(appState.runtime.contextPercent.rounded()))%")
+                                    Text("\(String(Int(appState.runtime.contextPercent.rounded())))%")
                                         .font(.caption.monospacedDigit().weight(.semibold))
                                 }
                                 ProgressView(value: appState.runtime.contextPercent, total: 100)
@@ -47,7 +48,7 @@ struct ContextSheet: View {
                         }
 
                         if let breakdown {
-                            ConduitSettingsSection(title: "Breakdown", symbol: "chart.pie", tint: .conduitAccent) {
+                            ConduitSettingsSection(title: AppLocalization.string("Breakdown"), symbol: "chart.pie", tint: .conduitAccent) {
                                 ForEach(breakdown.categories, id: \.id) { category in
                                     HStack(spacing: 10) {
                                         Circle()
@@ -117,6 +118,7 @@ struct SettingsSnapshot: Identifiable {
 }
 
 private struct LegacySettingsView: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let snapshot: SettingsSnapshot
     let saveTheme: (ThemePreference) -> Void
     let persistBusyInputMode: (BusyInputMode) async -> Bool
@@ -175,17 +177,17 @@ private struct LegacySettingsView: View {
             }
             .toolbar(.hidden, for: .navigationBar)
             .safeAreaInset(edge: .top, spacing: 0) {
-                ConduitSheetHeader(title: "Settings", close: { dismiss() })
+                ConduitSheetHeader(title: AppLocalization.string("Settings"), close: { dismiss() })
             }
         }
         .preferredColorScheme(theme.colorScheme)
     }
 
     private var connectionSection: some View {
-        ConduitSettingsSection(title: "Connection", symbol: "bolt.horizontal.circle", tint: .conduitAura) {
-            SettingsMetricRow(label: "Server", value: snapshot.server ?? "—", lineLimit: 1)
+        ConduitSettingsSection(title: AppLocalization.string("Connection"), symbol: "bolt.horizontal.circle", tint: .conduitAura) {
+            SettingsMetricRow(label: AppLocalization.string("Server"), value: snapshot.server ?? "—", lineLimit: 1)
             SettingsMetricRow(
-                label: "Status",
+                label: AppLocalization.string("Status"),
                 value: isConnected ? "Connected" : "Disconnected",
                 valueColor: isConnected ? .green : .red,
                 statusDot: isConnected ? .green : .red
@@ -198,7 +200,7 @@ private struct LegacySettingsView: View {
                     isReconnecting = false
                 }
             } label: {
-                Label(isReconnecting ? "Reconnecting…" : "Reconnect", systemImage: "arrow.clockwise")
+                Label(isReconnecting ? AppLocalization.string("Reconnecting…") : "Reconnect", systemImage: "arrow.clockwise")
                     .font(.subheadline.weight(.semibold))
                     .frame(maxWidth: .infinity)
                     .frame(height: 44)
@@ -210,31 +212,31 @@ private struct LegacySettingsView: View {
     }
 
     private var appearanceSection: some View {
-        ConduitSettingsSection(title: "Appearance", symbol: "circle.lefthalf.filled", tint: .conduitAccent) {
+        ConduitSettingsSection(title: AppLocalization.string("Appearance"), symbol: "circle.lefthalf.filled", tint: .conduitAccent) {
             Text("Choose how Conduit appears across the app.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
             ConduitGlassGroup(spacing: 8) {
                 HStack(spacing: 8) {
-                    themeChoice(.dark, title: "Dark", symbol: "moon.fill")
-                    themeChoice(.light, title: "Light", symbol: "sun.max.fill")
-                    themeChoice(.system, title: "System", symbol: "circle.lefthalf.filled")
+                    themeChoice(.dark, title: AppLocalization.string("Dark"), symbol: "moon.fill")
+                    themeChoice(.light, title: AppLocalization.string("Light"), symbol: "sun.max.fill")
+                    themeChoice(.system, title: AppLocalization.string("System"), symbol: "circle.lefthalf.filled")
                 }
             }
         }
     }
 
     private var chatSection: some View {
-        ConduitSettingsSection(title: "During a response", symbol: "bubble.left.and.bubble.right", tint: .conduitAccent) {
+        ConduitSettingsSection(title: AppLocalization.string("During a response"), symbol: "bubble.left.and.bubble.right", tint: .conduitAccent) {
             Text("Choose what a typed message does while Hermes is still working.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
             ConduitGlassGroup(spacing: 10) {
                 HStack(spacing: 10) {
-                    busyModeChoice(.steer, symbol: "arrow.triangle.branch", detail: "Guide safely")
-                    busyModeChoice(.interrupt, symbol: "arrow.uturn.backward", detail: "Stop and correct")
+                    busyModeChoice(.steer, symbol: "arrow.triangle.branch", detail: AppLocalization.string("Guide safely"))
+                    busyModeChoice(.interrupt, symbol: "arrow.uturn.backward", detail: AppLocalization.string("Stop and correct"))
                 }
             }
             .disabled(!isConnected || isSavingBusyInputMode)
@@ -257,21 +259,21 @@ private struct LegacySettingsView: View {
     }
 
     private var aboutSection: some View {
-        ConduitSettingsSection(title: "About", symbol: "info.circle", tint: .conduitAura) {
-            SettingsMetricRow(label: "Profile", value: snapshot.profile.capitalized)
-            SettingsMetricRow(label: "Version", value: ConduitAppVersion.display)
+        ConduitSettingsSection(title: AppLocalization.string("About"), symbol: "info.circle", tint: .conduitAura) {
+            SettingsMetricRow(label: AppLocalization.string("Profile"), value: snapshot.profile.capitalized)
+            SettingsMetricRow(label: AppLocalization.string("Version"), value: ConduitAppVersion.display)
         }
     }
 
     private var chatDisplaySection: some View {
-        ConduitSettingsSection(title: "Chat display", symbol: "text.bubble", tint: .conduitAura) {
+        ConduitSettingsSection(title: AppLocalization.string("Chat display"), symbol: "text.bubble", tint: .conduitAura) {
             Text("These choices follow the active workspace.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
 
-            displayToggle(.reasoning, title: "Show reasoning", detail: "Include available agent reasoning in replies.")
-            displayToggle(.toolProgress, title: "Show tool activity", detail: "Show tool calls and their progress in chat.")
-            displayToggle(.expandTools, title: "Keep tool cards expanded", detail: "Open completed tool details by default.")
+            displayToggle(.reasoning, title: AppLocalization.string("Show reasoning"), detail: AppLocalization.string("Include available agent reasoning in replies."))
+            displayToggle(.toolProgress, title: AppLocalization.string("Show tool activity"), detail: AppLocalization.string("Show tool calls and their progress in chat."))
+            displayToggle(.expandTools, title: AppLocalization.string("Keep tool cards expanded"), detail: AppLocalization.string("Open completed tool details by default."))
 
             if let displayPreferenceError {
                 Label(displayPreferenceError, systemImage: "exclamationmark.triangle.fill")
@@ -434,7 +436,7 @@ private enum SettingsDestination: Hashable {
     case profile, model, chat, voice, workspace, memory, capabilities, gateway, appearance, notifications, about
 }
 
-private enum ProfileSettingControl {
+enum ProfileSettingControl {
     case toggle(defaultValue: Bool)
     case textToggle(onValue: String, offValue: String, defaultValue: Bool)
     case options([String], defaultValue: String)
@@ -443,7 +445,7 @@ private enum ProfileSettingControl {
     case number(defaultValue: Double)
 }
 
-private struct ProfileSettingField: Identifiable {
+struct ProfileSettingField: Identifiable {
     let key: String
     let label: String
     let help: String
@@ -452,6 +454,7 @@ private struct ProfileSettingField: Identifiable {
 }
 
 struct SettingsView: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var appState: AppState
     let snapshot: SettingsSnapshot
     let saveTheme: (ThemePreference) -> Void
@@ -475,7 +478,7 @@ struct SettingsView: View {
             SettingsHome(snapshot: snapshot, path: $path)
                 .toolbar(.hidden, for: .navigationBar)
                 .safeAreaInset(edge: .top, spacing: 0) {
-                    ConduitSheetHeader(title: "Settings", close: { dismiss() })
+                    ConduitSheetHeader(title: AppLocalization.string("Settings"), close: { dismiss() })
                 }
                 .navigationDestination(for: SettingsDestination.self) { destination in
                     destinationView(destination)
@@ -543,7 +546,7 @@ struct SettingsView: View {
                 )
             } else {
                 SettingsDetailContainer {
-                    ConduitSettingsSection(title: "Voice", symbol: "mic.slash", tint: .orange) {
+                    ConduitSettingsSection(title: AppLocalization.string("Voice"), symbol: "mic.slash", tint: .orange) {
                         Text("Connect to Hermes to configure voice for this profile.")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
@@ -552,8 +555,8 @@ struct SettingsView: View {
             }
         case .workspace:
             ProfileConfigSettingsPage(
-                title: "Workspace & safety",
-                subtitle: "Working defaults and safeguards for this profile.",
+                title: AppLocalization.string("Workspace & safety"),
+                subtitle: AppLocalization.string("Working defaults and safeguards for this profile."),
                 fields: Self.workspaceFields,
                 load: loadProfileSettings,
                 save: persistProfileSetting
@@ -579,28 +582,31 @@ struct SettingsView: View {
         }
     }
 
-    private static let workspaceFields: [ProfileSettingField] = [
-        .init(key: "terminal.cwd", label: "Default working directory", help: "Server-side path for new workspaces.", control: .text(defaultValue: "")),
-        .init(key: "code_execution.mode", label: "Code execution mode", help: "Default execution boundary.", control: .options(["project", "strict"], defaultValue: "project")),
-        .init(key: "approvals.mode", label: "Approval mode", help: "Profile-wide default: manual asks every time; smart asks when risk warrants it; off is YOLO mode. When set to off, Hermes auto-approves everything and per-session YOLO toggles have no effect — that's a Hermes limitation, not a Conduit bug. To use per-session YOLO, set this to manual or smart.", control: .options(["manual", "smart", "off"], defaultValue: "smart")),
-        .init(key: "security.redact_secrets", label: "Redact secrets", help: "Hide detected credentials from tool output where possible.", control: .toggle(defaultValue: true)),
-        .init(key: "security.allow_private_urls", label: "Allow private URLs", help: "Permit tool access to private-network URLs.", control: .toggle(defaultValue: false)),
+    static var workspaceFields: [ProfileSettingField] { [
+        .init(key: "terminal.cwd", label: AppLocalization.string("Default working directory"), help: AppLocalization.string("Server-side path for new workspaces."), control: .text(defaultValue: "")),
+        .init(key: "code_execution.mode", label: AppLocalization.string("Code execution mode"), help: AppLocalization.string("Default execution boundary."), control: .options(["project", "strict"], defaultValue: "project")),
+        .init(key: "approvals.mode", label: AppLocalization.string("Approval mode"), help: AppLocalization.string("Profile-wide default: manual asks every time; smart asks when risk warrants it; off is YOLO mode. When set to off, Hermes auto-approves everything and per-session YOLO toggles have no effect — that's a Hermes limitation, not a Conduit bug. To use per-session YOLO, set this to manual or smart."), control: .options(["manual", "smart", "off"], defaultValue: "smart")),
+        .init(key: "security.redact_secrets", label: AppLocalization.string("Redact secrets"), help: AppLocalization.string("Hide detected credentials from tool output where possible."), control: .toggle(defaultValue: true)),
+        .init(key: "security.allow_private_urls", label: AppLocalization.string("Allow private URLs"), help: AppLocalization.string("Permit tool access to private-network URLs."), control: .toggle(defaultValue: false)),
     ]
+    }
 
-    private static let memoryFields: [ProfileSettingField] = [
-        .init(key: "memory.provider", label: "Memory provider", help: "Provider used for long-term memory.", control: .options([], defaultValue: "")),
-        .init(key: "memory.memory_enabled", label: "Long-term memory", help: "Allow Hermes to retain relevant working memory.", control: .toggle(defaultValue: true)),
-        .init(key: "memory.user_profile_enabled", label: "User profile memory", help: "Allow Hermes to maintain user preferences.", control: .toggle(defaultValue: true)),
-        .init(key: "context.engine", label: "Context engine", help: "Installed context-management engine.", control: .options([], defaultValue: "default")),
-        .init(key: "compression.enabled", label: "Context compression", help: "Compress older context when the window becomes crowded.", control: .toggle(defaultValue: true)),
-        .init(key: "compression.threshold", label: "Compression threshold", help: "Fraction of the context window that starts compression.", control: .number(defaultValue: 0.8)),
-        .init(key: "compression.target_ratio", label: "Compression target", help: "Fraction retained after compression.", control: .number(defaultValue: 0.5)),
-        .init(key: "compression.protect_last_n", label: "Protected recent messages", help: "Recent messages left intact by compression.", control: .number(defaultValue: 8)),
-        .init(key: "delegation.max_concurrent_children", label: "Concurrent delegate agents", help: "Maximum child agents that can work at once.", control: .number(defaultValue: 2)),
+    static var memoryFields: [ProfileSettingField] { [
+        .init(key: "memory.provider", label: AppLocalization.string("Memory provider"), help: AppLocalization.string("Provider used for long-term memory."), control: .options([], defaultValue: "")),
+        .init(key: "memory.memory_enabled", label: AppLocalization.string("Long-term memory"), help: AppLocalization.string("Allow Hermes to retain relevant working memory."), control: .toggle(defaultValue: true)),
+        .init(key: "memory.user_profile_enabled", label: AppLocalization.string("User profile memory"), help: AppLocalization.string("Allow Hermes to maintain user preferences."), control: .toggle(defaultValue: true)),
+        .init(key: "context.engine", label: AppLocalization.string("Context engine"), help: AppLocalization.string("Installed context-management engine."), control: .options([], defaultValue: "default")),
+        .init(key: "compression.enabled", label: AppLocalization.string("Context compression"), help: AppLocalization.string("Compress older context when the window becomes crowded."), control: .toggle(defaultValue: true)),
+        .init(key: "compression.threshold", label: AppLocalization.string("Compression threshold"), help: AppLocalization.string("Fraction of the context window that starts compression."), control: .number(defaultValue: 0.8)),
+        .init(key: "compression.target_ratio", label: AppLocalization.string("Compression target"), help: AppLocalization.string("Fraction retained after compression."), control: .number(defaultValue: 0.5)),
+        .init(key: "compression.protect_last_n", label: AppLocalization.string("Protected recent messages"), help: AppLocalization.string("Recent messages left intact by compression."), control: .number(defaultValue: 8)),
+        .init(key: "delegation.max_concurrent_children", label: AppLocalization.string("Concurrent delegate agents"), help: AppLocalization.string("Maximum child agents that can work at once."), control: .number(defaultValue: 2)),
     ]
+    }
 }
 
 private struct SettingsHome: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let snapshot: SettingsSnapshot
     @Binding var path: [SettingsDestination]
     @EnvironmentObject private var appState: AppState
@@ -629,22 +635,22 @@ private struct SettingsHome: View {
             ScrollView {
                 VStack(spacing: 14) {
                     homeSection("Profile", tint: .conduitAccent) {
-                        settingsLink(.profile, icon: "person.crop.circle", title: profileDisplayName, detail: "Profile-specific preferences")
+                        settingsLink(.profile, icon: "person.crop.circle", title: profileDisplayName, detail: AppLocalization.string("Profile-specific preferences"))
                     }
                     homeSection("Hermes", tint: .conduitAura) {
-                        settingsLink(.model, icon: "cpu", title: "Model", detail: "Default model and reasoning")
-                        settingsLink(.chat, icon: "bubble.left.and.bubble.right", title: "Chat", detail: "Response behavior, visibility, and timezone")
-                        settingsLink(.voice, icon: "mic.and.signal.meter", title: "Voice", detail: "Speech providers, credentials, and device opt-in")
-                        settingsLink(.workspace, icon: "folder", title: "Workspace & safety", detail: "Working directory, approvals, and privacy")
-                        settingsLink(.memory, icon: "brain.head.profile", title: "Memory & delegation", detail: "Memory, compression, and child agents")
-                        settingsLink(.capabilities, icon: "puzzlepiece.extension", title: "Capabilities", detail: "Skills, toolsets, and categories")
+                        settingsLink(.model, icon: "cpu", title: AppLocalization.string("Model"), detail: AppLocalization.string("Default model and reasoning"))
+                        settingsLink(.chat, icon: "bubble.left.and.bubble.right", title: AppLocalization.string("Chat"), detail: AppLocalization.string("Response behavior, visibility, and timezone"))
+                        settingsLink(.voice, icon: "mic.and.signal.meter", title: AppLocalization.string("Voice"), detail: AppLocalization.string("Speech providers, credentials, and device opt-in"))
+                        settingsLink(.workspace, icon: "folder", title: AppLocalization.string("Workspace & safety"), detail: AppLocalization.string("Working directory, approvals, and privacy"))
+                        settingsLink(.memory, icon: "brain.head.profile", title: AppLocalization.string("Memory & delegation"), detail: AppLocalization.string("Memory, compression, and child agents"))
+                        settingsLink(.capabilities, icon: "puzzlepiece.extension", title: AppLocalization.string("Capabilities"), detail: AppLocalization.string("Skills, toolsets, and categories"))
                     }
                     homeSection("Connection", tint: .conduitAura) {
-                        settingsLink(.gateway, icon: "radio", title: "Gateway", detail: snapshot.server ?? "Not connected", identifier: "settings.gateway")
+                        settingsLink(.gateway, icon: "radio", title: AppLocalization.string("Gateway"), detail: snapshot.server ?? AppLocalization.string("Not connected"), identifier: "settings.gateway")
                         settingsActionRow(
                             icon: "checkmark.circle",
-                            title: "Connection Setup",
-                            detail: "Test, troubleshoot, or change your connection",
+                            title: AppLocalization.string("Connection Setup"),
+                            detail: AppLocalization.string("Test, troubleshoot, or change your connection"),
                             identifier: "settings.connection-setup"
                         ) {
                             let seedURL = currentDashboardURL
@@ -659,9 +665,9 @@ private struct SettingsHome: View {
                         }
                     }
                     homeSection("On this device", tint: .conduitAccent) {
-                        settingsLink(.appearance, icon: "circle.lefthalf.filled", title: "Appearance", detail: "Theme and interface preferences")
-                        settingsLink(.notifications, icon: "bell", title: "Notifications", detail: "Delivery status and setup")
-                        settingsLink(.about, icon: "shield", title: "About & privacy", detail: "App information and data handling")
+                        settingsLink(.appearance, icon: "circle.lefthalf.filled", title: AppLocalization.string("Appearance"), detail: AppLocalization.string("Theme and interface preferences"))
+                        settingsLink(.notifications, icon: "bell", title: AppLocalization.string("Notifications"), detail: AppLocalization.string("Delivery status and setup"))
+                        settingsLink(.about, icon: "shield", title: AppLocalization.string("About & privacy"), detail: AppLocalization.string("App information and data handling"))
                     }
                     Text("Hermes settings follow the active profile. Appearance, notifications, and privacy controls stay on this device.")
                         .font(.footnote)
@@ -766,6 +772,7 @@ private struct SettingsHome: View {
 }
 
 private struct ProfileSettingsDetail: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let profile: String
     let displayName: String
     let saveDefaultProfileName: (String) -> Void
@@ -782,13 +789,13 @@ private struct ProfileSettingsDetail: View {
 
     var body: some View {
         SettingsDetailContainer {
-            ConduitSettingsSection(title: "Active profile", symbol: "person.crop.circle.fill", tint: .conduitAccent) {
-                SettingsMetricRow(label: "Profile", value: currentDisplayName)
+            ConduitSettingsSection(title: AppLocalization.string("Active profile"), symbol: "person.crop.circle.fill", tint: .conduitAccent) {
+                SettingsMetricRow(label: AppLocalization.string("Profile"), value: currentDisplayName)
                 Text("Choose a different profile from the session drawer. Chat, model, workspace, and memory preferences on the other settings pages follow that profile.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
             if profile == "default" {
-                ConduitSettingsSection(title: "On this device", symbol: "pencil", tint: .conduitAccent) {
+                ConduitSettingsSection(title: AppLocalization.string("On this device"), symbol: "pencil", tint: .conduitAccent) {
                     Text("Display name").font(.subheadline.weight(.semibold))
                     TextField("Hermes", text: $name)
                         .textInputAutocapitalization(.words)
@@ -796,7 +803,7 @@ private struct ProfileSettingsDetail: View {
                         .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                     Text("This only changes how the default profile is named in Conduit. Hermes itself still uses the default profile.")
                         .font(.footnote).foregroundStyle(.secondary)
-                    Button(didSave ? "Saved" : "Save display name") {
+                    Button(didSave ? AppLocalization.string("Saved") : AppLocalization.string("Save display name")) {
                         saveDefaultProfileName(name)
                         name = appState.defaultProfileName
                         didSave = true
@@ -814,7 +821,8 @@ private struct ProfileSettingsDetail: View {
     }
 }
 
-private struct ChatSettingsDetail: View {
+struct ChatSettingsDetail: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let busyInputMode: BusyInputMode
     let persistBusyInputMode: (BusyInputMode) async -> Bool
     let chatResumeBehavior: ChatResumeBehavior
@@ -828,7 +836,7 @@ private struct ChatSettingsDetail: View {
 
     var body: some View {
         ProfileConfigSettingsPage(
-            title: "Chat",
+            title: AppLocalization.string("Chat"),
             subtitle: "",
             fields: Self.fields,
             load: load,
@@ -858,15 +866,16 @@ private struct ChatSettingsDetail: View {
         .task { options = await loadOptions() }
     }
 
-    private static let fields: [ProfileSettingField] = [
-        .init(key: "display.personality", label: "Personality", help: "Default response style for new conversations.", control: .options([], defaultValue: "")),
-        .init(key: "timezone", label: "Timezone", help: "Used for dates, reminders, and scheduled work.", control: .text(defaultValue: "")),
-        .init(key: "display.show_reasoning", label: "Show thinking", help: "Show collapsible thinking blocks when provided.", control: .toggle(defaultValue: true)),
-        .init(key: "display.tool_progress", label: "Tool cards", help: "Show tool calls and expandable details in conversations.", control: .textToggle(onValue: "all", offValue: "off", defaultValue: true)),
-        .init(key: "display.expand_tools", label: "Keep tool cards expanded", help: "Keep completed tool details open by default.", control: .toggle(defaultValue: false)),
-        .init(key: "display.memory_notifications", label: "Self-improvement updates", help: "Choose whether Conduit follows Hermes, always shows, or never shows maintenance updates.", control: .labeledOptions([(value: "default", label: "Use Hermes default"), (value: "on", label: "Always show"), (value: "off", label: "Never show")], defaultValue: "default")),
-        .init(key: "agent.image_input_mode", label: "Image attachments", help: "How Hermes supplies images to a model.", control: .options(["auto", "native", "text"], defaultValue: "auto")),
+    static var fields: [ProfileSettingField] { [
+        .init(key: "display.personality", label: AppLocalization.string("Personality"), help: AppLocalization.string("Default response style for new conversations."), control: .options([], defaultValue: "")),
+        .init(key: "timezone", label: AppLocalization.string("Timezone"), help: AppLocalization.string("Used for dates, reminders, and scheduled work."), control: .text(defaultValue: "")),
+        .init(key: "display.show_reasoning", label: AppLocalization.string("Show thinking"), help: AppLocalization.string("Show collapsible thinking blocks when provided."), control: .toggle(defaultValue: true)),
+        .init(key: "display.tool_progress", label: AppLocalization.string("Tool cards"), help: AppLocalization.string("Show tool calls and expandable details in conversations."), control: .textToggle(onValue: "all", offValue: "off", defaultValue: true)),
+        .init(key: "display.expand_tools", label: AppLocalization.string("Keep tool cards expanded"), help: AppLocalization.string("Keep completed tool details open by default."), control: .toggle(defaultValue: false)),
+        .init(key: "display.memory_notifications", label: AppLocalization.string("Self-improvement updates"), help: AppLocalization.string("Choose whether Conduit follows Hermes, always shows, or never shows maintenance updates."), control: .labeledOptions([(value: "default", label: AppLocalization.string("Use Hermes default")), (value: "on", label: AppLocalization.string("Always show")), (value: "off", label: AppLocalization.string("Never show"))], defaultValue: "default")),
+        .init(key: "agent.image_input_mode", label: AppLocalization.string("Image attachments"), help: AppLocalization.string("How Hermes supplies images to a model."), control: .options(["auto", "native", "text"], defaultValue: "auto")),
     ]
+    }
 }
 
 /// Local, device-only chat text-size preference (issue #85). Stored in
@@ -876,6 +885,7 @@ private struct ChatSettingsDetail: View {
 /// is live (the visible transcript re-renders as the slider moves), there
 /// is no Save button, and `Default` keeps today's appearance.
 private struct ChatTextSizeSettings: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @AppStorage(ChatTypography.preferenceKey) private var chatTextSizeRaw = ChatTypography.defaultSize.rawValue
 
     private var selected: ChatTextSize {
@@ -884,7 +894,7 @@ private struct ChatTextSizeSettings: View {
 
     var body: some View {
         ConduitSettingsSection(
-            title: "Chat text size",
+            title: AppLocalization.string("Chat text size"),
             symbol: "textformat.size",
             tint: .conduitAura
         ) {
@@ -927,11 +937,12 @@ private struct ChatTextSizeSettings: View {
 /// Local, device-only composer input preference. Stored in UserDefaults via
 /// @AppStorage; never part of the Hermes profile configuration.
 private struct ComposerReturnKeySettings: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @AppStorage(ComposerReturnKey.preferenceKey) private var returnKeySends = false
 
     var body: some View {
         ConduitSettingsSection(
-            title: "Keyboard",
+            title: AppLocalization.string("Keyboard"),
             symbol: "keyboard",
             tint: .conduitAura
         ) {
@@ -949,11 +960,12 @@ private struct ComposerReturnKeySettings: View {
 }
 
 private struct DeviceHapticsSettings: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @AppStorage(Haptics.preferenceKey) private var enabled = true
 
     var body: some View {
         ConduitSettingsSection(
-            title: "Haptic feedback",
+            title: AppLocalization.string("Haptic feedback"),
             symbol: "waveform",
             tint: .conduitAura
         ) {
@@ -971,6 +983,7 @@ private struct DeviceHapticsSettings: View {
 }
 
 private struct ChatReturnBehaviorSettings: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let persistBehavior: (ChatResumeBehavior) -> Void
     let persistSurface: (ChatReturnSurface) -> Void
     @State private var behavior: ChatResumeBehavior
@@ -990,7 +1003,7 @@ private struct ChatReturnBehaviorSettings: View {
 
     var body: some View {
         ConduitSettingsSection(
-            title: "When returning to Conduit",
+            title: AppLocalization.string("When returning to Conduit"),
             symbol: "arrow.uturn.backward.circle",
             tint: .conduitAccent
         ) {
@@ -1043,6 +1056,7 @@ private struct ChatReturnBehaviorSettings: View {
     }
 }
 private struct ResponseBehaviorSettings: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let initialMode: BusyInputMode
     let save: (BusyInputMode) async -> Bool
     @State private var mode: BusyInputMode
@@ -1056,7 +1070,7 @@ private struct ResponseBehaviorSettings: View {
     }
 
     var body: some View {
-        ConduitSettingsSection(title: "During a response", symbol: "arrow.triangle.branch", tint: .conduitAccent) {
+        ConduitSettingsSection(title: AppLocalization.string("During a response"), symbol: "arrow.triangle.branch", tint: .conduitAccent) {
             Text("Steer adds guidance to the active turn. Interrupt stops it before handling the new message.")
                 .font(.footnote).foregroundStyle(.secondary)
             Picker("Messages during a response", selection: Binding(get: { mode }, set: choose)) {
@@ -1127,6 +1141,7 @@ struct ConduitMenuPicker<Label: View>: View {
 }
 
 private struct ProfileModelSettingsDetail: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let load: () async -> ProfileModelDefaults?
     let save: (String, String, String) async -> Bool
     @State private var defaults: ProfileModelDefaults?
@@ -1140,7 +1155,7 @@ private struct ProfileModelSettingsDetail: View {
 
     var body: some View {
         SettingsDetailContainer {
-            ConduitSettingsSection(title: "Default model", symbol: "cpu", tint: .conduitAccent) {
+            ConduitSettingsSection(title: AppLocalization.string("Default model"), symbol: "cpu", tint: .conduitAccent) {
                 Text("Select a provider first, then one of its available models. These defaults apply to new sessions in this profile.")
                     .font(.footnote).foregroundStyle(.secondary)
                 if let defaults, !defaults.providers.isEmpty {
@@ -1163,7 +1178,7 @@ private struct ProfileModelSettingsDetail: View {
                     ProgressView("Loading available models…")
                 }
             }
-            ConduitSettingsSection(title: "Reasoning", symbol: "brain.head.profile", tint: .conduitAura) {
+            ConduitSettingsSection(title: AppLocalization.string("Reasoning"), symbol: "brain.head.profile", tint: .conduitAura) {
                 ConduitMenuPicker(
                     value: reasoning,
                     choices: ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"].map { (id: $0, title: $0.capitalized) },
@@ -1172,7 +1187,7 @@ private struct ProfileModelSettingsDetail: View {
                     Text("Default reasoning").foregroundStyle(.secondary)
                 }
             }
-            Button { persist() } label: { Label(saving ? "Saving…" : "Save model defaults", systemImage: "checkmark").frame(maxWidth: .infinity).frame(height: 46) }
+            Button { persist() } label: { Label(saving ? AppLocalization.string("Saving…") : AppLocalization.string("Save model defaults"), systemImage: "checkmark").frame(maxWidth: .infinity).frame(height: 46) }
                 .disabled(saving || provider.isEmpty || model.isEmpty).conduitGlassControl(cornerRadius: 17, tint: .conduitAccent.opacity(0.18))
             if let error { Label(error, systemImage: "exclamationmark.triangle.fill").font(.footnote).foregroundStyle(.red) }
         }
@@ -1202,6 +1217,7 @@ private struct ProfileModelSettingsDetail: View {
 }
 
 private struct DelegationModelSettings: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let loadModels: () async -> ProfileModelDefaults?
     let loadSettings: ([String]) async -> [String: ProfileSettingValue]
     let save: (String, ProfileSettingValue) async -> Bool
@@ -1214,13 +1230,13 @@ private struct DelegationModelSettings: View {
     private var models: [ModelInfo] { defaults?.providers.first(where: { $0.name == provider })?.models ?? [] }
 
     var body: some View {
-        ConduitSettingsSection(title: "Delegate model", symbol: "point.3.connected.trianglepath.dotted", tint: .conduitAccent) {
+        ConduitSettingsSection(title: AppLocalization.string("Delegate model"), symbol: "point.3.connected.trianglepath.dotted", tint: .conduitAccent) {
             Text("Leave both selections empty to inherit the chat model. Set a provider and model to route delegate agents separately.")
                 .font(.footnote).foregroundStyle(.secondary)
             if let defaults, !defaults.providers.isEmpty {
                 ConduitMenuPicker(
                     value: provider,
-                    choices: [(id: "", title: "Inherit chat provider")] + defaults.providers.map { (id: $0.name, title: $0.name) },
+                    choices: [(id: "", title: AppLocalization.string("Inherit chat provider"))] + defaults.providers.map { (id: $0.name, title: $0.name) },
                     onSelect: chooseProvider
                 ) {
                     Text("Delegate provider").foregroundStyle(.secondary)
@@ -1228,7 +1244,7 @@ private struct DelegationModelSettings: View {
                 if !provider.isEmpty {
                     ConduitMenuPicker(
                         value: model,
-                        choices: [(id: "", title: "Inherit chat model")] + models.map { (id: $0.id, title: $0.label ?? $0.id) },
+                        choices: [(id: "", title: AppLocalization.string("Inherit chat model"))] + models.map { (id: $0.id, title: $0.label ?? $0.id) },
                         onSelect: { model = $0 }
                     ) {
                         Text("Delegate model").foregroundStyle(.secondary)
@@ -1236,13 +1252,13 @@ private struct DelegationModelSettings: View {
                 }
                 ConduitMenuPicker(
                     value: reasoning,
-                    choices: [(id: "", title: "Inherit chat reasoning")] + ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"].map { (id: $0, title: $0.capitalized) },
+                    choices: [(id: "", title: AppLocalization.string("Inherit chat reasoning"))] + ["minimal", "low", "medium", "high", "xhigh", "max", "ultra"].map { (id: $0, title: $0.capitalized) },
                     onSelect: { reasoning = $0 }
                 ) {
                     Text("Delegate reasoning").foregroundStyle(.secondary)
                 }
             } else { ProgressView("Loading available models…") }
-            Button { persist() } label: { Label(saving ? "Saving…" : "Save delegate defaults", systemImage: "checkmark").frame(maxWidth: .infinity).frame(height: 42) }
+            Button { persist() } label: { Label(saving ? AppLocalization.string("Saving…") : AppLocalization.string("Save delegate defaults"), systemImage: "checkmark").frame(maxWidth: .infinity).frame(height: 42) }
                 .disabled(saving).conduitGlassControl(cornerRadius: 15, tint: .conduitAccent.opacity(0.18))
             if let error { Text(error).font(.caption).foregroundStyle(.red) }
         }
@@ -1276,6 +1292,7 @@ private struct DelegationModelSettings: View {
 }
 
 private struct MemorySettingsDetail: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let load: ([String]) async -> [String: ProfileSettingValue]
     let save: (String, ProfileSettingValue) async -> Bool
     let loadOptions: () async -> ProfileConfigOptions
@@ -1285,8 +1302,8 @@ private struct MemorySettingsDetail: View {
 
     var body: some View {
         ProfileConfigSettingsPage(
-            title: "Memory & delegation",
-            subtitle: "Long-term context and delegate-agent defaults.",
+            title: AppLocalization.string("Memory & delegation"),
+            subtitle: AppLocalization.string("Long-term context and delegate-agent defaults."),
             fields: fields,
             load: load,
             save: save,
@@ -1297,7 +1314,31 @@ private struct MemorySettingsDetail: View {
     }
 }
 
-private struct ProfileConfigSettingsPage: View {
+/// 服务器配置值 → 英文显示名（走 String Catalog 翻译）；未收录的动态值原样显示。
+/// 值本身绝不能翻译：它们会原样写回 Hermes 配置。
+enum ProfileConfigValueDisplay {
+    static let optionValueDisplay: [String: [String: String]] = [
+        "approvals.mode": ["manual": "Manual", "smart": "Smart", "off": "YOLO mode"],
+        "code_execution.mode": ["project": "Project", "strict": "Strict"],
+        "agent.image_input_mode": ["auto": "Automatic", "native": "Native images", "text": "Text only"],
+        "display.personality": [
+            "": "Default", "helpful": "Helpful", "concise": "Concise", "technical": "Technical",
+            "creative": "Creative", "teacher": "Teacher", "kawaii": "Kawaii", "catgirl": "Catgirl",
+            "pirate": "Pirate", "shakespeare": "Shakespeare", "surfer": "Surfer", "noir": "Noir",
+            "uwu": "uwu", "philosopher": "Philosopher", "hype": "Hype",
+        ],
+    ]
+
+    static func label(forFieldKey key: String, _ value: String) -> String {
+        if value.isEmpty { return AppLocalization.string("Default") }
+        if let mapped = optionValueDisplay[key]?[value] {
+            return AppLocalization.string(String.LocalizationValue(mapped))
+        }
+        return value
+    }
+}
+
+struct ProfileConfigSettingsPage: View {
     let title: String
     let subtitle: String
     let fields: [ProfileSettingField]
@@ -1351,13 +1392,13 @@ private struct ProfileConfigSettingsPage: View {
             case .options(let options, let defaultValue):
                 let choices = optionOverrides[field.key] ?? options
                 let selectedValue = textValue(field.key, defaultValue: defaultValue)
-                let displayedValue = selectedValue.isEmpty ? choices.first ?? "" : selectedValue
+                let displayedValue = selectedValue
                 Menu {
                     ForEach(choices, id: \.self) { option in
-                        Button(option.isEmpty ? "Default" : option) { save(field, value: .text(option)) }
+                        Button(ProfileConfigValueDisplay.label(forFieldKey: field.key, option)) { save(field, value: .text(option)) }
                     }
                 } label: {
-                    HStack { Text(displayedValue.isEmpty ? "Default" : displayedValue); Spacer(); Image(systemName: "chevron.up.chevron.down").foregroundStyle(.secondary) }
+                    HStack { Text(ProfileConfigValueDisplay.label(forFieldKey: field.key, displayedValue)); Spacer(); Image(systemName: "chevron.up.chevron.down").foregroundStyle(.secondary) }
                         .font(.subheadline.weight(.medium)).padding(.horizontal, 12).frame(height: 42)
                 }
                 .disabled(savingKey != nil || choices.isEmpty).conduitGlassControl(cornerRadius: 14)
@@ -1427,6 +1468,7 @@ private struct ProfileConfigSettingsPage: View {
 }
 
 private struct GatewaySettingsDetail: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let snapshot: SettingsSnapshot
     let reconnect: () async -> Bool
     let disconnect: () -> Void
@@ -1448,10 +1490,10 @@ private struct GatewaySettingsDetail: View {
     }
     var body: some View {
         SettingsDetailContainer {
-            ConduitSettingsSection(title: "Connection", symbol: "radio", tint: .conduitAura) {
-                SettingsMetricRow(label: "Server", value: snapshot.server ?? "—", lineLimit: 1)
-                SettingsMetricRow(label: "Status", value: connected ? "Connected" : "Disconnected", valueColor: connected ? .green : .red, statusDot: connected ? .green : .red)
-                Button { Task { reconnecting = true; connected = await reconnect(); reconnecting = false } } label: { Label(reconnecting ? "Reconnecting…" : "Reconnect", systemImage: "arrow.clockwise").frame(maxWidth: .infinity).frame(height: 44) }
+            ConduitSettingsSection(title: AppLocalization.string("Connection"), symbol: "radio", tint: .conduitAura) {
+                SettingsMetricRow(label: AppLocalization.string("Server"), value: snapshot.server ?? "—", lineLimit: 1)
+                SettingsMetricRow(label: AppLocalization.string("Status"), value: connected ? "Connected" : "Disconnected", valueColor: connected ? .green : .red, statusDot: connected ? .green : .red)
+                Button { Task { reconnecting = true; connected = await reconnect(); reconnecting = false } } label: { Label(reconnecting ? AppLocalization.string("Reconnecting…") : "Reconnect", systemImage: "arrow.clockwise").frame(maxWidth: .infinity).frame(height: 44) }
                     .disabled(reconnecting).conduitGlassControl(cornerRadius: 16, tint: .conduitAura.opacity(0.12))
             }
             ConduitSettingsSection(title: "Cloudflare Access", symbol: "shield.lefthalf.filled", tint: .conduitAccent) {
@@ -1478,6 +1520,7 @@ private struct GatewaySettingsDetail: View {
 
 private struct AppearanceSettingsDetail: View {
     @EnvironmentObject private var appState: AppState
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let theme: ThemePreference
     let saveTheme: (ThemePreference) -> Void
     @AppStorage("conduit.ipadPersistentSidebar") private var iPadPersistentSidebar = false
@@ -1487,7 +1530,7 @@ private struct AppearanceSettingsDetail: View {
     private var isPad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
     var body: some View {
         SettingsDetailContainer {
-            ConduitSettingsSection(title: "Theme", symbol: "circle.lefthalf.filled", tint: .conduitAccent) {
+            ConduitSettingsSection(title: AppLocalization.string("Theme"), symbol: "circle.lefthalf.filled", tint: .conduitAccent) {
                 Text("Choose how Conduit appears across this device.").font(.footnote).foregroundStyle(.secondary)
                 Picker("Theme", selection: Binding(get: { selected }, set: {
                     selected = $0
@@ -1497,7 +1540,21 @@ private struct AppearanceSettingsDetail: View {
                     Text("Dark").tag(ThemePreference.dark); Text("Light").tag(ThemePreference.light); Text("System").tag(ThemePreference.system)
                 }.pickerStyle(.segmented)
             }
-            ConduitSettingsSection(title: "App icon", symbol: "app.badge", tint: .conduitAura) {
+            ConduitSettingsSection(title: AppLocalization.string("App language"), symbol: "globe", tint: .conduitAccent) {
+                Text("Choose the language Conduit’s interface uses. Speech, transcription, and provider language settings are unaffected.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Picker("App language", selection: Binding(get: { appLanguage.selection }, set: {
+                    Haptics.selection()
+                    appLanguage.select($0)
+                })) {
+                    Text("System Default").tag(AppLanguage.system)
+                    Text(verbatim: "English").tag(AppLanguage.english)
+                    Text(verbatim: "简体中文").tag(AppLanguage.simplifiedChinese)
+                }
+                .pickerStyle(.segmented)
+            }
+            ConduitSettingsSection(title: AppLocalization.string("App icon"), symbol: "app.badge", tint: .conduitAura) {
                 Text("Choose the icon shown on your Home Screen.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -1541,7 +1598,7 @@ private struct AppearanceSettingsDetail: View {
             }
 
             if isPad {
-                ConduitSettingsSection(title: "Layout", symbol: "sidebar.left", tint: .conduitAura) {
+                ConduitSettingsSection(title: AppLocalization.string("Layout"), symbol: "sidebar.left", tint: .conduitAura) {
                     Toggle("Persistent session sidebar", isOn: $iPadPersistentSidebar)
                         .tint(.conduitAccent)
                     Text("Keep Sessions, Cron, and Kanban visible beside the current conversation when the window is wide enough.")
@@ -1554,14 +1611,15 @@ private struct AppearanceSettingsDetail: View {
 }
 
 private struct NotificationsSettingsDetail: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @ObservedObject private var notifications = PushNotificationService.shared
     @AppStorage("conduit.relayURL") private var customRelayURL: String = ""
 
     var body: some View {
         SettingsDetailContainer {
-            ConduitSettingsSection(title: "This iPhone", symbol: "bell.badge", tint: .conduitAura) {
+            ConduitSettingsSection(title: AppLocalization.string("This iPhone"), symbol: "bell.badge", tint: .conduitAura) {
                 SettingsMetricRow(
-                    label: "Status",
+                    label: AppLocalization.string("Status"),
                     value: notifications.statusText,
                     valueColor: notifications.isEnabled ? .green : .secondary,
                     statusDot: notifications.isEnabled ? .green : nil
@@ -1582,7 +1640,7 @@ private struct NotificationsSettingsDetail: View {
                     }
                 } label: {
                     Label(
-                        notifications.isWorking ? "Updating…" : (notifications.isEnabled ? "Turn off notifications" : "Enable notifications"),
+                        notifications.isWorking ? AppLocalization.string("Updating…") : (notifications.isEnabled ? AppLocalization.string("Turn off notifications") : AppLocalization.string("Enable notifications")),
                         systemImage: notifications.isEnabled ? "bell.slash" : "bell.badge.fill"
                     )
                     .frame(maxWidth: .infinity)
@@ -1603,41 +1661,41 @@ private struct NotificationsSettingsDetail: View {
             }
 
             if notifications.isEnabled {
-                ConduitSettingsSection(title: "Notify me when", symbol: "slider.horizontal.3", tint: .conduitAccent) {
-                    notificationToggle("Approval needed", detail: "A tool is waiting for approval", keyPath: \.approvalNeeded)
-                    notificationToggle("Input needed", detail: "Hermes needs your answer", keyPath: \.inputNeeded)
-                    notificationToggle("Response ready", detail: "An active turn finishes", keyPath: \.responseReady)
-                    notificationToggle("Turn failed", detail: "A turn stops with an error", keyPath: \.turnFailed)
-                    notificationToggle("Background task finished", detail: "A delegated agent completes", keyPath: \.backgroundTaskFinished)
-                    notificationToggle("Completion sound", detail: "Play a sound with notifications", keyPath: \.completionSound)
-                    notificationToggle("Show previews", detail: "Include response text in notifications", keyPath: \.showPreviews)
-                    notificationToggle("Approval cards in pushes", detail: "Include approval details so cards work from notifications. Disable for maximum privacy.", keyPath: \.decisionCards)
+                ConduitSettingsSection(title: AppLocalization.string("Notify me when"), symbol: "slider.horizontal.3", tint: .conduitAccent) {
+                    notificationToggle("Approval needed", detail: AppLocalization.string("A tool is waiting for approval"), keyPath: \.approvalNeeded)
+                    notificationToggle("Input needed", detail: AppLocalization.string("Hermes needs your answer"), keyPath: \.inputNeeded)
+                    notificationToggle("Response ready", detail: AppLocalization.string("An active turn finishes"), keyPath: \.responseReady)
+                    notificationToggle("Turn failed", detail: AppLocalization.string("A turn stops with an error"), keyPath: \.turnFailed)
+                    notificationToggle("Background task finished", detail: AppLocalization.string("A delegated agent completes"), keyPath: \.backgroundTaskFinished)
+                    notificationToggle("Completion sound", detail: AppLocalization.string("Play a sound with notifications"), keyPath: \.completionSound)
+                    notificationToggle("Show previews", detail: AppLocalization.string("Include response text in notifications"), keyPath: \.showPreviews)
+                    notificationToggle("Approval cards in pushes", detail: AppLocalization.string("Include approval details so cards work from notifications. Disable for maximum privacy."), keyPath: \.decisionCards)
                 }
 
-                ConduitSettingsSection(title: "Compatibility", symbol: "checkmark.seal", tint: .conduitAura) {
+                ConduitSettingsSection(title: AppLocalization.string("Compatibility"), symbol: "checkmark.seal", tint: .conduitAura) {
                     if notifications.isFetchingMeta {
                         Text("Checking compatibility…")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     } else if let meta = notifications.relayMeta {
                         compatibilityRow(
-                            title: "Push relay",
+                            title: AppLocalization.string("Push relay"),
                             version: meta.version,
                             isSupported: meta.supportsDecisionCards,
-                            supportedDetail: "Supports decision cards",
-                            outdatedDetail: "Decision cards need a relay update"
+                            supportedDetail: AppLocalization.string("Supports decision cards"),
+                            outdatedDetail: AppLocalization.string("Decision cards need a relay update")
                         )
                         ForEach(meta.gateways) { gateway in
                             compatibilityRow(
                                 title: gateway.name,
                                 version: gateway.pluginVersion,
                                 isSupported: gateway.supportsApprovalCards && gateway.supportsClarifyCards,
-                                supportedDetail: "Notifier supports approval and clarify cards",
+                                supportedDetail: AppLocalization.string("Notifier supports approval and clarify cards"),
                                 outdatedDetail: gateway.hasSentEventsButNeverReported
-                                    ? "This profile's notifier predates decision cards — update it to receive them"
+                                    ? AppLocalization.string("This profile's notifier predates decision cards — update it to receive them")
                                     : gateway.pluginVersion == nil
                                         ? "Waiting for the first notification from this profile"
-                                        : "Notifier update available — approval and clarify cards need a newer plugin"
+                                        : AppLocalization.string("Notifier update available — approval and clarify cards need a newer plugin")
                             )
                             // The update prompt requires evidence of oldness:
                             // either a reported-but-old version, or events that
@@ -1646,8 +1704,8 @@ private struct NotificationsSettingsDetail: View {
                             if gateway.hasSentEventsButNeverReported
                                 || (gateway.pluginVersion != nil
                                     && (!gateway.supportsApprovalCards || !gateway.supportsClarifyCards)) {
-                                NotificationSetupCommand(step: 1, title: "Update the notifier", command: "hermes plugins update conduit_push")
-                                NotificationSetupCommand(step: 2, title: "Restart the gateway", command: "hermes gateway restart")
+                                NotificationSetupCommand(step: 1, title: AppLocalization.string("Update the notifier"), command: "hermes plugins update conduit_push")
+                                NotificationSetupCommand(step: 2, title: AppLocalization.string("Restart the gateway"), command: "hermes gateway restart")
                             }
                         }
                     } else {
@@ -1658,19 +1716,19 @@ private struct NotificationsSettingsDetail: View {
                 }
                 .task { await notifications.refreshMeta() }
 
-                ConduitSettingsSection(title: "Connect a Hermes profile", symbol: "link.badge.plus", tint: .conduitAura) {
+                ConduitSettingsSection(title: AppLocalization.string("Connect a Hermes profile"), symbol: "link.badge.plus", tint: .conduitAura) {
                     Text("Install the notifier once on the gateway, then create a short-lived pairing code here for each Hermes profile you want to reach.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
-                    NotificationSetupCommand(step: 1, title: "Install the notifier", command: "hermes plugins install kaishi00/hermes-conduit-notifier --enable")
-                    NotificationSetupCommand(step: 2, title: "Restart the gateway", command: "hermes gateway restart")
+                    NotificationSetupCommand(step: 1, title: AppLocalization.string("Install the notifier"), command: "hermes plugins install kaishi00/hermes-conduit-notifier --enable")
+                    NotificationSetupCommand(step: 2, title: AppLocalization.string("Restart the gateway"), command: "hermes gateway restart")
                     Button {
                         Task {
                             await notifications.createPairingCode()
                             notifications.pairingCode == nil ? Haptics.error() : Haptics.success()
                         }
                     } label: {
-                        Label(notifications.isWorking ? "Creating code…" : "Create pairing code", systemImage: "number")
+                        Label(notifications.isWorking ? AppLocalization.string("Creating code…") : AppLocalization.string("Create pairing code"), systemImage: "number")
                             .frame(maxWidth: .infinity)
                             .frame(height: 46)
                     }
@@ -1678,7 +1736,7 @@ private struct NotificationsSettingsDetail: View {
                     .conduitGlassControl(cornerRadius: 16, tint: .conduitAccent.opacity(0.16))
 
                     if let code = notifications.pairingCode {
-                        NotificationSetupCommand(step: 3, title: "Pair the active profile", command: "hermes conduit-push pair \(code)")
+                        NotificationSetupCommand(step: 3, title: AppLocalization.string("Pair the active profile"), command: "hermes conduit-push pair \(code)")
                         if let expiry = notifications.pairingExpiry {
                             Text("This code expires \(expiry).")
                                 .font(.caption)
@@ -1686,19 +1744,19 @@ private struct NotificationsSettingsDetail: View {
                         }
                     }
                 }
-                ConduitSettingsSection(title: "Verify pairing", symbol: "checkmark.seal", tint: .conduitAccent) {
+                ConduitSettingsSection(title: AppLocalization.string("Verify pairing"), symbol: "checkmark.seal", tint: .conduitAccent) {
                     Text("After pairing, run these on the same Hermes profile. First confirm the local relay credential, then send a test. You should receive the test notification on this iPhone within a few seconds.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
-                    NotificationSetupCommand(step: 4, title: "Check pairing status", command: "hermes conduit-push status")
-                    NotificationSetupCommand(step: 5, title: "Send a test notification", command: "hermes conduit-push test")
+                    NotificationSetupCommand(step: 4, title: AppLocalization.string("Check pairing status"), command: "hermes conduit-push status")
+                    NotificationSetupCommand(step: 5, title: AppLocalization.string("Send a test notification"), command: "hermes conduit-push test")
                 }
-                ConduitSettingsSection(title: "How it works", symbol: "hand.raised", tint: .conduitAura) {
+                ConduitSettingsSection(title: AppLocalization.string("How it works"), symbol: "hand.raised", tint: .conduitAura) {
                     Text("The notifier receives a revocable credential for this phone. Your gateway never needs the phone’s push token, and you can turn notifications off here at any time.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
-                ConduitSettingsSection(title: "Push relay", symbol: "server.rack", tint: .conduitAura) {
+                ConduitSettingsSection(title: AppLocalization.string("Push relay"), symbol: "server.rack", tint: .conduitAura) {
                     TextField("https://push.milim.dev", text: $customRelayURL)
                         .textFieldStyle(.plain)
                         .font(.body.monospaced())
@@ -1733,7 +1791,7 @@ private struct NotificationsSettingsDetail: View {
         HStack(spacing: 10) {
             Image(systemName: isSupported ? "checkmark.circle.fill" : "exclamationmark.circle")
                 .foregroundStyle(isSupported ? .green : .orange)
-                .accessibilityLabel(isSupported ? "Supported" : "Update needed")
+                .accessibilityLabel(isSupported ? AppLocalization.string("Supported") : AppLocalization.string("Update needed"))
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(title).font(.subheadline.weight(.medium))
@@ -1814,6 +1872,7 @@ private struct NotificationSetupCommand: View {
 }
 
 private struct AboutSettingsDetail: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     let profile: String
     @EnvironmentObject private var appState: AppState
 
@@ -1829,10 +1888,10 @@ private struct AboutSettingsDetail: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
-                SettingsMetricRow(label: "Active profile", value: profile.capitalized)
-                SettingsMetricRow(label: "Version", value: ConduitAppVersion.display)
+                SettingsMetricRow(label: AppLocalization.string("Active profile"), value: profile.capitalized)
+                SettingsMetricRow(label: AppLocalization.string("Version"), value: ConduitAppVersion.display)
             }
-            ConduitSettingsSection(title: "Data handling", symbol: "hand.raised", tint: .conduitAura) {
+            ConduitSettingsSection(title: AppLocalization.string("Data handling"), symbol: "hand.raised", tint: .conduitAura) {
                 Text("Conduit connects to the dashboard and gateway you configure. Conversations and attachments are handled by that Hermes installation.")
                     .font(.footnote).foregroundStyle(.secondary)
             }
@@ -1862,7 +1921,7 @@ private struct AboutSettingsDetail: View {
                     }
                 }
             }
-            ConduitSettingsSection(title: "Disclaimer", symbol: "info.circle", tint: .conduitAura) {
+            ConduitSettingsSection(title: AppLocalization.string("Disclaimer"), symbol: "info.circle", tint: .conduitAura) {
                 Text("Hermes Conduit is an independent client and is not affiliated with or endorsed by Nous Research. © 2026 Milim.")
                     .font(.footnote).foregroundStyle(.secondary)
             }

@@ -12,6 +12,7 @@ import PhotosUI
 import UniformTypeIdentifiers
 
 struct ComposerBar: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject var appState: AppState
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -409,8 +410,8 @@ struct ComposerBar: View {
                     .foregroundStyle(.orange)
             }
             Text(appState.turnState == .unsupportedGateway
-                 ? "Update this Hermes gateway to recover active turns safely."
-                 : "Synchronizing with Hermes before enabling chat controls")
+                 ? AppLocalization.string("Update this Hermes gateway to recover active turns safely.")
+                 : AppLocalization.string("Synchronizing with Hermes before enabling chat controls"))
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 Spacer(minLength: 0)
@@ -588,7 +589,7 @@ struct ComposerBar: View {
                             options: .repeating,
                             isActive: appState.turnState == .running && !reduceMotion
                         )
-                    Text(appState.runtime.model.isEmpty ? "Model" : appState.runtime.model)
+                    Text(appState.runtime.model.isEmpty ? AppLocalization.string("Model") : appState.runtime.model)
                         .lineLimit(1)
                     if !appState.runtime.reasoningEffort.isEmpty {
                         Text("/")
@@ -637,7 +638,7 @@ struct ComposerBar: View {
                         .frame(minWidth: 36, minHeight: 36)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Delegate agents, \(appState.activeAgents) active")
+                .accessibilityLabel(AppLocalization.string("Delegate agents, \(String(appState.activeAgents)) active"))
             }
         }
         .padding(.horizontal, 14)
@@ -730,7 +731,7 @@ struct ComposerBar: View {
             interactive: appState.canStartVoiceConversation
         )
         .accessibilityLabel("Start voice conversation")
-        .accessibilityHint(appState.voiceUnavailableReason ?? "Opens voice controls over this conversation")
+        .accessibilityHint(appState.voiceUnavailableReason ?? AppLocalization.string("Opens voice controls over this conversation"))
     }
 
     /// Collapse the draft in the same transaction that dismisses the keyboard.
@@ -963,15 +964,15 @@ struct ComposerBar: View {
             attachments.append(Attachment(id: UUID().uuidString, name: name, uri: url.absoluteString, mimeType: mimeType, kind: kind))
             Haptics.light()
         } catch {
-            appState.errorMessage = "Could not prepare \(name) for upload."
+            appState.errorMessage = AppLocalization.string("Could not prepare \(name) for upload.")
             Haptics.error()
         }
     }
 
     private func formatEffort(_ value: String) -> String {
         let lower = value.lowercased()
-        if lower == "none" || lower == "off" { return "Off" }
-        if lower == "xhigh" { return "Extra High" }
+        if lower == "none" || lower == "off" { return AppLocalization.string("Off") }
+        if lower == "xhigh" { return AppLocalization.string("Extra High") }
         return lower.capitalized
             .replacingOccurrences(of: "-", with: " ")
             .replacingOccurrences(of: "_", with: " ")
@@ -979,21 +980,21 @@ struct ComposerBar: View {
 
     private var accessibilityLabel: String {
         switch action {
-        case .stop: return "Stop response"
-        case .steer: return "Steer with message"
-        case .interrupt: return "Interrupt and correct response"
-        case .send: return "Send message"
-        case .unavailable: return "Composer unavailable"
+        case .stop: return AppLocalization.string("Stop response")
+        case .steer: return AppLocalization.string("Steer with message")
+        case .interrupt: return AppLocalization.string("Interrupt and correct response")
+        case .send: return AppLocalization.string("Send message")
+        case .unavailable: return AppLocalization.string("Composer unavailable")
         }
     }
 
     private var modelAccessibilityLabel: String {
-        let model = appState.runtime.model.isEmpty ? "Model" : appState.runtime.model
+        let model = appState.runtime.model.isEmpty ? AppLocalization.string("Model") : appState.runtime.model
         let reasoning = appState.runtime.reasoningEffort.isEmpty
-            ? "reasoning not set"
-            : "reasoning \(formatEffort(appState.runtime.reasoningEffort))"
-        let approvals = appState.runtime.yolo ? ", auto-approve enabled" : ""
-        let activity = appState.turnState == .running ? ", agent working" : ""
+            ? AppLocalization.string("reasoning not set")
+            : AppLocalization.string("reasoning \(formatEffort(appState.runtime.reasoningEffort))")
+        let approvals = appState.runtime.yolo ? AppLocalization.string(", auto-approve enabled") : ""
+        let activity = appState.turnState == .running ? AppLocalization.string(", agent working") : ""
         return "\(model), \(reasoning)\(approvals)\(activity)"
     }
 }
@@ -1011,7 +1012,7 @@ struct ContextRingView: View {
                 .trim(from: 0, to: min(percent / 100, 1))
                 .stroke(Color.conduitAccent, style: StrokeStyle(lineWidth: 3, lineCap: .round))
                 .rotationEffect(.degrees(-90))
-            Text("\(Int(percent.rounded()))%")
+            Text("\(String(Int(percent.rounded())))%")
                 .font(.system(size: 9, weight: .semibold).monospacedDigit())
         }
     }

@@ -511,7 +511,7 @@ struct KanbanAttachment: Codable, Identifiable, Equatable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = container.decodeLossyString(forKey: .id) ?? UUID().uuidString
         taskID = try? container.decodeIfPresent(String.self, forKey: .taskID)
-        filename = (try? container.decode(String.self, forKey: .filename)) ?? "Attachment"
+        filename = (try? container.decode(String.self, forKey: .filename)) ?? AppLocalization.string("Attachment")
         contentType = try? container.decodeIfPresent(String.self, forKey: .contentType)
         size = container.decodeLossyInt(forKey: .size)
         uploadedBy = try? container.decodeIfPresent(String.self, forKey: .uploadedBy)

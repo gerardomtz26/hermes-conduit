@@ -43,6 +43,7 @@ struct ConnectionRepairSetupSheet: View {
 }
 
 struct ConnectionSetupView: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @Environment(\.dismiss) private var dismiss
     @State private var flow: ConnectionSetupFlow
     @State private var showNotSureGuidance = false
@@ -244,7 +245,7 @@ struct ConnectionSetupView: View {
         case .activated:
             UIAccessibility.post(
                 notification: .announcement,
-                argument: "Reconnected to Hermes."
+                argument: AppLocalization.string("Reconnected to Hermes.")
             )
             dismiss()
         case .failed(let failure):
@@ -356,9 +357,8 @@ struct ConnectionSetupView: View {
     private var dashboardStep: some View {
         readinessQuestion(
             progress: flow.progressLabel,
-            question: "Is your Hermes dashboard running?",
-            explanation: "Hermes Conduit connects to a Hermes dashboard you (or your assistant) run yourself. "
-                + "The dashboard has to be up before Conduit can reach it.",
+            question: AppLocalization.string("Is your Hermes dashboard running?"),
+            explanation: AppLocalization.string("Hermes Conduit connects to a Hermes dashboard you (or your assistant) run yourself. The dashboard has to be up before Conduit can reach it."),
             selectedAnswer: flow.dashboardAnswer,
             onAnswer: { flow.answerDashboard($0) },
             guidance: { dashboardGuidance }
@@ -370,11 +370,11 @@ struct ConnectionSetupView: View {
         switch flow.dashboardAnswer {
         case .no:
             AskHermesPromptView(title: ConnectionSetupPrompt.dashboardNotRunning.title, prompt: ConnectionSetupPrompt.dashboardNotRunning.text)
-            continueButton("Dashboard is ready") { flow.confirmDashboardReady() }
+            continueButton(AppLocalization.string("Dashboard is ready")) { flow.confirmDashboardReady() }
                 .accessibilityIdentifier("setup.continue")
         case .unknown:
             AskHermesPromptView(title: ConnectionSetupPrompt.dashboardUnknown.title, prompt: ConnectionSetupPrompt.dashboardUnknown.text)
-            continueButton("Dashboard is ready") { flow.confirmDashboardReady() }
+            continueButton(AppLocalization.string("Dashboard is ready")) { flow.confirmDashboardReady() }
                 .accessibilityIdentifier("setup.continue")
         default:
             EmptyView()
@@ -386,9 +386,8 @@ struct ConnectionSetupView: View {
     private var credentialsStep: some View {
         readinessQuestion(
             progress: flow.progressLabel,
-            question: "Do you have your Hermes dashboard login credentials?",
-            explanation: "This means the Hermes dashboard username and password you sign in with — not Tailscale, "
-                + "Cloudflare, or Apple credentials.",
+            question: AppLocalization.string("Do you have your Hermes dashboard login credentials?"),
+            explanation: AppLocalization.string("This means the Hermes dashboard username and password you sign in with — not Tailscale, Cloudflare, or Apple credentials."),
             selectedAnswer: flow.credentialsAnswer,
             onAnswer: { flow.answerCredentials($0) },
             guidance: { credentialsGuidance }
@@ -426,13 +425,13 @@ struct ConnectionSetupView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             if !flow.draft.existingServerURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                continueButton("Use or edit current dashboard address") { flow.useExistingAddress() }
+                continueButton(AppLocalization.string("Use or edit current dashboard address")) { flow.useExistingAddress() }
                     .accessibilityIdentifier("setup.use-existing")
             }
 
             methodCard(
                 title: ConnectionAccessMethod.lan.displayTitle,
-                supporting: "Use this when Conduit and the Hermes machine are on the same home or local network.",
+                supporting: AppLocalization.string("Use this when Conduit and the Hermes machine are on the same home or local network."),
                 identifier: "setup.method-lan"
             ) {
                 flow.selectAccessMethod(.lan)
@@ -440,8 +439,8 @@ struct ConnectionSetupView: View {
 
             methodCard(
                 title: ConnectionAccessMethod.tailscale.displayTitle,
-                supporting: "Use Tailscale when you want to reach Hermes securely while away from home.",
-                badge: "Recommended for remote access",
+                supporting: AppLocalization.string("Use Tailscale when you want to reach Hermes securely while away from home."),
+                badge: AppLocalization.string("Recommended for remote access"),
                 identifier: "setup.method-tailscale"
             ) {
                 flow.selectAccessMethod(.tailscale)
@@ -449,7 +448,7 @@ struct ConnectionSetupView: View {
 
             methodCard(
                 title: ConnectionAccessMethod.reverseProxy.displayTitle,
-                supporting: "Use this if you already access Hermes through an HTTPS hostname you manage.",
+                supporting: AppLocalization.string("Use this if you already access Hermes through an HTTPS hostname you manage."),
                 identifier: "setup.method-reverseProxy"
             ) {
                 flow.selectAccessMethod(.reverseProxy)
@@ -477,9 +476,9 @@ struct ConnectionSetupView: View {
 
             if showNotSureGuidance {
                 VStack(alignment: .leading, spacing: 10) {
-                    guidanceBullet("Using Conduit at home, on the same network as the Hermes machine? Choose Same Network.")
-                    guidanceBullet("Need access away from home without existing remote access? Choose Tailscale — the simplest secure option.")
-                    guidanceBullet("Already operating an HTTPS domain or reverse proxy for Hermes? Choose Existing Domain.")
+                    guidanceBullet(AppLocalization.string("Using Conduit at home, on the same network as the Hermes machine? Choose Same Network."))
+                    guidanceBullet(AppLocalization.string("Need access away from home without existing remote access? Choose Tailscale — the simplest secure option."))
+                    guidanceBullet(AppLocalization.string("Already operating an HTTPS domain or reverse proxy for Hermes? Choose Existing Domain."))
                 }
                 .padding(.top, 2)
             }
@@ -493,13 +492,13 @@ struct ConnectionSetupView: View {
 
     private var lanBranch: some View {
         branchShell(
-            title: "Same network as Hermes",
-            intro: "Here is what you will need to connect Conduit over your local network:",
+            title: AppLocalization.string("Same network as Hermes"),
+            intro: AppLocalization.string("Here is what you will need to connect Conduit over your local network:"),
             needs: [
-                "The Hermes dashboard is running.",
-                "You have dashboard login credentials.",
-                "You know the Hermes machine’s local IP address.",
-                "You know the dashboard port.",
+                AppLocalization.string("The Hermes dashboard is running."),
+                AppLocalization.string("You have dashboard login credentials."),
+                AppLocalization.string("You know the Hermes machine’s local IP address."),
+                AppLocalization.string("You know the dashboard port."),
                 "This device is on the same reachable network."
             ],
             prompt: .lanDetails
@@ -518,12 +517,12 @@ struct ConnectionSetupView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             VStack(alignment: .leading, spacing: 12) {
-                numberedStep(1, "Tailscale is installed on the Hermes machine.")
-                numberedStep(2, "Tailscale is installed on this iPhone or iPad.")
-                numberedStep(3, "Both are signed in to the same tailnet.")
-                numberedStep(4, "The Hermes dashboard is running.")
-                numberedStep(5, "Hermes configures Tailscale Serve for the dashboard.")
-                numberedStep(6, "Hermes tells you the address to enter into Conduit.")
+                numberedStep(1, AppLocalization.string("Tailscale is installed on the Hermes machine."))
+                numberedStep(2, AppLocalization.string("Tailscale is installed on this iPhone or iPad."))
+                numberedStep(3, AppLocalization.string("Both are signed in to the same tailnet."))
+                numberedStep(4, AppLocalization.string("The Hermes dashboard is running."))
+                numberedStep(5, AppLocalization.string("Hermes configures Tailscale Serve for the dashboard."))
+                numberedStep(6, AppLocalization.string("Hermes tells you the address to enter into Conduit."))
             }
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -554,10 +553,10 @@ struct ConnectionSetupView: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text("You will need:")
                     .font(.subheadline.weight(.semibold))
-                guidanceBullet("Your existing HTTPS Hermes dashboard URL — for example https://hermes.example.com, https://hermes.example.com:9443, or https://example.com/hermes.")
-                guidanceBullet("Any custom port.")
-                guidanceBullet("Any path prefix your proxy uses.")
-                guidanceBullet("Your dashboard login credentials.")
+                guidanceBullet(AppLocalization.string("Your existing HTTPS Hermes dashboard URL — for example https://hermes.example.com, https://hermes.example.com:9443, or https://example.com/hermes."))
+                guidanceBullet(AppLocalization.string("Any custom port."))
+                guidanceBullet(AppLocalization.string("Any path prefix your proxy uses."))
+                guidanceBullet(AppLocalization.string("Your dashboard login credentials."))
             }
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -586,8 +585,8 @@ struct ConnectionSetupView: View {
             .accessibilityIdentifier("setup.troubleshooting-picker")
 
             Text(topic == .tls
-                ? "Checks for HTTPS and certificate problems when connecting to your dashboard."
-                : "Checks for Cloudflare Access service-token problems when connecting to your dashboard.")
+                ? AppLocalization.string("Checks for HTTPS and certificate problems when connecting to your dashboard.")
+                : AppLocalization.string("Checks for Cloudflare Access service-token problems when connecting to your dashboard."))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -639,13 +638,13 @@ struct ConnectionSetupView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            answerRow("Yes", selected: selectedAnswer == .yes, identifier: "setup.answer-yes") {
+            answerRow(AppLocalization.string("Yes"), selected: selectedAnswer == .yes, identifier: "setup.answer-yes") {
                 onAnswer(.yes)
             }
-            answerRow("No", selected: selectedAnswer == .no, identifier: "setup.answer-no") {
+            answerRow(AppLocalization.string("No"), selected: selectedAnswer == .no, identifier: "setup.answer-no") {
                 onAnswer(.no)
             }
-            answerRow("I don’t know", selected: selectedAnswer == .unknown, identifier: "setup.answer-unknown") {
+            answerRow(AppLocalization.string("I don’t know"), selected: selectedAnswer == .unknown, identifier: "setup.answer-unknown") {
                 onAnswer(.unknown)
             }
 
@@ -793,14 +792,14 @@ struct ConnectionSetupView: View {
 extension ConnectionHelpDestination {
     var displayName: String {
         switch self {
-        case .start: return "Getting started"
-        case .dashboard: return "Dashboard address"
+        case .start: return AppLocalization.string("Getting started")
+        case .dashboard: return AppLocalization.string("Dashboard address")
         case .credentials: return "Credentials"
-        case .network: return "Network & reachability"
-        case .tls: return "HTTPS & certificates"
+        case .network: return AppLocalization.string("Network & reachability")
+        case .tls: return AppLocalization.string("HTTPS & certificates")
         case .cloudflare: return "Cloudflare Access"
-        case .currentConnection: return "Current connection"
-        case .repairConnection: return "Repair connection"
+        case .currentConnection: return AppLocalization.string("Current connection")
+        case .repairConnection: return AppLocalization.string("Repair connection")
         }
     }
 
@@ -814,15 +813,15 @@ extension ConnectionHelpDestination {
         switch self {
         case .tls:
             return [
-                "If you use your own certificate authority, install and trust its root certificate on this device (Settings → General → VPN & Device Management → Certificate Trust Settings).",
-                "Check the server certificate’s expiration and validity dates.",
-                "Confirm this device’s date and time are correct."
+                AppLocalization.string("If you use your own certificate authority, install and trust its root certificate on this device (Settings → General → VPN & Device Management → Certificate Trust Settings)."),
+                AppLocalization.string("Check the server certificate’s expiration and validity dates."),
+                AppLocalization.string("Confirm this device’s date and time are correct.")
             ]
         case .cloudflare:
             return [
-                "Verify the Client ID and Secret belong to a Cloudflare Access service token for this application.",
-                "Make sure a Service Auth policy allows that token to reach this Access application.",
-                "Or turn off \"Use Cloudflare Access service token\" to sign in interactively through the in-app browser."
+                AppLocalization.string("Verify the Client ID and Secret belong to a Cloudflare Access service token for this application."),
+                AppLocalization.string("Make sure a Service Auth policy allows that token to reach this Access application."),
+                AppLocalization.string("Or turn off \"Use Cloudflare Access service token\" to sign in interactively through the in-app browser.")
             ]
         case .start, .dashboard, .credentials, .network, .currentConnection, .repairConnection:
             return []

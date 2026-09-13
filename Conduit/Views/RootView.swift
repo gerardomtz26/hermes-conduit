@@ -332,6 +332,7 @@ private struct MainViewWindowWidthKey: PreferenceKey {
 // MARK: - Connection Status
 
 struct ConnectionStatusIndicator: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject var appState: AppState
 
     private var color: Color {
@@ -361,7 +362,7 @@ struct ConnectionStatusIndicator: View {
         }
         .conduitGlassControl(cornerRadius: 20, tint: color.opacity(0.10))
         .animation(ConduitMotion.response, value: appState.isConnected)
-        .accessibilityLabel(appState.isConnected ? "Gateway connected" : "Gateway disconnected")
+        .accessibilityLabel(appState.isConnected ? AppLocalization.string("Gateway connected") : AppLocalization.string("Gateway disconnected"))
     }
 }
 

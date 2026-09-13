@@ -223,7 +223,7 @@ final class AVAudioCaptureService: NSObject, AudioCaptureService {
         let input = engine.inputNode
         let hardwareFormat = input.inputFormat(forBus: 0)
         guard hardwareFormat.sampleRate > 0, hardwareFormat.channelCount > 0 else {
-            throw VoiceAudioError.unavailable("The selected microphone is unavailable.")
+            throw VoiceAudioError.unavailable(AppLocalization.string("The selected microphone is unavailable."))
         }
         converter = nil
         // Defensive: a recovery restart (e.g. after a route change stops the

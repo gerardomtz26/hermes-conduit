@@ -132,7 +132,7 @@ final class MessageReadAloudController: ObservableObject {
     private func runPlayback(generation: UInt64, messageID: String, content: String) async {
         defer { if operationGeneration == generation { playbackTask = nil } }
         guard let gateway = activeGateway else {
-            fail(messageID: messageID, message: "Read aloud needs a connected Hermes gateway.", generation: generation)
+            fail(messageID: messageID, message: AppLocalization.string("Read aloud needs a connected Hermes gateway."), generation: generation)
             return
         }
         do {

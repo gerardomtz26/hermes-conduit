@@ -54,7 +54,7 @@ final class AVSpeechPlaybackService: NSObject, SpeechPlaybackService {
     func start(sampleRate: Double) throws {
         stop()
         guard let format = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: sampleRate, channels: 1, interleaved: true) else {
-            throw VoiceAudioError.unavailable("The gateway reported an unsupported PCM format.")
+            throw VoiceAudioError.unavailable(AppLocalization.string("The gateway reported an unsupported PCM format."))
         }
         lease = try coordinator.acquire(ownershipIntent)
         do {
@@ -77,7 +77,7 @@ final class AVSpeechPlaybackService: NSObject, SpeechPlaybackService {
             // immediately so the lease does not wait on the caller's error
             // path.
             stop()
-            throw VoiceAudioError.unavailable("The gateway changed PCM sample rates during a stream.")
+            throw VoiceAudioError.unavailable(AppLocalization.string("The gateway changed PCM sample rates during a stream."))
         }
         remainder.append(data)
         let alignedBytes = remainder.count - (remainder.count % 2)
@@ -111,7 +111,7 @@ final class AVSpeechPlaybackService: NSObject, SpeechPlaybackService {
             let player = try AVAudioPlayer(data: data)
             player.delegate = self
             player.prepareToPlay()
-            guard player.play() else { throw VoiceAudioError.unavailable("Could not play Hermes fallback speech.") }
+            guard player.play() else { throw VoiceAudioError.unavailable(AppLocalization.string("Could not play Hermes fallback speech.")) }
             encodedPlayer = player
             isPlaying = true
         } catch {

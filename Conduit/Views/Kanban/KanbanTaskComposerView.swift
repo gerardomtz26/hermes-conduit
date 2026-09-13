@@ -16,6 +16,7 @@ import SwiftUI
 /// - Goal Mode maps to `goal_mode` (+ optional `goal_max_turns`); it is NOT
 ///   Conduit's chat YOLO setting.
 struct KanbanTaskComposerView: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var store: KanbanStore
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
@@ -72,11 +73,11 @@ struct KanbanTaskComposerView: View {
                     }
                 }
             }
-            .navigationTitle(didCreate ? "Task created" : "New task")
+            .navigationTitle(didCreate ? AppLocalization.string("Task created") : AppLocalization.string("New task"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(didCreate ? "Close" : "Cancel") { dismiss() }
+                    Button(didCreate ? AppLocalization.string("Close") : AppLocalization.string("Cancel")) { dismiss() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     creationButton
@@ -145,13 +146,13 @@ struct KanbanTaskComposerView: View {
         Section {
             Picker("Workspace", selection: $draft.workspaceKind) {
                 ForEach(KanbanWorkspaceKind.allCases) { kind in
-                    Text(kind.displayName + (kind == boardDefaultKind ? " · board default" : ""))
+                    Text(kind.displayName + (kind == boardDefaultKind ? AppLocalization.string(" · board default") : ""))
                         .tag(kind)
                 }
             }
             if draft.workspaceKind.allowsPathOverride {
                 TextField(
-                    boardDefaultDir != nil ? "Leave empty to inherit \(boardDefaultDir!)" : "Optional path override",
+                    boardDefaultDir != nil ? AppLocalization.string("Leave empty to inherit \(boardDefaultDir!)") : AppLocalization.string("Optional path override"),
                     text: $draft.workspacePath
                 )
                 .textInputAutocapitalization(.never)
@@ -198,7 +199,7 @@ struct KanbanTaskComposerView: View {
                 Text("Model")
                     .foregroundStyle(.primary)
                 Spacer()
-                Text(draft.modelOverride.label(inheritCopy: "Inherit from profile"))
+                Text(draft.modelOverride.label(inheritCopy: AppLocalization.string("Inherit from profile")))
                     .font(.callout)
                     .foregroundStyle(draft.modelOverride.isInherited ? .secondary : .primary)
                     .lineLimit(1)
@@ -218,7 +219,7 @@ struct KanbanTaskComposerView: View {
                 Text("Skills")
                     .foregroundStyle(.primary)
                 Spacer()
-                Text(draft.skills.isEmpty ? "None" : "\(draft.skills.count) selected")
+                Text(draft.skills.isEmpty ? AppLocalization.string("None") : AppLocalization.string("\(draft.skills.count) selected"))
                     .font(.callout)
                     .foregroundStyle(draft.skills.isEmpty ? .secondary : .primary)
                 Image(systemName: "chevron.right")
@@ -236,7 +237,7 @@ struct KanbanTaskComposerView: View {
             // Symmetric ladder: Unlimited -> 5 -> 10 -> 15 … and back down to
             // Unlimited; both directions walk the same rungs.
             Stepper(
-                "Max turns: \(draft.goalMaxTurns.map(String.init) ?? "Unlimited")",
+                "Max turns: \(draft.goalMaxTurns.map(String.init) ?? AppLocalization.string("Unlimited"))",
                 onIncrement: {
                     let base = draft.goalMaxTurns ?? 0
                     draft.goalMaxTurns = min(10_000, base + 5)
@@ -372,7 +373,7 @@ struct KanbanTaskComposerView: View {
             if isSaving {
                 ProgressView()
             } else {
-                Text(didCreate ? "Done" : "Create")
+                Text(didCreate ? AppLocalization.string("Done") : AppLocalization.string("Create"))
             }
         }
         // Double-submission guard: the saving flag disables re-entry while the
@@ -430,6 +431,7 @@ struct KanbanTaskComposerView: View {
 /// curated `/model-options` roster, with a free-text fallback when the server
 /// inventory is unavailable. Entirely detached from any live session model.
 struct KanbanModelOverrideSheet: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var store: KanbanStore
     @Environment(\.dismiss) private var dismiss
     @Binding var value: TaskModelOverride
@@ -442,7 +444,7 @@ struct KanbanModelOverrideSheet: View {
     @State private var customProvider = ""
     @State private var customModel = ""
 
-    private var inheritCopy: String { "Inherit from profile" }
+    private var inheritCopy: String { AppLocalization.string("Inherit from profile") }
 
     var body: some View {
         NavigationStack {
@@ -590,7 +592,7 @@ struct KanbanModelOverrideSheet: View {
     }
 
     private func displayEffort(_ effort: String) -> String {
-        effort == "none" ? "None (thinking off)" : effort.capitalized.replacingOccurrences(of: "Xhigh", with: "Extra High")
+        effort == "none" ? AppLocalization.string("None (thinking off)") : effort.capitalized.replacingOccurrences(of: "Xhigh", with: AppLocalization.string("Extra High"))
     }
 
     private func seedCustomFields() {
@@ -623,6 +625,7 @@ struct KanbanModelOverrideSheet: View {
 /// skill list and allows manual entry for anything unlisted (upstream accepts
 /// arbitrary comma-separated names).
 struct KanbanSkillsPickerSheet: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var appState: AppState
     @Environment(\.dismiss) private var dismiss
     @Binding var selected: [String]
@@ -688,7 +691,7 @@ struct KanbanSkillsPickerSheet: View {
                             }
                         }
                         .accessibilityLabel("Skill \(skill.name)")
-                        .accessibilityHint(isSelected(skill.name) ? "Selected" : "Not selected")
+                        .accessibilityHint(isSelected(skill.name) ? AppLocalization.string("Selected") : AppLocalization.string("Not selected"))
                     }
                     if filteredSkills.isEmpty {
                         Text("No skills match.")
@@ -708,7 +711,7 @@ struct KanbanSkillsPickerSheet: View {
                     }
                 }
             }
-            .searchable(text: $query, prompt: "Search skills")
+            .searchable(text: $query, prompt: AppLocalization.string("Search skills"))
             .navigationTitle("Skills")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -746,6 +749,7 @@ struct KanbanSkillsPickerSheet: View {
 /// Single-parent selection over the CURRENT BOARD snapshot, mirroring
 /// Desktop's New Task dialog (one parent, even though the API accepts lists).
 struct KanbanParentPickerSheet: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var store: KanbanStore
     @Environment(\.dismiss) private var dismiss
     @Binding var selectedParentID: String?
@@ -809,7 +813,7 @@ struct KanbanParentPickerSheet: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            .searchable(text: $query, prompt: "Search tasks")
+            .searchable(text: $query, prompt: AppLocalization.string("Search tasks"))
             .navigationTitle("Parent task")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

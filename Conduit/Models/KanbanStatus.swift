@@ -58,30 +58,30 @@ struct KanbanStatusPresentation: Equatable, Identifiable {
     static func forStatus(_ rawValue: String) -> KanbanStatusPresentation {
         switch rawValue {
         case "triage":
-            return .init(rawValue: rawValue, displayName: "Triage", systemImage: "tray", tint: .secondary, sortOrder: 0, isVisibleOnBoard: true, isManuallySelectable: true, isTaskCreatable: true, isBackendControlled: false)
+            return .init(rawValue: rawValue, displayName: AppLocalization.string("Triage"), systemImage: "tray", tint: .secondary, sortOrder: 0, isVisibleOnBoard: true, isManuallySelectable: true, isTaskCreatable: true, isBackendControlled: false)
         case "todo":
-            return .init(rawValue: rawValue, displayName: "To Do", systemImage: "circle", tint: .secondary, sortOrder: 1, isVisibleOnBoard: true, isManuallySelectable: true, isTaskCreatable: true, isBackendControlled: false)
+            return .init(rawValue: rawValue, displayName: AppLocalization.string("To Do"), systemImage: "circle", tint: .secondary, sortOrder: 1, isVisibleOnBoard: true, isManuallySelectable: true, isTaskCreatable: true, isBackendControlled: false)
         case "scheduled":
             // Locked upstream: needs a wake-up time only an agent/CLI attaches;
             // a bare status set is refused with a 409.
-            return .init(rawValue: rawValue, displayName: "Scheduled", systemImage: "clock", tint: .purple, sortOrder: 2, isVisibleOnBoard: true, isManuallySelectable: false, isTaskCreatable: false, isBackendControlled: true)
+            return .init(rawValue: rawValue, displayName: AppLocalization.string("Scheduled"), systemImage: "clock", tint: .purple, sortOrder: 2, isVisibleOnBoard: true, isManuallySelectable: false, isTaskCreatable: false, isBackendControlled: true)
         case "ready":
-            return .init(rawValue: rawValue, displayName: "Ready", systemImage: "play.circle", tint: .blue, sortOrder: 3, isVisibleOnBoard: true, isManuallySelectable: true, isTaskCreatable: true, isBackendControlled: false)
+            return .init(rawValue: rawValue, displayName: AppLocalization.string("Ready"), systemImage: "play.circle", tint: .blue, sortOrder: 3, isVisibleOnBoard: true, isManuallySelectable: true, isTaskCreatable: true, isBackendControlled: false)
         case "running":
-            return .init(rawValue: rawValue, displayName: "Running", systemImage: "arrow.triangle.2.circlepath", tint: .green, sortOrder: 4, isVisibleOnBoard: true, isManuallySelectable: false, isTaskCreatable: false, isBackendControlled: true)
+            return .init(rawValue: rawValue, displayName: AppLocalization.string("Running"), systemImage: "arrow.triangle.2.circlepath", tint: .green, sortOrder: 4, isVisibleOnBoard: true, isManuallySelectable: false, isTaskCreatable: false, isBackendControlled: true)
         case "blocked":
-            return .init(rawValue: rawValue, displayName: "Blocked", systemImage: "exclamationmark.octagon", tint: .red, sortOrder: 5, isVisibleOnBoard: true, isManuallySelectable: true, isTaskCreatable: true, isBackendControlled: false)
+            return .init(rawValue: rawValue, displayName: AppLocalization.string("Blocked"), systemImage: "exclamationmark.octagon", tint: .red, sortOrder: 5, isVisibleOnBoard: true, isManuallySelectable: true, isTaskCreatable: true, isBackendControlled: false)
         case "review":
             // Locked upstream: entered/exited through the dispatcher's claim
             // path, not by arbitrary status assignment.
-            return .init(rawValue: rawValue, displayName: "Review", systemImage: "eye", tint: .orange, sortOrder: 6, isVisibleOnBoard: true, isManuallySelectable: false, isTaskCreatable: false, isBackendControlled: true)
+            return .init(rawValue: rawValue, displayName: AppLocalization.string("Review"), systemImage: "eye", tint: .orange, sortOrder: 6, isVisibleOnBoard: true, isManuallySelectable: false, isTaskCreatable: false, isBackendControlled: true)
         case "done":
-            return .init(rawValue: rawValue, displayName: "Done", systemImage: "checkmark.circle", tint: .secondary, sortOrder: 7, isVisibleOnBoard: true, isManuallySelectable: true, isTaskCreatable: true, isBackendControlled: false)
+            return .init(rawValue: rawValue, displayName: AppLocalization.string("Done"), systemImage: "checkmark.circle", tint: .secondary, sortOrder: 7, isVisibleOnBoard: true, isManuallySelectable: true, isTaskCreatable: true, isBackendControlled: false)
         case "archived":
-            return .init(rawValue: rawValue, displayName: "Archived", systemImage: "archivebox", tint: .secondary, sortOrder: 8, isVisibleOnBoard: true, isManuallySelectable: true, isTaskCreatable: false, isBackendControlled: false)
+            return .init(rawValue: rawValue, displayName: AppLocalization.string("Archived"), systemImage: "archivebox", tint: .secondary, sortOrder: 8, isVisibleOnBoard: true, isManuallySelectable: true, isTaskCreatable: false, isBackendControlled: false)
         default:
             let name = rawValue.replacingOccurrences(of: "_", with: " ").capitalized
-            return .init(rawValue: rawValue, displayName: name.isEmpty ? "Other" : name, systemImage: "circle.dashed", tint: .secondary, sortOrder: 100, isVisibleOnBoard: true, isManuallySelectable: false, isTaskCreatable: false, isBackendControlled: true)
+            return .init(rawValue: rawValue, displayName: name.isEmpty ? AppLocalization.string("Other") : name, systemImage: "circle.dashed", tint: .secondary, sortOrder: 100, isVisibleOnBoard: true, isManuallySelectable: false, isTaskCreatable: false, isBackendControlled: true)
         }
     }
 
