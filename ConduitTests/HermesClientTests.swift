@@ -885,6 +885,44 @@ final class HermesClientTests: XCTestCase {
         client.disconnect()
     }
 
+    func testSessionCompressResultRejectsOutOfRangeAndInexactRemoved() {
+        // `Int(Double)` traps outside the Int64 range — `removed` is
+        // gateway-authored, so an out-of-range payload must degrade to nil,
+        // never crash the client.
+        let outOfRange = SessionCompressResult(from: .object([
+            "status": .string("compressed"),
+            "removed": .number(1e300)
+        ]))
+        XCTAssertNil(outOfRange.removed)
+
+        let justOverMax = SessionCompressResult(from: .object([
+            "removed": .number(9_223_372_036_854_775_808.0) // 2^63 exactly
+        ]))
+        XCTAssertNil(justOverMax.removed)
+
+        // Non-integer doubles are rejected too: only exact whole values
+        // convert.
+        let nonInteger = SessionCompressResult(from: .object([
+            "removed": .number(2.5)
+        ]))
+        XCTAssertNil(nonInteger.removed)
+
+        // Exact in-range values still convert, including both Int64 edges:
+        // -2^63 converts to Int.min, and the largest admitted Double
+        // (2^63 − 1024, the spacing at that magnitude) converts to
+        // Int.max − 1023.
+        let whole = SessionCompressResult(from: .object(["removed": .number(9)]))
+        XCTAssertEqual(whole.removed, 9)
+        let minBound = SessionCompressResult(from: .object([
+            "removed": .number(-9_223_372_036_854_775_808.0) // -2^63 == Int.min
+        ]))
+        XCTAssertEqual(minBound.removed, Int.min)
+        let maxEdge = SessionCompressResult(from: .object([
+            "removed": .number(9_223_372_036_854_775_808.0 - 1024.0)
+        ]))
+        XCTAssertEqual(maxEdge.removed, Int.max - 1023)
+    }
+
     func testMissingRPCMethodClassificationMirrorsUpstream() {
         // The gateway answers unknown methods with JSON-RPC -32601
         // ("unknown method: …", tui_gateway/server.py).

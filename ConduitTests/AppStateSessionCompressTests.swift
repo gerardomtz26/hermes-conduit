@@ -497,7 +497,115 @@ final class AppStateSessionCompressTests: XCTestCase {
         )
     }
 
+    // MARK: - Persisted-history rehydration
+
+    func testCompressionRehydratesWindowFromFreshOffsetZeroResponse() async throws {
+        // Compression rewrites the persisted history server-side: the
+        // window's nextOffset describes offsets into the OLD row universe.
+        // After each adoption the invariants must come from the FRESH
+        // offset=0 hydration response — a pre-compression nextOffset must
+        // never survive.
+        var page = Self.persistedPagePayload(rowIDs: ["row-1", "row-2", "row-3"], limit: 3)
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            persistedTranscript: { _, _ in
+                .payload(page)
+            },
+            compressSession: { _, _, _ in
+                Self.compressedResult()
+            }
+        ))
+        installComposerClient(in: harness)
+        let origin = session("composer-origin")
+        harness.appState.sessions = [origin]
+        harness.appState.activeSessionId = origin.id
+
+        let firstSubmitted = await harness.appState.submitComposer(text: "/compress")
+        XCTAssertTrue(firstSubmitted)
+        var window = try XCTUnwrap(harness.appState.persistedTranscriptWindow)
+        XCTAssertEqual(window.nextOffset, 3)
+        XCTAssertEqual(window.canLoadEarlier, true)
+        XCTAssertTrue(harness.appState.canLoadEarlierMessagesForActiveConversation)
+
+        // Compress again: the gateway's persisted history changed, and the
+        // hydration now answers with a different (shorter) page. The stale
+        // nextOffset 3 must be gone.
+        page = Self.persistedPagePayload(rowIDs: ["row-4"], limit: 3)
+        let secondSubmitted = await harness.appState.submitComposer(text: "/compress")
+        XCTAssertTrue(secondSubmitted)
+        window = try XCTUnwrap(harness.appState.persistedTranscriptWindow)
+        XCTAssertEqual(
+            window.nextOffset, 1,
+            "The pre-compression nextOffset (3) must not survive compression; coverage is rebuilt from the fresh hydration"
+        )
+        XCTAssertEqual(window.canLoadEarlier, false, "A short page retires the backfill affordance")
+        XCTAssertFalse(harness.appState.canLoadEarlierMessagesForActiveConversation)
+    }
+
+    func testFailedRehydrationLeavesBackfillDisabled() async throws {
+        var hydrationCalls = 0
+        let goodPage = Self.persistedPagePayload(rowIDs: ["row-1", "row-2", "row-3"], limit: 3)
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            persistedTranscript: { _, _ in
+                hydrationCalls += 1
+                if hydrationCalls == 1 {
+                    return .payload(goodPage)
+                }
+                return .failed(URLError(.networkConnectionLost))
+            },
+            compressSession: { _, _, _ in
+                Self.compressedResult()
+            }
+        ))
+        installComposerClient(in: harness)
+        let origin = session("composer-origin")
+        harness.appState.sessions = [origin]
+        harness.appState.activeSessionId = origin.id
+
+        let firstSubmitted = await harness.appState.submitComposer(text: "/compress")
+        XCTAssertTrue(firstSubmitted)
+        let window = try XCTUnwrap(harness.appState.persistedTranscriptWindow)
+        XCTAssertEqual(window.nextOffset, 3)
+        XCTAssertTrue(harness.appState.canLoadEarlierMessagesForActiveConversation)
+
+        // The rehydration fails after this adoption: the invalidated window
+        // must NOT be resurrected from the stale pre-compression state, and
+        // backfill stays disabled until the next authoritative sync.
+        let secondSubmitted = await harness.appState.submitComposer(text: "/compress")
+        XCTAssertTrue(secondSubmitted)
+        XCTAssertNil(
+            harness.appState.persistedTranscriptWindow,
+            "A failed rehydration must leave the window invalidated, not fall back to the stale one"
+        )
+        XCTAssertFalse(harness.appState.canLoadEarlierMessagesForActiveConversation)
+    }
+
     // MARK: - Fixtures
+
+    /// A validated `order=latest` persisted-history page the `persistedTranscript`
+    /// seam serves for the origin conversation: durable row ids, session echo,
+    /// and a pagination echo honoring the tail contract.
+    private static func persistedPagePayload(
+        rowIDs: [String],
+        limit: Int
+    ) -> [String: Any] {
+        [
+            "session_id": "composer-origin",
+            "messages": rowIDs.map { id in
+                [
+                    "id": id,
+                    "role": "user",
+                    "content": "Persisted \(id)",
+                    "timestamp": "2026-09-13T09:00:00Z"
+                ] as [String: Any]
+            },
+            "pagination": [
+                "order": "latest",
+                "limit": limit,
+                "offset": 0,
+                "returned": rowIDs.count
+            ] as [String: Any]
+        ]
+    }
 
     private static func compressedResult() -> SessionCompressResult {
         SessionCompressResult(from: .object([

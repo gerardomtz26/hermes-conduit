@@ -9564,7 +9564,22 @@ final class AppState: ObservableObject {
                 )
             }
             guard isCurrentComposerSubmission(context) else { return }
-            applySessionCompressionResult(result, sessionID: sessionID, context: context)
+            let disposition = applySessionCompressionResult(result, sessionID: sessionID, context: context)
+            if disposition == .adopted {
+                // Fence: a reconcile whose transcript fetch resolved before
+                // the server-side compression committed would otherwise
+                // write pre-compression rows and offsets over the freshly
+                // re-established invariants. Rotating the token makes every
+                // reconcile that predates the compression fail its
+                // commit-time ownership check; reconciles that start after
+                // this point fetch post-compression state and legitimately
+                // own the fence.
+                reconciliationToken = UUID()
+                await reestablishPersistedHistoryAfterCompression(
+                    requestedSessionID: sessionID,
+                    context: context
+                )
+            }
         } catch {
             guard isCurrentComposerSubmission(context) else { return }
             if HermesClient.isMissingRPCMethod(error) {
@@ -9623,11 +9638,21 @@ final class AppState: ObservableObject {
         }
     }
 
+    /// What the compression result did to the visible transcript — the
+    /// caller re-establishes persisted-history invariants only after an
+    /// adoption actually replaced it.
+    private enum CompressionTranscriptDisposition {
+        case adopted
+        /// A turn started while the RPC was in flight; adoption was deferred.
+        case deferred
+        case untouched
+    }
+
     private func applySessionCompressionResult(
         _ result: SessionCompressResult,
         sessionID: String,
         context: ComposerSubmissionContext
-    ) {
+    ) -> CompressionTranscriptDisposition {
         if result.lockHeld {
             // Another compression — this device, another client, or an
             // automatic one — already holds the compression lock. Not an
@@ -9636,7 +9661,7 @@ final class AppState: ObservableObject {
                 result.message ?? "Compression is already in progress.",
                 context: context
             )
-            return
+            return .untouched
         }
         if result.isPending {
             // The gateway's bounded compute-host wait expired while the host
@@ -9647,12 +9672,12 @@ final class AppState: ObservableObject {
                 result.message ?? "Compression continues in the background; the transcript will refresh when it finishes.",
                 context: context
             )
-            return
+            return .untouched
         }
         let record = Self.compressionRecord(for: result)
         guard result.hasMessagesPayload else {
             appendSlashOutput(record, context: context)
-            return
+            return .untouched
         }
         // Upstream Desktop adopts the returned transcript whenever the
         // `messages` array is present — including an aborted compression,
@@ -9667,10 +9692,11 @@ final class AppState: ObservableObject {
         if turnState == .running || locallyOwnedInFlightTurn != nil {
             transcriptFreshnessIsStale = true
             appendSlashOutput(record, context: context)
-            return
+            return .deferred
         }
         adoptCompressedTranscript(result.messages, sessionID: sessionID)
         appendSlashOutput(record, context: context)
+        return .adopted
     }
 
     /// The chat record a finished compression leaves behind: summary lines on
@@ -9731,8 +9757,83 @@ final class AppState: ObservableObject {
         transcriptFreshnessIsStale = false
         locallyOwnedInFlightTurn = nil
         pendingLocalOrderingDebt = nil
+        // Compression rewrote the persisted history server-side: window
+        // offsets, durable-row provenance, and the ordering frontier from
+        // BEFORE the compression describe history that no longer exists.
+        // They are re-established only from a fresh validated offset=0
+        // hydration (reestablishPersistedHistoryAfterCompression); until
+        // that succeeds, backfill stays disabled.
+        persistedTranscriptWindow = nil
+        durablePersistedRowIDs = []
+        persistedOrderingFrontier = PersistedOrderingFrontier()
         noteChatViewportTranscriptReplacement()
         cacheMessagePresentation()
+    }
+
+    /// Re-establishes the persisted-history invariants the compression
+    /// adoption invalidated. The only trustworthy source is a fresh
+    /// validated `order=latest offset=0` hydration — the same bounded read
+    /// the resume path performs — so the window's next offset, the durable
+    /// row provenance, and the ordering frontier are rebuilt from that
+    /// response alone. A stale pre-compression nextOffset must never
+    /// survive: the compressed history's offsets count from a different
+    /// row universe. If the hydration fails (or no history source exists),
+    /// the window stays nil and "Load earlier messages" stays disabled
+    /// until the next authoritative resume/reconcile rebuilds it.
+    private func reestablishPersistedHistoryAfterCompression(
+        requestedSessionID: String,
+        context: ComposerSubmissionContext
+    ) async {
+        guard isCurrentComposerSubmission(context) else { return }
+        let profile = activeProfile
+        let outcome = await persistedTranscriptOutcome(
+            sessionId: requestedSessionID,
+            profile: profile,
+            using: dashboardTicketBridge
+        )
+        guard isCurrentComposerSubmission(context) else { return }
+        let transcript: PersistedSessionTranscript
+        switch outcome {
+        case .hydrated(let hydrated):
+            transcript = hydrated
+        case .unavailable:
+            sessionCatalogLog.debug("No persisted-history source after /compress; backfill stays disabled for \(requestedSessionID, privacy: .public)")
+            return
+        case .failed(let error):
+            sessionCatalogLog.notice("Persisted-history rehydration after /compress failed; backfill stays disabled until the next sync: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        // Identity gate, same rule as the resume path: a response the
+        // backend addressed to another conversation must not seed this
+        // conversation's ordering evidence.
+        guard transcriptMatchesSession(
+            transcript,
+            requestedSessionId: requestedSessionID,
+            resumedSessionId: requestedSessionID
+        ) else {
+            sessionCatalogLog.debug("Persisted-history page after /compress addressed to another conversation; backfill stays disabled for \(requestedSessionID, privacy: .public)")
+            return
+        }
+        persistedOrderingFrontier = Self.orderingFrontier(from: transcript)
+        durablePersistedRowIDs = transcript.durableRowIDs
+        if let page = transcript.page, page.honorsTailContract {
+            persistedTranscriptWindow = PersistedTranscriptWindowState(
+                requestedSessionID: requestedSessionID,
+                profile: profile,
+                pageSize: PersistedTranscriptPagination.pageSize,
+                resolvedSessionID: transcript.resolvedSessionId,
+                // No resume transaction ran, so the window vouches for the
+                // requested + resolved identities only.
+                runtimeSessionID: nil,
+                nextOffset: page.rawReturned,
+                canLoadEarlier: page.mayHaveOlderRows(fetchedRowCount: page.rawReturned),
+                hasBackfilledPrefix: false
+            )
+        } else {
+            // Legacy one-shot hydration: the whole persisted history is on
+            // screen; no older page exists to fetch.
+            persistedTranscriptWindow = nil
+        }
     }
 
     private func steer(

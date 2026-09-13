@@ -332,6 +332,21 @@ struct SessionCompressResult {
     var isPending: Bool { status == .pending }
     var isAborted: Bool { status == .aborted || summaryAborted }
 
+    /// Non-trapping exact `Int` extraction. `Int(Double)` traps outside the
+    /// Int64 range, and `removed` is gateway-authored — a hostile or buggy
+    /// payload must degrade to "unknown", never crash the client. Non-integer
+    /// doubles are likewise rejected: only exact whole values convert.
+    private static func exactIntValue(_ value: AnyCodable?) -> Int? {
+        guard case .number(let n)? = value else { return nil }
+        guard n.isFinite,
+              n >= -9_223_372_036_854_775_808.0, // Int.min == -2^63, exact as Double
+              n < 9_223_372_036_854_775_808.0,   // 2^63 itself already overflows
+              n == n.rounded(.towardZero) else {
+            return nil
+        }
+        return Int(n)
+    }
+
     init(from result: AnyCodable) {
         let object = result.objectValue ?? [:]
         switch object["status"]?.stringValue?.lowercased() {
@@ -342,7 +357,7 @@ struct SessionCompressResult {
         }
         lockHeld = object["lock_held"]?.boolValue == true
         message = object["message"]?.stringValue
-        removed = object["removed"]?.intValue
+        removed = Self.exactIntValue(object["removed"])
         hasMessagesPayload = object["messages"]?.arrayValue != nil
         messages = MessageNormalizer.normalizeMessages(object["messages"]?.arrayValue ?? [])
         let summary = object["summary"]?.objectValue ?? [:]
@@ -1374,7 +1389,6 @@ final class HermesClient: ObservableObject {
             message = rpcError.message
         } else {
             message = (error as? LocalizedError)?.errorDescription
-                ?? (error as? CustomStringConvertible)?.description
                 ?? String(describing: error)
         }
         return matchesMissingMethodPattern(message)
