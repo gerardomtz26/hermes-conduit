@@ -7382,7 +7382,39 @@ final class AppState: ObservableObject {
     /// Routes a notification to its originating profile/session without
     /// allowing the ordinary cold-start session restoration to win first.
     func openNotificationTarget(_ target: ConduitNotificationTarget) async -> Bool {
-        guard connection != nil else { return false }
+        // Dashboard ownership gate (#148 / B3): a push from dashboard A is
+        // never processed against active dashboard B, even when profile,
+        // session, and request ids all collide. A push belonging to another
+        // KNOWN dashboard switches to it first — the decision card is
+        // recorded only after the owning dashboard is active, so it can
+        // never land in the outgoing dashboard's state. Unknown or unscoped
+        // identities fail closed.
+        switch NotificationDashboardOwnership.resolve(
+            targetDashboardID: target.dashboardID,
+            hasMalformedDashboardID: target.hasMalformedDashboardID,
+            activeDashboardID: activeDashboardID,
+            savedDashboardIDs: savedDashboardRegistry.dashboards.map(\.id)
+        ) {
+        case .route:
+            guard connection != nil else { return false }
+        case .switchFirst(let dashboardID):
+            await switchDashboard(to: dashboardID)
+            guard isConnected, activeDashboardID == dashboardID, client != nil else {
+                // The switch failed: the target stays selected with its
+                // sign-in/repair surface, and the notification routes
+                // nowhere. No other dashboard is auto-connected.
+                errorMessage = AppLocalization.string("Could not connect to that dashboard to open this notification.")
+                return false
+            }
+        case .failClosed(let failure):
+            switch failure {
+            case .unrecognizedDashboard:
+                errorMessage = AppLocalization.string("This notification belongs to a dashboard this device doesn't recognize. Add that dashboard again to continue.")
+            case .unscopedPush:
+                errorMessage = AppLocalization.string("This notification predates multi-dashboard pairing. Update the notifier on the sending gateway and pair it again to continue.")
+            }
+            return false
+        }
         let notificationAttemptID = UUID()
         activeNotificationOpenAttemptID = notificationAttemptID
         isOpeningNotificationSession = true

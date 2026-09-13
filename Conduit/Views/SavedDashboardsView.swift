@@ -64,7 +64,7 @@ struct SavedDashboardsSettingsDetail: View {
                 get: { pendingRemoval != nil },
                 set: { if !$0 { pendingRemoval = nil } }
             ),
-            titleVisibility: .visible
+            titleVisibility: Visibility.visible
         ) {
             Button(AppLocalization.string("Remove Dashboard"), role: .destructive) {
                 if let row = pendingRemoval {

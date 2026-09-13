@@ -3223,6 +3223,16 @@
         }
       }
     },
+    "Could not connect to that dashboard to open this notification." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法连接该仪表板，无法打开此通知。"
+          }
+        }
+      }
+    },
     "Could not create the project: %@" : {
       "localizations" : {
         "zh-Hans" : {
@@ -6205,6 +6215,16 @@
         }
       }
     },
+    "Install the notifier once on each gateway, then create a short-lived pairing code here for each Hermes dashboard you want to reach." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在每个网关上安装一次 notifier，然后在此为你要通知的每个 Hermes 仪表板创建短期配对码。"
+          }
+        }
+      }
+    },
     "Install the notifier once on the gateway, then create a short-lived pairing code here for each Hermes profile you want to reach." : {
       "localizations" : {
         "zh-Hans" : {
@@ -8675,6 +8695,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "输出"
+          }
+        }
+      }
+    },
+    "Pair the active dashboard" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "配对当前仪表板"
           }
         }
       }
@@ -11895,6 +11925,26 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "此仪表板已保存的登录信息和 Cookie 将从此设备删除。其他仪表板不受影响。"
+          }
+        }
+      }
+    },
+    "This notification belongs to a dashboard this device doesn't recognize. Add that dashboard again to continue." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此通知属于此设备无法识别的仪表板。请重新添加该仪表板后继续。"
+          }
+        }
+      }
+    },
+    "This notification predates multi-dashboard pairing. Update the notifier on the sending gateway and pair it again to continue." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此通知早于多仪表板配对。请在发送通知的网关上更新 notifier 并重新配对后继续。"
           }
         }
       }

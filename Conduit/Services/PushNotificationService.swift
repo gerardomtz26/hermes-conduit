@@ -14,26 +14,88 @@ struct ConduitNotificationTarget: Equatable, Identifiable {
     /// to alias resolution — never to reinterpreting the runtime id as
     /// durable.
     let durableSessionID: String?
+    /// The opaque Conduit dashboard UUID the relay stamped onto the push
+    /// (multi-server routing, #148). Nil for pre-dashboard relays and
+    /// gateways.
+    let dashboardID: UUID?
+    /// The payload carried a `dashboard_id` that is not a valid UUID. That
+    /// identity cannot be matched to any saved dashboard, so routing must
+    /// fail closed instead of degrading to the legacy unscoped route.
+    let hasMalformedDashboardID: Bool
     let type: String?
     /// Structured decision content carried alongside a decision notification.
     /// Lets Conduit render an answerable card from the push payload alone when
     /// the one-shot gateway stream event was missed while the app was
     /// backgrounded. Nil for non-decision notifications.
     let decision: PendingDecisionPayload?
-    var id: String { "\(profile ?? "default"):\(sessionId):\(type ?? "")" }
+    var id: String { "\(dashboardID?.uuidString ?? "none"):\(profile ?? "default"):\(sessionId):\(type ?? "")" }
 
     init(
         profile: String?,
         sessionId: String,
         durableSessionID: String? = nil,
+        dashboardID: UUID? = nil,
+        hasMalformedDashboardID: Bool = false,
         type: String?,
         decision: PendingDecisionPayload? = nil
     ) {
         self.profile = profile
         self.sessionId = sessionId
         self.durableSessionID = durableSessionID
+        self.dashboardID = dashboardID
+        self.hasMalformedDashboardID = hasMalformedDashboardID
         self.type = type
         self.decision = decision
+    }
+}
+
+/// Dashboard ownership gate for push routing (#148 / B3): a push originating
+/// from dashboard A must never be processed against active dashboard B, even
+/// when profile, session, and request ids all collide. Resolution is pure so
+/// the collision matrix is exhaustively testable.
+@MainActor
+enum NotificationDashboardOwnership {
+    enum Failure: Equatable {
+        /// The payload named a dashboard UUID (valid or malformed) that no
+        /// saved dashboard claims.
+        case unrecognizedDashboard
+        /// The payload carries no dashboard identity and more than one
+        /// dashboard is saved: ownership cannot be established without
+        /// guessing, so it fails closed.
+        case unscopedPush
+    }
+
+    enum Outcome: Equatable {
+        /// The push belongs to the active dashboard (or is a legacy unscoped
+        /// push with at most one saved dashboard): route normally.
+        case route
+        /// The push belongs to another KNOWN saved dashboard: switch/connect
+        /// that dashboard first; only after it is active may the decision be
+        /// recorded or the session opened.
+        case switchFirst(dashboardID: UUID)
+        /// Ownership cannot be established: never open, never record.
+        case failClosed(Failure)
+    }
+
+    static func resolve(
+        targetDashboardID: UUID?,
+        hasMalformedDashboardID: Bool,
+        activeDashboardID: UUID?,
+        savedDashboardIDs: [UUID]
+    ) -> Outcome {
+        if hasMalformedDashboardID {
+            return .failClosed(.unrecognizedDashboard)
+        }
+        if let id = targetDashboardID {
+            if id == activeDashboardID { return .route }
+            if savedDashboardIDs.contains(id) { return .switchFirst(dashboardID: id) }
+            return .failClosed(.unrecognizedDashboard)
+        }
+        // Legacy push without a dashboard identity: retain single-dashboard
+        // compatibility, but never guess between several saved dashboards.
+        return savedDashboardIDs.count <= 1
+            ? .route
+            : .failClosed(.unscopedPush)
     }
 }
 
@@ -68,6 +130,11 @@ struct RelayMetaInfo: Decodable, Equatable {
         let pluginVersion: String?
         let pluginCapabilities: [String]
         let lastEventAt: String?
+        /// The opaque Conduit dashboard UUID this gateway's pairing is bound
+        /// to (#148). Nil for gateways paired through a pre-dashboard relay —
+        /// their pushes arrive unscoped and routing applies the legacy
+        /// single-dashboard compatibility rule.
+        let dashboardID: String?
 
         var supportsApprovalCards: Bool { pluginCapabilities.contains("approval-decisions") }
         var supportsClarifyCards: Bool { pluginCapabilities.contains("clarify-loop") }
@@ -84,6 +151,7 @@ struct RelayMetaInfo: Decodable, Equatable {
             case pluginVersion = "plugin_version"
             case pluginCapabilities = "plugin_capabilities"
             case lastEventAt = "last_event_at"
+            case dashboardID = "dashboard_id"
         }
     }
 
@@ -565,7 +633,7 @@ final class PushNotificationService: ObservableObject {
         }
     }
 
-    func createPairingCode() async {
+    func createPairingCode(dashboardID: UUID?) async {
         pairingCode = nil
         pairingExpiry = nil
         lastError = nil
@@ -581,6 +649,14 @@ final class PushNotificationService: ObservableObject {
                 credential: registration.credential
             )
             request.httpMethod = "POST"
+            // Bind the pairing to the active dashboard (#148): the relay
+            // persists this UUID at claim time, and every later push derived
+            // from that gateway credential is stamped with it. Older relays
+            // ignore the body, which keeps pre-dashboard relays working.
+            if let dashboardID {
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try JSONEncoder().encode(PairingCreateRequest(dashboardID: dashboardID.uuidString))
+            }
             let (data, response) = try await URLSession.shared.data(for: request)
             try validate(response: response, data: data)
             let pairing = try JSONDecoder().decode(PairingResponse.self, from: data)
@@ -607,7 +683,7 @@ final class PushNotificationService: ObservableObject {
     }
 
     func receiveNotificationPayload(_ userInfo: [AnyHashable: Any]) {
-        guard let target = notificationTarget(from: userInfo) else { return }
+        guard let target = Self.parseNotificationTarget(from: userInfo) else { return }
         navigationRetryTask?.cancel()
         navigationRetryTask = nil
         pendingTarget = target
@@ -643,7 +719,10 @@ final class PushNotificationService: ObservableObject {
         return true
     }
 
-    private func notificationTarget(from userInfo: [AnyHashable: Any]) -> ConduitNotificationTarget? {
+    /// Parses the routing payload into a notification target. Static and
+    /// internal so the dashboard-identity parsing rules are testable without
+    /// the singleton's registration state.
+    static func parseNotificationTarget(from userInfo: [AnyHashable: Any]) -> ConduitNotificationTarget? {
         let direct = userInfo["conduit"] as? [String: Any]
         let nested = (userInfo["body"] as? [String: Any])?["conduit"] as? [String: Any]
         // The relay's optimized APNs layout keeps the structured decision
@@ -665,10 +744,32 @@ final class PushNotificationService: ObservableObject {
         let durableSessionID = Self.routingDurableSessionID(from: payload)
         let profile = (payload["profile"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let type = (payload["type"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        // The relay stamps `dashboard_id` (an opaque Conduit dashboard UUID)
+        // from the authenticated gateway's pairing binding. A malformed value
+        // is preserved as its own failure mode: it must fail closed, never
+        // degrade to the legacy unscoped route.
+        let rawDashboardID = (payload["dashboard_id"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasMalformedDashboardID: Bool
+        let dashboardID: UUID?
+        if let rawDashboardID, !rawDashboardID.isEmpty {
+            if let uuid = UUID(uuidString: rawDashboardID) {
+                dashboardID = uuid
+                hasMalformedDashboardID = false
+            } else {
+                dashboardID = nil
+                hasMalformedDashboardID = true
+            }
+        } else {
+            dashboardID = nil
+            hasMalformedDashboardID = false
+        }
         return ConduitNotificationTarget(
             profile: profile?.isEmpty == false ? profile : nil,
             sessionId: sessionId,
             durableSessionID: durableSessionID,
+            dashboardID: dashboardID,
+            hasMalformedDashboardID: hasMalformedDashboardID,
             type: type?.isEmpty == false ? type : nil,
             decision: pendingDecision(from: payload)
         )
@@ -697,7 +798,7 @@ final class PushNotificationService: ObservableObject {
     /// requires a session key to answer, a description to display, and at
     /// least one usable choice — otherwise a cached card could render the
     /// approval view's default action set, which the payload never promised.
-    private func pendingDecision(from payload: [String: Any]) -> PendingDecisionPayload? {
+    private static func pendingDecision(from payload: [String: Any]) -> PendingDecisionPayload? {
         guard let decision = payload["decision"] as? [String: Any],
               let kind = (decision["kind"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
               !kind.isEmpty else {
@@ -876,6 +977,11 @@ private struct RegistrationResponse: Decodable {
     struct Installation: Decodable { let id: String; let preferences: ConduitNotificationPreferences? }
     let credential: String
     let installation: Installation
+}
+
+private struct PairingCreateRequest: Encodable {
+    let dashboardID: String
+    enum CodingKeys: String, CodingKey { case dashboardID = "dashboard_id" }
 }
 
 private struct PairingResponse: Decodable {

@@ -1629,6 +1629,7 @@ private struct AppearanceSettingsDetail: View {
 private struct NotificationsSettingsDetail: View {
     @ObservedObject var appLanguage = AppLanguageStore.shared
     @ObservedObject private var notifications = PushNotificationService.shared
+    @EnvironmentObject private var appState: AppState
     @AppStorage("conduit.relayURL") private var customRelayURL: String = ""
 
     var body: some View {
@@ -1733,14 +1734,18 @@ private struct NotificationsSettingsDetail: View {
                 .task { await notifications.refreshMeta() }
 
                 ConduitSettingsSection(title: AppLocalization.string("Connect a Hermes profile"), symbol: "link.badge.plus", tint: .conduitAura) {
-                    Text("Install the notifier once on the gateway, then create a short-lived pairing code here for each Hermes profile you want to reach.")
+                    Text("Install the notifier once on each gateway, then create a short-lived pairing code here for each Hermes dashboard you want to reach.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                     NotificationSetupCommand(step: 1, title: AppLocalization.string("Install the notifier"), command: "hermes plugins install kaishi00/hermes-conduit-notifier --enable")
                     NotificationSetupCommand(step: 2, title: AppLocalization.string("Restart the gateway"), command: "hermes gateway restart")
                     Button {
                         Task {
-                            await notifications.createPairingCode()
+                            // Pairings are bound to the active dashboard
+                            // (#148): pushes from the claimed gateway are
+                            // stamped with its identity, so server A can
+                            // never act against server B.
+                            await notifications.createPairingCode(dashboardID: appState.activeDashboardID)
                             notifications.pairingCode == nil ? Haptics.error() : Haptics.success()
                         }
                     } label: {
@@ -1752,7 +1757,7 @@ private struct NotificationsSettingsDetail: View {
                     .conduitGlassControl(cornerRadius: 16, tint: .conduitAccent.opacity(0.16))
 
                     if let code = notifications.pairingCode {
-                        NotificationSetupCommand(step: 3, title: AppLocalization.string("Pair the active profile"), command: "hermes conduit-push pair \(code)")
+                        NotificationSetupCommand(step: 3, title: AppLocalization.string("Pair the active dashboard"), command: "hermes conduit-push pair \(code)")
                         if let expiry = notifications.pairingExpiry {
                             Text("This code expires \(expiry).")
                                 .font(.caption)
@@ -1946,7 +1951,7 @@ private struct AboutSettingsDetail: View {
 
 }
 
-private struct SettingsDetailContainer<Content: View>: View {
+struct SettingsDetailContainer<Content: View>: View {
     var compact = false
     @ViewBuilder let content: Content
     var body: some View {
