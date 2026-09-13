@@ -273,7 +273,7 @@ struct SessionList: View {
                     ContentUnavailableView(
                         selectedSource == nil ? AppLocalization.string("No Sessions") : AppLocalization.string("No \(selectedSource!.label) Sessions"),
                         systemImage: "tray",
-                        description: Text(searchText.isEmpty ? "Sessions will appear here once created." : "Try a different search.")
+                        description: Text(searchText.isEmpty ? AppLocalization.string("Sessions will appear here once created.") : AppLocalization.string("Try a different search."))
                     )
                 }
 
@@ -382,8 +382,8 @@ struct SessionList: View {
                 searchText.isEmpty ? AppLocalization.string("No Projects") : AppLocalization.string("No Matching Projects"),
                 systemImage: "folder",
                 description: Text(searchText.isEmpty
-                    ? "Projects created in Hermes Desktop will appear here."
-                    : "Try a different search.")
+                    ? AppLocalization.string("Projects created in Hermes Desktop will appear here.")
+                    : AppLocalization.string("Try a different search."))
             )
         } else {
             Section("Projects") {
@@ -482,7 +482,7 @@ struct SessionList: View {
                 Haptics.light()
                 appState.toggleSessionPinned(session)
             } label: {
-                Label(appState.isSessionPinned(session) ? "Unpin" : "Pin", systemImage: appState.isSessionPinned(session) ? "pin.slash" : "pin")
+                Label(appState.isSessionPinned(session) ? AppLocalization.string("Unpin") : AppLocalization.string("Pin"), systemImage: appState.isSessionPinned(session) ? "pin.slash" : "pin")
             }
 
             Button {
@@ -507,7 +507,7 @@ struct SessionList: View {
                 Haptics.light()
                 appState.toggleSessionPinned(session)
             } label: {
-                Label(appState.isSessionPinned(session) ? "Unpin" : "Pin", systemImage: appState.isSessionPinned(session) ? "pin.slash" : "pin")
+                Label(appState.isSessionPinned(session) ? AppLocalization.string("Unpin") : AppLocalization.string("Pin"), systemImage: appState.isSessionPinned(session) ? "pin.slash" : "pin")
             }
             .tint(.conduitAccent)
         }
@@ -1122,7 +1122,7 @@ private struct CronJobRow: View {
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
-            Text(job.enabled ? "Active" : "Paused").font(.caption2.weight(.semibold)).foregroundStyle(job.enabled ? .green : .secondary)
+            Text(job.enabled ? AppLocalization.string("Active") : AppLocalization.string("Paused")).font(.caption2.weight(.semibold)).foregroundStyle(job.enabled ? .green : .secondary)
             Image(systemName: "chevron.right").font(.caption2.weight(.bold)).foregroundStyle(.tertiary)
         }
         .padding(.horizontal, 12).padding(.vertical, 10)

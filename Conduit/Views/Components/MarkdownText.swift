@@ -2168,7 +2168,7 @@ private struct MarkupPreviewSheet: View {
                 }
                     .frame(maxHeight: 96)
             }
-            .navigationTitle(preview.kind == .mermaid ? "Diagram" : "Formula")
+            .navigationTitle(preview.kind == .mermaid ? AppLocalization.string("Diagram") : AppLocalization.string("Formula"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
         }

@@ -472,7 +472,7 @@ struct KanbanTaskDetailView: View {
                     Text(assignee)
                         .lineLimit(1)
                 } else {
-                    Text(AppLocalization.string("Unassigned") + (displayedTask?.status == "ready" && hasDispatcherFallback ? " → default" : ""))
+                    Text(AppLocalization.string("Unassigned") + (displayedTask?.status == "ready" && hasDispatcherFallback ? " " + AppLocalization.string("→ default") : ""))
                         .foregroundStyle(.secondary)
                 }
                 Button {

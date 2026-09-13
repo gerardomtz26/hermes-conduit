@@ -663,7 +663,7 @@ private struct SpokenPhraseListEditor: View {
                 TextField(editingIndex == nil ? AppLocalization.string("Add a phrase") : AppLocalization.string("Edit phrase"), text: $draft)
                     .textFieldStyle(.roundedBorder)
                     .onSubmit(commitDraft)
-                    .accessibilityLabel(Text(editingIndex == nil ? "Add \(title)" : "Edit \(title)"))
+                    .accessibilityLabel(Text(editingIndex == nil ? AppLocalization.string("Add \(title)") : AppLocalization.string("Edit \(title)")))
                 Button(editingIndex == nil ? "Add" : "Save", action: commitDraft)
                     .disabled(draftCanonicalized.isEmpty)
             }
@@ -687,7 +687,7 @@ private struct SpokenPhraseListEditor: View {
                 Image(systemName: "pencil")
             }
             .buttonStyle(.borderless)
-            .accessibilityLabel(Text("Edit phrase \(phrase)"))
+            .accessibilityLabel(Text(AppLocalization.string("Edit phrase \(phrase)")))
             Button {
                 deletePhrase(phrase)
             } label: {

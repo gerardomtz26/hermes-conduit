@@ -585,8 +585,8 @@ struct ConnectionSetupView: View {
             .accessibilityIdentifier("setup.troubleshooting-picker")
 
             Text(topic == .tls
-                ? "Checks for HTTPS and certificate problems when connecting to your dashboard."
-                : "Checks for Cloudflare Access service-token problems when connecting to your dashboard.")
+                ? AppLocalization.string("Checks for HTTPS and certificate problems when connecting to your dashboard.")
+                : AppLocalization.string("Checks for Cloudflare Access service-token problems when connecting to your dashboard."))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

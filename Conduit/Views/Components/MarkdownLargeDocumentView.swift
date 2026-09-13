@@ -942,7 +942,7 @@ struct LargeCodeBlockView: View {
 
     private var header: some View {
         HStack {
-            Text(normalizedLanguage == "plain" ? "Code" : normalizedLanguage)
+            Text(normalizedLanguage == "plain" ? AppLocalization.string("Code") : normalizedLanguage)
                 .font(.caption2.monospaced().weight(.semibold))
                 .foregroundStyle(usesAccentSurface ? Color.white.opacity(0.86) : .secondary)
             Spacer()

@@ -51,8 +51,8 @@ struct ConnectionSetupForm: View {
             Text(flow.draft.methodTitle).font(.title2.weight(.semibold))
             if flow.draft.usesExistingAddress || flow.accessMethod == .reverseProxy {
                 Text(flow.draft.usesExistingAddress
-                     ? "Review or edit your current dashboard address, including its port and path."
-                     : "Paste the full HTTPS dashboard address Hermes supplied, including any port or path.")
+                     ? AppLocalization.string("Review or edit your current dashboard address, including its port and path.")
+                     : AppLocalization.string("Paste the full HTTPS dashboard address Hermes supplied, including any port or path."))
                     .foregroundStyle(.secondary)
                 labeled(AppLocalization.string("Dashboard address")) {
                     TextField("Dashboard address", text: fullURLBinding)
@@ -68,8 +68,8 @@ struct ConnectionSetupForm: View {
                 }.id(Field.url)
             } else {
                 Text(flow.accessMethod == .lan
-                     ? "Enter the local IP address and port Hermes gave you. You don’t need to type http://."
-                     : "Enter the Tailscale hostname or address Hermes gave you. Tailscale Serve hostnames use HTTPS; leave the port blank unless Hermes supplied one.")
+                     ? AppLocalization.string("Enter the local IP address and port Hermes gave you. You don’t need to type http://.")
+                     : AppLocalization.string("Enter the Tailscale hostname or address Hermes gave you. Tailscale Serve hostnames use HTTPS; leave the port blank unless Hermes supplied one."))
                     .foregroundStyle(.secondary)
                 labeled(flow.accessMethod == .lan ? AppLocalization.string("Private LAN IP address") : AppLocalization.string("Tailscale hostname / address")) {
                     TextField(flow.accessMethod == .lan ? AppLocalization.string("Local IP address") : AppLocalization.string("Tailscale host or address"), text: hostBinding)

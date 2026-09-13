@@ -97,54 +97,14 @@ EXEMPT_KEYS = frozenset({
     "skill-name",    # example placeholder token
 })
 
-# Dynamic sites the extractor cannot see (string literals on ternary
-# branches, variable-key lookups such as the config display-label table).
-# Each entry must exist in the catalog WITH a valid zh-Hans translation.
-# When adding a dynamic localizable site, add its key here.
+# Dynamic sites the extractor cannot see: variable-key lookups where the
+# catalog key is computed at runtime. Conditional-branch literals are NOT
+# here anymore — they are wrapped in AppLocalization.string at the source
+# (Text(condition ? "A" : "B") binds the verbatim String overload, so raw
+# ternary branches never localize) and are statically extracted now. When
+# adding a new dynamic localizable site, add its key here.
 REGRESSION_KEYS = (
-    # Text(ternary) branches in the Connection Setup wizard
-    "Enter the local IP address and port Hermes gave you. You don’t need to type http://.",
-    "Enter the Tailscale hostname or address Hermes gave you. Tailscale Serve hostnames use HTTPS; leave the port blank unless Hermes supplied one.",
-    "Review or edit your current dashboard address, including its port and path.",
-    "Paste the full HTTPS dashboard address Hermes supplied, including any port or path.",
-    "Checks for HTTPS and certificate problems when connecting to your dashboard.",
-    "Checks for Cloudflare Access service-token problems when connecting to your dashboard.",
-    # Text(ternary) branches in Login
-    "Face ID, with device passcode recovery, is required on launch.",
-    "Saved credentials reconnect without a Face ID prompt.",
-    # Text(ternary) branches in the sidebar / composer / chat
-    "Sessions will appear here once created.",
-    "Try a different search.",
-    "Projects created in Hermes Desktop will appear here.",
-    "Update this Hermes gateway to recover active turns safely.",
-    "Diagram",
-    "Formula",
-    "Code",
-    "You",
-    "Pin",
-    "Unpin",
-    "Active",
-    "Paused",
-    "Hidden",
-    "Visible",
-    "Edit",
-    "Connect",
-    "Connecting...",
-    "Show %lld more",
-    "Apply to %lld",
-    "Show all %lld lines",
-    "Show %lld more rows (%lld of %lld left)",
-    "Add %@",
-    "Edit %@",
-    "Edit phrase %@",
-    "Context usage, %lld percent",
-    "Hermes asked %lld questions before it can continue",
-    "Confirm %lld selected",
-    # Dynamic display-label lookups invisible to the extractor: the config
-    # value display table, the archive/restore ternary, and the cron action
-    # verb display map (wire tokens stay raw in the URL path).
-    "archive",
-    "restore",
+    # ProfileConfigValueDisplay table (value → display label map)
     "Manual",
     "Smart",
     "YOLO mode",
@@ -167,11 +127,13 @@ REGRESSION_KEYS = (
     "Hype",
     "Session",
     "Skills & extensions",
+    # archive/restore ternary passed as a variable argument
+    "archive",
+    "restore",
+    # Cron action verb display map (wire tokens stay raw in the URL path)
     "pause",
     "resume",
     "trigger",
-    # Ternary-branch suffix fragment in KanbanTaskDetailView's Unassigned row
-    "→ default",
 )
 
 CALL_RE = re.compile(

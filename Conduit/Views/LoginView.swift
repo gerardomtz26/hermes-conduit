@@ -298,8 +298,8 @@ struct LoginView: View {
                             .foregroundStyle(.secondary)
                     } else if saveCredentials {
                         Text(useFaceID
-                            ? "Face ID, with device passcode recovery, is required on launch."
-                            : "Saved credentials reconnect without a Face ID prompt.")
+                            ? AppLocalization.string("Face ID, with device passcode recovery, is required on launch.")
+                            : AppLocalization.string("Saved credentials reconnect without a Face ID prompt."))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -406,7 +406,7 @@ struct LoginView: View {
                 Button {
                     Task { await connect() }
                 } label: {
-                    Label(isConnecting ? "Connecting..." : "Connect", systemImage: "arrow.right")
+                    Label(isConnecting ? AppLocalization.string("Connecting...") : AppLocalization.string("Connect"), systemImage: "arrow.right")
                         .font(.headline)
                         .frame(maxWidth: .infinity)
                         .frame(height: 50)

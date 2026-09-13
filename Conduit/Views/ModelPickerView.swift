@@ -79,7 +79,7 @@ struct ModelPickerView: View {
             .toolbarBackground(.hidden, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button(editingVisibility ? "Done" : "Edit") {
+                    Button(editingVisibility ? AppLocalization.string("Done") : AppLocalization.string("Edit")) {
                         if editingVisibility {
                             appState.saveModelVisibility(visibility)
                             editingVisibility = false
@@ -337,7 +337,7 @@ struct ModelPickerView: View {
                 }
                 .buttonStyle(.plain)
 
-                Button(providerHidden ? "Hidden" : "Visible") {
+                Button(providerHidden ? AppLocalization.string("Hidden") : AppLocalization.string("Visible")) {
                     toggleProviderVisibility(provider.name)
                 }
                 .font(.caption.weight(.semibold))

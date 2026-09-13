@@ -259,7 +259,7 @@ private struct VoiceConversationTranscriptBubble: View {
 
     var body: some View {
         VStack(alignment: isUser ? .trailing : .leading, spacing: 4) {
-            Text(isUser ? "You" : "Hermes")
+            Text(isUser ? AppLocalization.string("You") : AppLocalization.string("Hermes"))
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
             Text(entry.text)
