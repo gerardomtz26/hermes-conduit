@@ -9637,7 +9637,9 @@ final class AppState: ObservableObject {
                 )
             } else {
                 appendSlashOutput(
-                    "⚠️ Compression failed: \(errorForReporting.localizedDescription)",
+                    AppLocalization.string(
+                        "⚠️ Compression failed: \(errorForReporting.localizedDescription)"
+                    ),
                     context: reportingContext
                 )
             }
@@ -9771,7 +9773,9 @@ final class AppState: ObservableObject {
         } catch {
             guard isCurrentComposerSubmission(context) else { return }
             appendSlashOutput(
-                "⚠️ Compression failed: \(error.localizedDescription)",
+                AppLocalization.string(
+                    "⚠️ Compression failed: \(error.localizedDescription)"
+                ),
                 context: context
             )
         }
