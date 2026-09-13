@@ -87,6 +87,11 @@ struct ChatResumeLifecycleOperations {
     var loadBusyInputMode: (@MainActor (HermesClient) async -> Void)?
     var loadProfileDisplayPreferences: (@MainActor () async -> Void)?
     var loadSlashCommands: (@MainActor () async -> Void)?
+    var compressSession: (@MainActor (
+        HermesClient,
+        String,
+        String?
+    ) async throws -> SessionCompressResult)?
 
     init(
         connectClient: (@MainActor (HermesClient) async throws -> Void)? = nil,
@@ -126,7 +131,12 @@ struct ChatResumeLifecycleOperations {
         loadProfiles: (@MainActor () async -> Void)? = nil,
         loadBusyInputMode: (@MainActor (HermesClient) async -> Void)? = nil,
         loadProfileDisplayPreferences: (@MainActor () async -> Void)? = nil,
-        loadSlashCommands: (@MainActor () async -> Void)? = nil
+        loadSlashCommands: (@MainActor () async -> Void)? = nil,
+        compressSession: (@MainActor (
+            HermesClient,
+            String,
+            String?
+        ) async throws -> SessionCompressResult)? = nil
     ) {
         self.connectClient = connectClient
         self.loadCatalog = loadCatalog
@@ -151,6 +161,7 @@ struct ChatResumeLifecycleOperations {
         self.loadBusyInputMode = loadBusyInputMode
         self.loadProfileDisplayPreferences = loadProfileDisplayPreferences
         self.loadSlashCommands = loadSlashCommands
+        self.compressSession = compressSession
     }
 
     static let live = ChatResumeLifecycleOperations()
@@ -494,6 +505,22 @@ final class AppState: ObservableObject {
     /// being prepared, so the chat never appears to jump to an empty canvas.
     @Published private(set) var isOpeningNotificationSession = false
     @Published private(set) var isBranchingChat = false
+    /// Runtime ids of conversations with a dedicated `session.compress` RPC
+    /// in flight. Manual compression is LLM-bound and can take minutes, so
+    /// the chat shows a small "Compressing…" affordance while the ACTIVE
+    /// conversation is compressing, and a second `/compress` for the same
+    /// conversation is refused. Per-session on purpose, matching upstream
+    /// Desktop's `compressInFlightRef`: compressions of different
+    /// conversations run concurrently.
+    @Published private(set) var compressingSessionIDs: Set<String> = []
+    /// Whether the active conversation is the one compressing (drives the
+    /// composer's "Compressing…" notice). Plain runtime-id membership is fine
+    /// for an in-flight notice; the aliasing machinery matters for adoption
+    /// guards, not for hiding a spinner.
+    var isCompressingActiveSession: Bool {
+        guard let activeSessionId else { return false }
+        return compressingSessionIDs.contains(activeSessionId)
+    }
     @Published private(set) var turnState: TurnState = .idle
     /// Whether `turnState` may have missed server-side turn edges. Set at
     /// lifecycle boundaries where the socket can die or the gateway can change
@@ -9326,6 +9353,22 @@ final class AppState: ObservableObject {
             cancelChatResumeRestoration()
             appendSlashOutput(Self.formatSlashHelp(), context: submissionContext)
             return
+        case "compress", "compact":
+            // Dedicated `session.compress` RPC (upstream Desktop parity). Must
+            // not ride the generic slash path: compression legitimately
+            // outlives the request timeout, and the gateway rejects it while
+            // a turn runs (4009), so unlike `branch` there is no busy guard —
+            // the gateway's own answer is the accurate one.
+            guard !isBranchingChat, !isProfileSwitching else { return }
+            cancelChatResumeRestoration()
+            await compressActiveSession(
+                focusTopic: command.argument,
+                legacyCommand: command.cleaned,
+                client: client,
+                sessionID: sessionId,
+                context: submissionContext
+            )
+            return
         default:
             break
         }
@@ -9487,6 +9530,209 @@ final class AppState: ObservableObject {
 
     private static func formatSlashHelp() -> String {
         return "**Slash Commands**\n\nType `/` followed by a command name.\n\n**Built-in:**\n• `/new` — Start a new conversation\n• `/model` — Open the model picker\n• `/yolo` — Toggle auto-approve mode\n• `/help` — Show this help\n\nUse the suggestions list to discover gateway commands."
+    }
+
+    // MARK: - Session compression (`session.compress`)
+
+    /// Dedicated `/compress` handler (upstream Desktop parity): the
+    /// `session.compress` RPC with its LLM-scale timeout, transcript adoption
+    /// from the response, and the `slash.exec` fallback only for gateways
+    /// that predate the dedicated method.
+    private func compressActiveSession(
+        focusTopic: String,
+        legacyCommand: String,
+        client: HermesClient,
+        sessionID: String,
+        context: ComposerSubmissionContext
+    ) async {
+        guard isCurrentComposerSubmission(context) else { return }
+        if compressingSessionIDs.contains(where: { composerSessionIDsAreEquivalent($0, sessionID) }) {
+            errorMessage = AppLocalization.string("Compression is already in progress for this conversation.")
+            return
+        }
+        compressingSessionIDs.insert(sessionID)
+        defer { compressingSessionIDs.remove(sessionID) }
+        let trimmedTopic = focusTopic.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let result: SessionCompressResult
+            if let compressSession = chatResumeLifecycleOperations.compressSession {
+                result = try await compressSession(client, sessionID, trimmedTopic.isEmpty ? nil : trimmedTopic)
+            } else {
+                result = try await client.compressSession(
+                    sessionId: sessionID,
+                    focusTopic: trimmedTopic.isEmpty ? nil : trimmedTopic
+                )
+            }
+            guard isCurrentComposerSubmission(context) else { return }
+            applySessionCompressionResult(result, sessionID: sessionID, context: context)
+        } catch {
+            guard isCurrentComposerSubmission(context) else { return }
+            if HermesClient.isMissingRPCMethod(error) {
+                await runLegacyCompressionFallback(
+                    legacyCommand: legacyCommand,
+                    aliasArgument: focusTopic,
+                    client: client,
+                    sessionID: sessionID,
+                    context: context
+                )
+            } else {
+                appendSlashOutput(
+                    "⚠️ Compression failed: \(error.localizedDescription)",
+                    context: context
+                )
+            }
+        }
+    }
+
+    /// Older gateways predate `session.compress`; keep today's generic slash
+    /// path working there, mirroring upstream Desktop. Only a missing-method
+    /// failure routes here — a timeout means the gateway IS compressing, and
+    /// re-running `/compress` through the legacy route would start a second
+    /// server-side compression. On those legacy gateways today's failure mode
+    /// survives unchanged (a slow `slash.exec` can still cascade into
+    /// `command.dispatch`); preserving that is the point of the fallback.
+    private func runLegacyCompressionFallback(
+        legacyCommand: String,
+        aliasArgument: String,
+        client: HermesClient,
+        sessionID: String,
+        context: ComposerSubmissionContext
+    ) async {
+        do {
+            let legacyResult = try await executeGatewaySlash(
+                client: client,
+                sessionID: sessionID,
+                command: legacyCommand,
+                context: context
+            )
+            guard isCurrentComposerSubmission(context) else { return }
+            await handleSlashResult(
+                legacyResult,
+                depth: 0,
+                aliasArgument: aliasArgument,
+                client: client,
+                sessionID: sessionID,
+                context: context
+            )
+        } catch {
+            guard isCurrentComposerSubmission(context) else { return }
+            appendSlashOutput(
+                "⚠️ Compression failed: \(error.localizedDescription)",
+                context: context
+            )
+        }
+    }
+
+    private func applySessionCompressionResult(
+        _ result: SessionCompressResult,
+        sessionID: String,
+        context: ComposerSubmissionContext
+    ) {
+        if result.lockHeld {
+            // Another compression — this device, another client, or an
+            // automatic one — already holds the compression lock. Not an
+            // error, and never retried from here.
+            appendSlashOutput(
+                result.message ?? "Compression is already in progress.",
+                context: context
+            )
+            return
+        }
+        if result.isPending {
+            // The gateway's bounded compute-host wait expired while the host
+            // is still compressing; it pushes `session.info` plus a
+            // `compacted` status edge when the host finishes. Not an error,
+            // and never retried (upstream #97948).
+            appendSlashOutput(
+                result.message ?? "Compression continues in the background; the transcript will refresh when it finishes.",
+                context: context
+            )
+            return
+        }
+        let record = Self.compressionRecord(for: result)
+        guard result.hasMessagesPayload else {
+            appendSlashOutput(record, context: context)
+            return
+        }
+        // Upstream Desktop adopts the returned transcript whenever the
+        // `messages` array is present — including an aborted compression,
+        // whose payload is the gateway's authoritative (unchanged) history.
+        // Abort only suppresses the success record above.
+        //
+        // A turn that started while the compression RPC was in flight owns
+        // the transcript now; replacing it here would erase the live turn's
+        // rows and streaming text (Desktop decouples this via per-runtime
+        // session state). Mark the window stale so the next authoritative
+        // sync converges, and leave the in-flight turn alone.
+        if turnState == .running || locallyOwnedInFlightTurn != nil {
+            transcriptFreshnessIsStale = true
+            appendSlashOutput(record, context: context)
+            return
+        }
+        adoptCompressedTranscript(result.messages, sessionID: sessionID)
+        appendSlashOutput(record, context: context)
+    }
+
+    /// The chat record a finished compression leaves behind: summary lines on
+    /// success; a warning note instead when the compression aborted (upstream
+    /// Desktop keeps an aborted run out of the success path); the host's own
+    /// feedback or the removed-count text as the remaining fallbacks.
+    private static func compressionRecord(for result: SessionCompressResult) -> String {
+        if result.isAborted {
+            let detail = result.summaryHeadline ?? result.summaryNote ?? result.message
+            return detail.map { "⚠️ \($0)" } ?? "⚠️ Context compression was aborted; the transcript is unchanged."
+        }
+        let summaryLines = [result.summaryHeadline, result.summaryTokenLine, result.summaryNote]
+            .compactMap { $0 }
+        if !summaryLines.isEmpty {
+            return summaryLines.joined(separator: "\n\n")
+        }
+        if let hostOutput = result.hostOutput, !hostOutput.isEmpty {
+            return hostOutput
+        }
+        let removed = result.removed ?? 0
+        return removed > 0 ? "Compressed \(removed) messages." : "Nothing to compress."
+    }
+
+    /// Adopt the gateway's post-compress transcript for the current
+    /// conversation. Mirrors the invariant set of `applyChatResume` for an
+    /// in-place replacement — viewport replacement bookkeeping,
+    /// presentation-cache enrichment, review-card reattachment, and the
+    /// authoritative clears of local turn/ordering state — without touching
+    /// session identity (compression never switches conversations).
+    private func adoptCompressedTranscript(
+        _ compressed: [ChatMessage],
+        sessionID: String
+    ) {
+        settleReasoningSegmentIntoTranscript()
+        clearStreamingText()
+        activeAssistantMessageId = nil
+        resetReasoningTurn()
+        markChatViewportReplacement()
+        // Locally restored-but-unanswered decision cards survive a
+        // compression: the compressed gateway transcript can no longer carry
+        // them. Reattach the ones the gateway rows do not already include
+        // (same dedup rule as applyChatResume).
+        let gatewayDecisionKeys = Set(compressed.compactMap(SessionPresentationCache.decisionKey(for:)))
+        let retainedDecisionMessages = pendingDecisionRestorationMessages(for: sessionID).filter { message in
+            guard let key = SessionPresentationCache.decisionKey(for: message) else { return false }
+            return !gatewayDecisionKeys.contains(key)
+        }
+        let merged = sessionPresentationCache.merge(
+            compressed + retainedDecisionMessages,
+            profile: activeProfile,
+            sessionIDs: [sessionID],
+            includePendingClarifications: false,
+            includePendingApprovals: false
+        )
+        messages = mergeCachedReviews(into: merged, sessionId: sessionID)
+        // The gateway's authoritative response just replaced the transcript:
+        // no local turn/ordering debt can outlive it (applyChatResume's rule).
+        transcriptFreshnessIsStale = false
+        locallyOwnedInFlightTurn = nil
+        pendingLocalOrderingDebt = nil
+        noteChatViewportTranscriptReplacement()
+        cacheMessagePresentation()
     }
 
     private func steer(
