@@ -262,18 +262,32 @@ final class SavedDashboardRegistryTests: XCTestCase {
 
     func testMigrationRetriesAfterInterruption() throws {
         // Simulate a migration that died after the scoped writes but before
-        // the registry committed: scoped records exist, legacy records still
-        // exist, no registry. The retry must still produce a working
-        // registry, and the legacy records must remain authoritative until
-        // then.
-        KeychainHelper.saveConnection(HermesConnection(baseUrl: legacyURL, ticket: "ticket-1"))
-        track(UUID()) // no scoped pre-state; the interruption scenario reuses legacy only
+        // the registry committed: CONFLICTING scoped records exist (from the
+        // partial run), the legacy records still exist, and no registry does.
+        // The retry must rebuild from the LEGACY records — legacy remained
+        // authoritative at every crash point — and overwrite the stale
+        // scoped writes.
+        KeychainHelper.saveConnection(HermesConnection(baseUrl: legacyURL, ticket: "legacy-authoritative"))
+        KeychainHelper.saveCredentials(legacyCredentials)
+        let orphanScopedID = track(UUID())
+        KeychainHelper.saveConnection(
+            HermesConnection(baseUrl: legacyURL, ticket: "scoped-partial-run"),
+            dashboardID: orphanScopedID
+        )
 
         let registry = SavedDashboardMigrator.loadRegistry(defaults: defaults)
         let id = try XCTUnwrap(registry.activeDashboardID)
         track(id)
-        XCTAssertEqual(try XCTUnwrap(KeychainHelper.loadConnection(dashboardID: id)).ticket, "ticket-1")
+        XCTAssertNotEqual(id, orphanScopedID, "the interrupted run's scoped identity is not reused")
+        XCTAssertEqual(
+            try XCTUnwrap(KeychainHelper.loadConnection(dashboardID: id)).ticket,
+            "legacy-authoritative",
+            "the retry rebuilds from legacy, which stayed authoritative until the registry committed"
+        )
         XCTAssertEqual(registry.dashboards[0].normalizedURL, legacyURL)
+        // The committed registry is the new authority; the legacy records are
+        // retired behind it.
+        XCTAssertNil(KeychainHelper.loadConnection())
     }
 
     func testLazyRetirementHonorsInjectedDefaults() throws {

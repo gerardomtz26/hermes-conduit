@@ -9,6 +9,7 @@
 //
 
 import Foundation
+import Security
 @testable import Conduit
 
 final class InMemoryKeychainBackend: KeychainHelper.Backend {

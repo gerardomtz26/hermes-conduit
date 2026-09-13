@@ -633,7 +633,12 @@ final class PushNotificationService: ObservableObject {
         }
     }
 
-    func createPairingCode(dashboardID: UUID?) async {
+    /// Creates a pairing code bound to the given dashboard. The identity is
+    /// REQUIRED (#148): new pairings are always dashboard-scoped so the relay
+    /// can stamp every later push with an owner. (Pre-existing unscoped
+    /// pairings remain routable through the legacy compatibility policy —
+    /// Conduit just never creates new ones.)
+    func createPairingCode(dashboardID: UUID) async {
         pairingCode = nil
         pairingExpiry = nil
         lastError = nil
@@ -649,14 +654,12 @@ final class PushNotificationService: ObservableObject {
                 credential: registration.credential
             )
             request.httpMethod = "POST"
-            // Bind the pairing to the active dashboard (#148): the relay
-            // persists this UUID at claim time, and every later push derived
-            // from that gateway credential is stamped with it. Older relays
-            // ignore the body, which keeps pre-dashboard relays working.
-            if let dashboardID {
-                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                request.httpBody = try JSONEncoder().encode(PairingCreateRequest(dashboardID: dashboardID.uuidString))
-            }
+            // Bind the pairing to the dashboard (#148): the relay persists
+            // this UUID at claim time, and every later push derived from that
+            // gateway credential is stamped with it. Older relays ignore the
+            // body, which keeps pre-dashboard relays working.
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try JSONEncoder().encode(PairingCreateRequest(dashboardID: dashboardID.uuidString))
             let (data, response) = try await URLSession.shared.data(for: request)
             try validate(response: response, data: data)
             let pairing = try JSONDecoder().decode(PairingResponse.self, from: data)

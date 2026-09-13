@@ -333,10 +333,34 @@
     },
     "%lld dashboards" : {
       "localizations" : {
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld dashboard"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld dashboards"
+                }
+              }
+            }
+          }
+        },
         "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "%lld 个仪表板"
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld 个仪表板"
+                }
+              }
+            }
           }
         }
       }
@@ -2791,6 +2815,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "连接 Hermes 档案"
+          }
+        }
+      }
+    },
+    "Connect to a dashboard before creating a pairing code." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "先连接一个仪表板，再创建配对码。"
           }
         }
       }

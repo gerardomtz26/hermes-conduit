@@ -2818,7 +2818,12 @@ final class AppState: ObservableObject {
             // (login and ticket mint both succeeded first) — they are
             // naturally superseded by the next explicit test or sign-in and
             // are deliberately not rolled back.
-            candidate.nativeConnection.commitCookies()
+            if let dashboardID = resolveDashboardID(
+                forURL: candidate.configuration.serverURL,
+                registerIfMissing: true
+            ) {
+                candidate.nativeConnection.commitCookies(dashboardID: dashboardID)
+            }
             outcome = await activateRepairedConnection(with: HermesConnection(
                 baseUrl: candidate.configuration.serverURL,
                 ticket: candidate.nativeConnection.ticket
@@ -2910,8 +2915,11 @@ final class AppState: ObservableObject {
         connectedAt = nil
         // Sign Out of This Dashboard: only the active dashboard's reusable
         // auth is cleared. Its SavedDashboard metadata and every other
-        // dashboard's records are untouched.
-        if let dashboardID = activeDashboardID {
+        // dashboard's records are untouched. The dashboard identity is
+        // captured BEFORE any state is nulled so the web/native session is
+        // cleared even when there is no live connection.
+        let signingOutDashboardID = activeDashboardID
+        if let dashboardID = signingOutDashboardID {
             KeychainHelper.clearConnection(dashboardID: dashboardID)
             KeychainHelper.clearCredentials(dashboardID: dashboardID)
             KeychainHelper.clearCloudflareAccess(dashboardID: dashboardID)
@@ -2923,6 +2931,7 @@ final class AppState: ObservableObject {
         // session could be silently resumed on the next authentication flow.
         // Capture the origin before nulling `connection` and purge both stores.
         let dashboardBaseURL = connection?.baseUrl
+            ?? signingOutDashboardID.flatMap { savedDashboardRegistry.dashboard(with: $0)?.normalizedURL }
         connection = nil
         client = nil
         dashboardTicketBridge?.invalidate()
@@ -2964,19 +2973,28 @@ final class AppState: ObservableObject {
         activeSessionTitlesByProfile = [:]
         pinnedSessionIDsByProfile = [:]
         defaults.removeObject(forKey: activeProfileKey)
-        clearDashboardWebSession(for: dashboardBaseURL)
+        clearDashboardWebSession(dashboardID: signingOutDashboardID, baseURL: dashboardBaseURL)
     }
 
-    /// Removes the dashboard origin's cookies from the WebKit default data
-    /// store and the shared Foundation cookie store. The Foundation store is
-    /// cleared synchronously first so no rapid reconnect can reuse the native
-    /// session cookie; the WebKit store can only be mutated asynchronously, so
-    /// it is dispatched as a background task.
-    private func clearDashboardWebSession(for dashboardBaseURL: String?) {
-        guard let dashboardBaseURL else { return }
-        DashboardCookiePersistence.clearNativeCookies(for: dashboardBaseURL)
+    /// Clears a dashboard's web session at Sign Out / Remove. With a
+    /// dashboard identity the session is DASHBOARD-OWNED (#148): the
+    /// identified WebKit store is removed entirely and the dashboard's native
+    /// jar is wiped (plus exact-host residue in the shared jar — parent-domain
+    /// cookies shared with a sibling dashboard are never touched). Without an
+    /// identity (legacy/test shapes) the origin-scoped default-store cleanup
+    /// remains.
+    private func clearDashboardWebSession(dashboardID: UUID?, baseURL: String?) {
+        if let dashboardID {
+            Task { await DashboardCookiePersistence.clearWebKitSession(for: dashboardID) }
+            if let baseURL {
+                DashboardCookiePersistence.clearNativeCookies(dashboardID: dashboardID, baseURL: baseURL)
+            }
+            return
+        }
+        guard let baseURL else { return }
+        DashboardCookiePersistence.clearNativeCookies(for: baseURL)
         Task { @MainActor in
-            if let url = URL(string: dashboardBaseURL) {
+            if let url = URL(string: baseURL) {
                 await DashboardCookiePersistence.clear(
                     from: WKWebsiteDataStore.default().httpCookieStore,
                     for: url
@@ -2997,6 +3015,17 @@ final class AppState: ObservableObject {
             return existing
         }
         guard registerIfMissing else { return nil }
+        return registerDashboard(forNormalizedURL: normalized)
+    }
+
+    /// Registers a saved dashboard for this address (if missing) and returns
+    /// its UUID — never optional, so adoption and pre-connection writes have
+    /// one non-failable registration path.
+    @discardableResult
+    func registerDashboard(forNormalizedURL normalized: String) -> UUID {
+        if let existing = savedDashboardRegistry.dashboardID(atNormalizedURL: normalized) {
+            return existing
+        }
         var registry = savedDashboardRegistry
         let id = UUID()
         let label = SavedDashboardLabel.derive(from: normalized, existingLabels: registry.dashboards.map(\.label))
@@ -3020,7 +3049,7 @@ final class AppState: ObservableObject {
     /// connection to this dashboard is recognized as same-server.
     @discardableResult
     func adoptDashboard(forNormalizedURL normalized: String) -> UUID {
-        let id = resolveDashboardID(forNormalizedURL: normalized, registerIfMissing: true)!
+        let id = registerDashboard(forNormalizedURL: normalized)
         if savedDashboardRegistry.activeDashboardID != id {
             var registry = savedDashboardRegistry
             registry.activeDashboardID = id
@@ -3162,18 +3191,13 @@ final class AppState: ObservableObject {
         KeychainHelper.clearConnection(dashboardID: id)
         KeychainHelper.clearCredentials(dashboardID: id)
         KeychainHelper.clearCloudflareAccess(dashboardID: id)
-        // The dashboard is not connected, but its origin may still hold live
-        // session cookies in the WebKit/Foundation stores from an earlier
-        // session; sign-out removes those too.
-        DashboardCookiePersistence.clearNativeCookies(for: dashboard.normalizedURL)
-        Task { @MainActor in
-            if let url = URL(string: dashboard.normalizedURL) {
-                await DashboardCookiePersistence.clear(
-                    from: WKWebsiteDataStore.default().httpCookieStore,
-                    for: url
-                )
-            }
-        }
+        // The dashboard is not connected, but its OWN web session may still
+        // hold live cookies from an earlier session; sign-out removes the
+        // identified WebKit store and the dashboard's native jar (plus
+        // exact-host shared-jar residue). Sibling dashboards sharing a parent
+        // domain are untouched.
+        Task { await DashboardCookiePersistence.clearWebKitSession(for: id) }
+        DashboardCookiePersistence.clearNativeCookies(dashboardID: id, baseURL: dashboard.normalizedURL)
     }
 
     /// Remove Dashboard: deletes the SavedDashboard and clears ONLY its
@@ -3254,7 +3278,8 @@ final class AppState: ObservableObject {
         if credentials.requiresFaceID {
             guard BiometricAuth.isFaceIDAvailable,
                   await BiometricAuth.authenticate(reason: AppLocalization.string("Unlock Conduit")) else {
-                showLogin = true
+                // A superseded switch owns the flow: present nothing.
+                if restoreOwnsFlow(switchGeneration) { showLogin = true }
                 return
             }
             // Re-fence after the biometric await: a superseded switch owns
@@ -3277,22 +3302,48 @@ final class AppState: ObservableObject {
             if let switchGeneration, !switchGenerationIsCurrent(switchGeneration) {
                 return
             }
-            authenticatedConnection.commitCookies()
+            if let scopedDashboardID {
+                authenticatedConnection.commitCookies(dashboardID: scopedDashboardID)
+            }
             await connect(with: HermesConnection(baseUrl: credentials.baseURL, ticket: authenticatedConnection.ticket), profile: activeProfile)
         } catch is CancellationError {
             // A superseded connect owns the flow from here; fall back to the
-            // login screen silently.
-            showLogin = true
+            // login screen silently — but only if THIS restore still owns
+            // the flow. A stale restore (a newer switch won) writes nothing.
+            if restoreOwnsFlow(switchGeneration) { showLogin = true }
         } catch {
             // A rejected saved password falls back to the native login screen
             // without erasing it, allowing the user to correct the account.
             // The typed classified handoff replaces the old string write, so
             // the composer banner never inherits a stale sign-in message.
-            let failure = ConnectionFailureClassifier.classify(error)
-            lastConnectionFailure = failure
-            showLogin = true
-            pendingLoginFailure = .presenting(failure)
+            presentCredentialRestoreFailure(
+                ConnectionFailureClassifier.classify(error),
+                switchGeneration: switchGeneration
+            )
         }
+    }
+
+    /// Whether a restore that started under this switch generation may still
+    /// write state. Nil generations (non-switch restore paths) always own.
+    private func restoreOwnsFlow(_ generation: UInt64?) -> Bool {
+        guard let generation else { return true }
+        return switchGenerationIsCurrent(generation)
+    }
+
+    /// The fenced failure presentation for a saved-credential restore: a
+    /// superseded restore (a newer dashboard switch won) must not set
+    /// `showLogin`, `pendingLoginFailure`, or `lastConnectionFailure` over
+    /// the winner's state. Returns whether anything was written (test seam).
+    @discardableResult
+    func presentCredentialRestoreFailure(
+        _ failure: ConnectionFailure,
+        switchGeneration: UInt64?
+    ) -> Bool {
+        guard restoreOwnsFlow(switchGeneration) else { return false }
+        lastConnectionFailure = failure
+        showLogin = true
+        pendingLoginFailure = .presenting(failure)
+        return true
     }
 
     private func prepareDashboardBridge(for baseUrl: String) {
@@ -5176,6 +5227,13 @@ final class AppState: ObservableObject {
     }
 
 #if DEBUG
+    /// Test seam: the current dashboard-switch generation, so tests can
+    /// construct genuinely-stale (never-current) generation values for the
+    /// restore/renewal fences.
+    func dashboardSwitchGenerationForTesting() -> UInt64 {
+        dashboardSwitchGeneration
+    }
+
     /// Test-only view of pending YOLO write ownership. Each entry maps a key
     /// to the number of active operations holding it; a non-empty dictionary
     /// after all operations settled means the bookkeeping leaked.
@@ -5396,6 +5454,15 @@ final class AppState: ObservableObject {
               Self.uiTestFailedConnectionStub() == nil else { return }
         #endif
         guard let savedConnection = connection else { return }
+        // The renewal's ownership is captured BEFORE any await: the renewed
+        // ticket belongs to exactly this dashboard and this switch
+        // generation. After the mint (or the silent re-auth), the fences
+        // below reject a superseded renewal — a dashboard switch that ran
+        // meanwhile owns the flow, and the stale ticket must neither install
+        // nor resolve against the now-changed selection.
+        let renewalDashboardID = resolveDashboardID(forURL: savedConnection.baseUrl, registerIfMissing: false)
+            ?? activeDashboardID
+        let renewalSwitchGeneration = dashboardSwitchGeneration
         let purpose = beginChatResumeRecovery(purpose: requestedPurpose)
         let automaticWorkToken = purpose == .automaticReturn
             ? beginAutomaticChatResumeWork()
@@ -5441,9 +5508,14 @@ final class AppState: ObservableObject {
         do {
             let ticket = try await mintChatResumeTicket(for: savedConnection)
             guard refreshTransportContinuation() else { return }
+            // Re-fence after the mint await: never install a stale renewal
+            // under a newer dashboard switch, and never resolve its owner
+            // from the now-changed selection.
+            guard switchGenerationIsCurrent(renewalSwitchGeneration),
+                  activeDashboardID == renewalDashboardID else { return }
             connection = HermesConnection(baseUrl: savedConnection.baseUrl, ticket: ticket)
             self.connection = connection
-            if let dashboardID = resolveDashboardID(forURL: savedConnection.baseUrl, registerIfMissing: false) {
+            if let dashboardID = renewalDashboardID {
                 KeychainHelper.saveConnection(connection, dashboardID: dashboardID)
             }
         } catch {
@@ -5462,7 +5534,14 @@ final class AppState: ObservableObject {
                             password: credentials.password
                         )
                         guard refreshTransportContinuation() else { return }
-                        authenticatedConnection.commitCookies()
+                        // Re-fence after the re-auth network await: a
+                        // superseded renewal must not commit cookies into
+                        // (or reload a bridge for) the wrong dashboard.
+                        guard switchGenerationIsCurrent(renewalSwitchGeneration),
+                              activeDashboardID == renewalDashboardID else { return }
+                        if let renewalDashboardID {
+                            authenticatedConnection.commitCookies(dashboardID: renewalDashboardID)
+                        }
                         // URLSession and WebKit have separate cookie stores.
                         // Reload the bridge so it receives the fresh session.
                         dashboardTicketBridge?.reload()

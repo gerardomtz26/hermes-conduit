@@ -1744,8 +1744,11 @@ private struct NotificationsSettingsDetail: View {
                             // Pairings are bound to the active dashboard
                             // (#148): pushes from the claimed gateway are
                             // stamped with its identity, so server A can
-                            // never act against server B.
-                            await notifications.createPairingCode(dashboardID: appState.activeDashboardID)
+                            // never act against server B. The action is
+                            // disabled without an active dashboard — Conduit
+                            // never creates a new unscoped pairing.
+                            guard let dashboardID = appState.activeDashboardID else { return }
+                            await notifications.createPairingCode(dashboardID: dashboardID)
                             notifications.pairingCode == nil ? Haptics.error() : Haptics.success()
                         }
                     } label: {
@@ -1753,8 +1756,13 @@ private struct NotificationsSettingsDetail: View {
                             .frame(maxWidth: .infinity)
                             .frame(height: 46)
                     }
-                    .disabled(notifications.isWorking)
+                    .disabled(notifications.isWorking || appState.activeDashboardID == nil)
                     .conduitGlassControl(cornerRadius: 16, tint: .conduitAccent.opacity(0.16))
+                    if appState.activeDashboardID == nil {
+                        Text("Connect to a dashboard before creating a pairing code.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
 
                     if let code = notifications.pairingCode {
                         NotificationSetupCommand(step: 3, title: AppLocalization.string("Pair the active dashboard"), command: "hermes conduit-push pair \(code)")

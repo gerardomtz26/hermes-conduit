@@ -185,6 +185,13 @@ struct ConnectionSetupView: View {
                 dashboardIDProvider: { [appState, url = configuration.serverURL] in
                     appState.resolveDashboardID(forURL: url, registerIfMissing: true)
                 },
+                // Repair targets are always registered dashboards: reuse
+                // their own identified WebKit store (read-only resolution —
+                // no render-time registration).
+                websiteDataStoreIdentifier: appState.resolveDashboardID(
+                    forURL: configuration.serverURL,
+                    registerIfMissing: false
+                ),
                 onTicket: { ticket, baseURL in
                     Task { @MainActor in
                         showRepairSignIn = false
