@@ -97,7 +97,7 @@ enum DashboardCookiePersistence {
     /// exclusively this dashboard's, so a full wipe is the correct scope and
     /// no other dashboard's session can ever be touched.
     static func clearWebKitSession(for dashboardID: UUID) async {
-        nativeCookieStorages.removeValue(forKey: dashboardID)
+        removeNativeCookieStorage(for: dashboardID)
         let store = WKWebsiteDataStore(forIdentifier: dashboardID)
         let cookies = await store.httpCookieStore.allCookies()
         for cookie in cookies {
@@ -107,6 +107,15 @@ enum DashboardCookiePersistence {
 
     private nonisolated(unsafe) static var nativeCookieStorages: [UUID: HTTPCookieStorage] = [:]
     private static let nativeCookieStorageLock = NSLock()
+
+    /// Every mutation of `nativeCookieStorages` goes through the lock: the
+    /// jar factory runs `nonisolated` (native login commits can arrive from
+    /// any executor), so cleanup from the MainActor must take the same lock.
+    private nonisolated static func removeNativeCookieStorage(for dashboardID: UUID) {
+        nativeCookieStorageLock.lock()
+        defer { nativeCookieStorageLock.unlock() }
+        nativeCookieStorages.removeValue(forKey: dashboardID)
+    }
 
     /// The dashboard-owned native cookie jar for URLSession-based password
     /// logins. Instances created here are never persisted to disk and are

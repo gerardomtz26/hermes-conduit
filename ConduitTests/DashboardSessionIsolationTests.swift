@@ -65,13 +65,22 @@ final class DashboardSessionIsolationTests: XCTestCase {
         SavedDashboard(id: UUID(), label: label, normalizedURL: url)
     }
 
-    private func parentDomainCookie(value: String) -> HTTPCookie {
-        HTTPCookie(properties: [
+    private func parentDomainCookie(value: String) throws -> HTTPCookie {
+        try XCTUnwrap(HTTPCookie(properties: [
             .name: "session",
             .value: value,
             .domain: ".example.com",
             .path: "/",
-        ])!
+        ]))
+    }
+
+    private func hostCookie(name: String, value: String, domain: String) throws -> HTTPCookie {
+        try XCTUnwrap(HTTPCookie(properties: [
+            .name: name,
+            .value: value,
+            .domain: domain,
+            .path: "/",
+        ]))
     }
 
     // MARK: - WebKit store identity
@@ -91,7 +100,7 @@ final class DashboardSessionIsolationTests: XCTestCase {
     func testWebKitCookieIsolationBetweenSiblingDashboards() async throws {
         let storeA = DashboardCookiePersistence.webKitStore(for: UUID())
         let storeB = DashboardCookiePersistence.webKitStore(for: UUID())
-        let cookie = parentDomainCookie(value: "a-session")
+        let cookie = try parentDomainCookie(value: "a-session")
 
         await storeA.httpCookieStore.setCookie(cookie)
         // Give WebKit a beat to settle the write.
@@ -115,7 +124,7 @@ final class DashboardSessionIsolationTests: XCTestCase {
         let jarB = DashboardCookiePersistence.nativeCookieStorage(for: b)
         XCTAssertFalse(jarA === jarB, "two dashboards never share a native cookie jar")
 
-        let cookie = parentDomainCookie(value: "native-a")
+        let cookie = try parentDomainCookie(value: "native-a")
         jarA.setCookie(cookie)
 
         XCTAssertEqual(jarB.cookies?.count ?? -1, 0, "B's jar must not contain A's cookies")
@@ -130,13 +139,8 @@ final class DashboardSessionIsolationTests: XCTestCase {
         let a = track(UUID())
         let b = track(UUID())
         let jarA = DashboardCookiePersistence.nativeCookieStorage(for: a)
-        jarA.setCookie(parentDomainCookie(value: "a-login"))
-        jarA.setCookie(HTTPCookie(properties: [
-            .name: "host-only",
-            .value: "a-host",
-            .domain: "a.example.com",
-            .path: "/",
-        ])!)
+        jarA.setCookie(try parentDomainCookie(value: "a-login"))
+        jarA.setCookie(try hostCookie(name: "host-only", value: "a-host", domain: "a.example.com"))
 
         // B's bridge restores from B's (empty) jar: the parent-domain cookie
         // a.example.com holds for .example.com must NOT be imported.
@@ -161,10 +165,10 @@ final class DashboardSessionIsolationTests: XCTestCase {
         XCTAssertTrue(cookiesA.contains { $0.value == "a-host" })
     }
 
-    func testClearNativeCookiesSparesSiblingParentDomainCookies() {
+    func testClearNativeCookiesSparesSiblingParentDomainCookies() throws {
         let a = track(UUID())
         let b = track(UUID())
-        let sharedParent = parentDomainCookie(value: "parent-session")
+        let sharedParent = try parentDomainCookie(value: "parent-session")
         let sharedJar = HTTPCookieStorage.shared
         sharedJar.setCookie(sharedParent)
 
@@ -182,21 +186,16 @@ final class DashboardSessionIsolationTests: XCTestCase {
 
     // MARK: - Sign-out clearing without a live connection
 
-    func testSignOutSelectedButDisconnectedDashboardClearsItsOwnedSession() {
+    func testSignOutSelectedButDisconnectedDashboardClearsItsOwnedSession() throws {
         let a = track(UUID())
         let saved = SavedDashboard(id: a, label: "A", normalizedURL: parentHostA)
         let appState = makeAppState(registry: SavedDashboardRegistry(activeDashboardID: a, dashboards: [saved]))
         // No live connection: connection == nil, isConnected == false. The
         // dashboard still owns web session state from an earlier session.
         let jar = DashboardCookiePersistence.nativeCookieStorage(for: a)
-        jar.setCookie(parentDomainCookie(value: "stale-a"))
+        jar.setCookie(try parentDomainCookie(value: "stale-a"))
         let sharedJar = HTTPCookieStorage.shared
-        let exactHost = HTTPCookie(properties: [
-            .name: "host-residue",
-            .value: "residue-a",
-            .domain: "a.example.com",
-            .path: "/",
-        ])!
+        let exactHost = try hostCookie(name: "host-residue", value: "residue-a", domain: "a.example.com")
         sharedJar.setCookie(exactHost)
         addTeardownBlock { sharedJar.deleteCookie(exactHost) }
 
