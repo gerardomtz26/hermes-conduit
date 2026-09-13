@@ -1146,6 +1146,10 @@ final class AppState: ObservableObject {
     /// so reconnect scheduling skips it instead of looping on the same
     /// contradiction. Main-actor state, valid for the current reconcile only.
     private var reconciliationWasIdentityRejected = false
+    /// Set only when the currently owned resume RPC definitively reports
+    /// that its requested session no longer exists. Callers use this to
+    /// retire a saved automatic-return target instead of retrying it forever.
+    private var reconciliationSessionWasNotFound = false
     private var reconciliation: Reconciliation?
     private var activeClientEpoch = UUID()
     private var activeAssistantMessageId: String?
@@ -3897,6 +3901,84 @@ final class AppState: ObservableObject {
                     historySourceUnavailable: historySourceUnavailable
                 )
                 if !succeeded,
+                   reconciliationSessionWasNotFound,
+                   automaticChatResumeWorkIsCurrent(
+                    automaticWorkToken,
+                    syncOperationID: automaticOperationID
+                   ),
+                   chatViewportTransitionIsCurrent(requiredViewportTransitionGeneration),
+                   token == reconciliationToken,
+                   profile == activeProfile,
+                   let activeClient = self.client,
+                   activeClient === client {
+                    // `session.resume` code 4007 is authoritative evidence
+                    // that the saved conversation was deleted. Forget only
+                    // the still-current pointer, then select from the catalog
+                    // we already loaded under the same ownership fences.
+                    guard chatResumeCoordinator.lastSessionID(for: profile) == missingSavedSessionID else {
+                        return .superseded
+                    }
+                    let handledMissingSessionError = errorMessage
+                    chatResumeCoordinator.rememberSessionID(nil, for: profile)
+                    if let fallback = selectChatResumeTarget(
+                        in: allSessions,
+                        profile: profile,
+                        purpose: purpose,
+                        currentSessionID: nil,
+                        automaticWorkToken: automaticWorkToken,
+                        automaticSyncOperationID: automaticOperationID
+                    ) {
+                        let fallbackIDs = Set([fallback.id] + fallback.alternateIds)
+                        let fallbackIdentity = ConversationIdentity(
+                            profile: profile,
+                            durableSessionID: fallback.storedSessionId ?? fallback.id,
+                            runtimeSessionID: fallback.storedSessionId != nil ? fallback.id : nil,
+                            acceptedSessionIDs: fallbackIDs
+                        )
+                        let fallbackSucceeded = await reconcile(
+                            sessionId: fallback.id,
+                            using: client,
+                            token: token,
+                            acceptedSessionIDs: fallbackIDs,
+                            conversationIdentity: fallbackIdentity,
+                            automaticWorkToken: automaticWorkToken,
+                            automaticSyncOperationID: automaticOperationID,
+                            requiredViewportTransitionGeneration: requiredViewportTransitionGeneration,
+                            historySourceUnavailable: historySourceUnavailable
+                        )
+                        if fallbackSucceeded, errorMessage == handledMissingSessionError {
+                            errorMessage = nil
+                        }
+                        if !fallbackSucceeded,
+                           !reconciliationWasIdentityRejected,
+                           !reconciliationSessionWasNotFound,
+                           automaticChatResumeWorkIsCurrent(
+                            automaticWorkToken,
+                            syncOperationID: automaticOperationID
+                           ),
+                           token == reconciliationToken,
+                           profile == activeProfile {
+                            scheduleReconnect(purpose: purpose)
+                        }
+                        return fallbackSucceeded
+                            ? .completed
+                            : chatResumeSyncInterruptionOutcome(for: automaticWorkToken)
+                    }
+                    await createAndReconcileSession(
+                        using: client,
+                        profile: profile,
+                        token: token,
+                        resumePurpose: purpose,
+                        automaticWorkToken: automaticWorkToken,
+                        automaticSyncOperationID: automaticOperationID,
+                        requiredViewportTransitionGeneration: requiredViewportTransitionGeneration
+                    )
+                    return automaticChatResumeWorkIsCurrent(
+                        automaticWorkToken,
+                        syncOperationID: automaticOperationID
+                    ) ? .completed : chatResumeSyncInterruptionOutcome(for: automaticWorkToken)
+                }
+                if !succeeded,
                    !reconciliationWasIdentityRejected,
                    automaticChatResumeWorkIsCurrent(
                     automaticWorkToken,
@@ -4192,6 +4274,7 @@ final class AppState: ObservableObject {
         let savedDurablePersistedRowIDs = durablePersistedRowIDs
         durablePersistedRowIDs = []
         reconciliationWasIdentityRejected = false
+        reconciliationSessionWasNotFound = false
         refreshActiveChatScrollSessionIdentity(isReconciling: true)
         turnState = .synchronizing
         let profile = activeProfile
@@ -4199,6 +4282,7 @@ final class AppState: ObservableObject {
         // local-write position before launching either request so a response
         // from the older snapshot cannot clear the newer override.
         let yoloWriteBaseline = sessionYoloWriteBaseline(for: sessionId)
+        var resumeRPCFailedSessionNotFound = false
 
         do {
             // Match Hermes Desktop: fetch the durable transcript and resume the
@@ -4239,7 +4323,12 @@ final class AppState: ObservableObject {
                     profile: conversationScopeProfile ?? profile,
                     using: bridge
                 )
-                result = try await resumedSession
+                do {
+                    result = try await resumedSession
+                } catch {
+                    resumeRPCFailedSessionNotFound = (error as? RpcError)?.code == 4007
+                    throw error
+                }
                 switch await transcriptOutcome {
                 case .hydrated(let persisted):
                     // The endpoint may resolve a runtime ID to its stored
@@ -4254,35 +4343,50 @@ final class AppState: ObservableObject {
                     ) {
                         transcript = persisted
                     } else {
+                        do {
+                            result = try await openChatResumeSession(
+                                sessionId,
+                                using: client,
+                                compact: false,
+                                profile: conversationScopeProfile
+                            )
+                        } catch {
+                            resumeRPCFailedSessionNotFound = (error as? RpcError)?.code == 4007
+                            throw error
+                        }
+                    }
+                case .unavailable:
+                    // No usable history source (missing bridge, or a gateway
+                    // predating the messages endpoint): re-resume carrying
+                    // the transcript, exactly as pre-compact builds did.
+                    do {
                         result = try await openChatResumeSession(
                             sessionId,
                             using: client,
                             compact: false,
                             profile: conversationScopeProfile
                         )
+                    } catch {
+                        resumeRPCFailedSessionNotFound = (error as? RpcError)?.code == 4007
+                        throw error
                     }
-                case .unavailable:
-                    // No usable history source (missing bridge, or a gateway
-                    // predating the messages endpoint): re-resume carrying
-                    // the transcript, exactly as pre-compact builds did.
-                    result = try await openChatResumeSession(
-                        sessionId,
-                        using: client,
-                        compact: false,
-                        profile: conversationScopeProfile
-                    )
                 case .failed(let error):
                     // An unrelated history failure must not be papered over by
                     // a legacy resume that would hide it: surface it instead.
                     throw error
                 }
             } else {
-                result = try await openChatResumeSession(
-                    sessionId,
-                    using: client,
-                    compact: false,
-                    profile: conversationScopeProfile
-                )
+                do {
+                    result = try await openChatResumeSession(
+                        sessionId,
+                        using: client,
+                        compact: false,
+                        profile: conversationScopeProfile
+                    )
+                } catch {
+                    resumeRPCFailedSessionNotFound = (error as? RpcError)?.code == 4007
+                    throw error
+                }
             }
             guard automaticChatResumeWorkIsCurrent(
                     automaticWorkToken,
@@ -4571,7 +4675,6 @@ final class AppState: ObservableObject {
                 since: yoloWriteBaseline,
                 sessionIDs: resumeSessionIDs
             )
-
             guard applyChatResume(
                 presentationResult,
                 automaticWorkToken: automaticWorkToken,
@@ -4713,6 +4816,7 @@ final class AppState: ObservableObject {
                 return false
             }
             turnState = .reconnecting
+            reconciliationSessionWasNotFound = resumeRPCFailedSessionNotFound
             switch error {
             case is LegacyTranscriptOversizedError, DashboardTicketBridgeError.oversizedResponse:
                 // Oversized history responses carry their own user-facing
