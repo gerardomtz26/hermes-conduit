@@ -433,7 +433,7 @@ private struct LegacySettingsView: View {
 // MARK: - Settings home and detail routes
 
 private enum SettingsDestination: Hashable {
-    case profile, model, chat, voice, workspace, memory, capabilities, gateway, appearance, notifications, about
+    case profile, model, chat, voice, workspace, memory, capabilities, gateway, savedDashboards, appearance, notifications, about
 }
 
 enum ProfileSettingControl {
@@ -573,6 +573,8 @@ struct SettingsView: View {
             CapabilitiesView()
         case .gateway:
             GatewaySettingsDetail(snapshot: snapshot, reconnect: reconnect, disconnect: disconnect, close: { dismiss() }, saveCloudflareAccess: appState.saveCloudflareAccess, removeCloudflareAccess: appState.removeCloudflareAccess)
+        case .savedDashboards:
+            SavedDashboardsSettingsDetail(close: { dismiss() })
         case .appearance:
             AppearanceSettingsDetail(theme: appState.themePreference, saveTheme: saveTheme)
         case .notifications:
@@ -646,6 +648,7 @@ private struct SettingsHome: View {
                         settingsLink(.capabilities, icon: "puzzlepiece.extension", title: AppLocalization.string("Capabilities"), detail: AppLocalization.string("Skills, toolsets, and categories"))
                     }
                     homeSection("Connection", tint: .conduitAura) {
+                        settingsLink(.savedDashboards, icon: "server.rack", title: AppLocalization.string("Saved Dashboards"), detail: savedDashboardsDetail, identifier: "settings.saved-dashboards")
                         settingsLink(.gateway, icon: "radio", title: AppLocalization.string("Gateway"), detail: snapshot.server ?? AppLocalization.string("Not connected"), identifier: "settings.gateway")
                         settingsActionRow(
                             icon: "checkmark.circle",
@@ -721,6 +724,19 @@ private struct SettingsHome: View {
     /// tested result never writes to the live session itself.
     private var currentDashboardURL: String {
         appState.connection?.baseUrl ?? appState.lastDashboardURL
+    }
+
+    /// Saved Dashboards row detail: the active dashboard's label plus how
+    /// many dashboards are saved.
+    private var savedDashboardsDetail: String {
+        let registry = appState.savedDashboardRegistry
+        guard !registry.dashboards.isEmpty else {
+            return AppLocalization.string("Add your first Hermes dashboard")
+        }
+        let activeLabel = registry.activeDashboardID
+            .flatMap { registry.dashboard(with: $0)?.label }
+        let count = AppLocalization.string("\(registry.dashboards.count) dashboards")
+        return activeLabel.map { "\($0) · \(count)" } ?? count
     }
 
     private var profileDisplayName: String {
@@ -1511,7 +1527,7 @@ private struct GatewaySettingsDetail: View {
                         .font(.footnote).foregroundStyle(.secondary)
                 }
             }
-            Button(role: .destructive) { disconnect(); close() } label: { Label("Disconnect from Hermes", systemImage: "rectangle.portrait.and.arrow.right").frame(maxWidth: .infinity).frame(height: 48) }
+            Button(role: .destructive) { disconnect(); close() } label: { Label(AppLocalization.string("Sign Out of This Dashboard"), systemImage: "rectangle.portrait.and.arrow.right").frame(maxWidth: .infinity).frame(height: 48) }
                 .conduitGlassControl(cornerRadius: 18, tint: .red.opacity(0.18))
         }
         .navigationTitle("Gateway")

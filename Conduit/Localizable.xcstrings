@@ -331,6 +331,16 @@
         }
       }
     },
+    "%lld dashboards" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "%lld 个仪表板"
+          }
+        }
+      }
+    },
     "%lld earlier events hidden" : {
       "localizations" : {
         "en" : {
@@ -525,6 +535,36 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "回合因错误停止"
+          }
+        }
+      }
+    },
+    "Active dashboard" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "当前仪表板"
+          }
+        }
+      }
+    },
+    "Add Dashboard" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "添加仪表板"
+          }
+        }
+      }
+    },
+    "Add your first Hermes dashboard" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "添加你的第一个 Hermes 仪表板"
           }
         }
       }
@@ -2795,6 +2835,16 @@
         }
       }
     },
+    "Connecting…" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "连接中…"
+          }
+        }
+      }
+    },
     "Connection" : {
       "localizations" : {
         "zh-Hans" : {
@@ -3739,6 +3789,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "暗色"
+          }
+        }
+      }
+    },
+    "Dashboard" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "仪表板"
           }
         }
       }
@@ -9705,6 +9765,26 @@
         }
       }
     },
+    "Remove Dashboard" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "移除仪表板"
+          }
+        }
+      }
+    },
+    "Remove Dashboard?" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "移除仪表板？"
+          }
+        }
+      }
+    },
     "Remove dependency %@" : {
       "localizations" : {
         "en" : {
@@ -10121,6 +10201,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "在 Hermes 主机上以其本地 Whisper 安装运行，而非这台 iPhone。"
+          }
+        }
+      }
+    },
+    "Saved Dashboards" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "已保存的仪表板"
           }
         }
       }
@@ -11035,12 +11125,42 @@
         }
       }
     },
+    "Sign In" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "登录"
+          }
+        }
+      }
+    },
+    "Sign In required" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "需要登录"
+          }
+        }
+      }
+    },
     "Sign In to Reconnect" : {
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
             "value" : "登录以重新连接"
+          }
+        }
+      }
+    },
+    "Sign Out of This Dashboard" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "退出登录此仪表板"
           }
         }
       }
@@ -11699,6 +11819,26 @@
         }
       }
     },
+    "Switch" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "切换"
+          }
+        }
+      }
+    },
+    "Switch between your saved Hermes dashboards. Each dashboard keeps its own sign-in and cookies on this device." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "在已保存的 Hermes 仪表板之间切换。每个仪表板在此设备上保留各自的登录状态和 Cookie。"
+          }
+        }
+      }
+    },
     "Switch the session personality" : {
       "localizations" : {
         "zh-Hans" : {
@@ -11745,6 +11885,16 @@
           "stringUnit" : {
             "state" : "translated",
             "value" : "系统通知"
+          }
+        }
+      }
+    },
+    "This dashboard's saved sign-in and cookies will be deleted from this device. Other dashboards are not affected." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此仪表板已保存的登录信息和 Cookie 将从此设备删除。其他仪表板不受影响。"
           }
         }
       }
