@@ -716,13 +716,18 @@ print('affected=' + ' '.join(doc.get('audio_sensitive_failures', [])))
 print('aurioc=' + str(doc.get('signals', {}).get('auremoteio_10851', 0)))
 print('halc=' + str(doc.get('signals', {}).get('halc_overload', 0)))
 " "$COREAUDIO_WEDGE_JSON" 2>/dev/null || true)
-  for wedge_field in $WEDGE_FIELDS; do
-    case "$wedge_field" in
-      affected=*) AFFECTED_CLASSES="${wedge_field#affected=}" ;;
-      aurioc=*) SIG_AURIOC="${wedge_field#aurioc=}" ;;
-      halc=*) SIG_HALC="${wedge_field#halc=}" ;;
+  # Line-wise parsing: the affected value is itself a space-separated class
+  # list, so whitespace-splitting the fields would drop every class after
+  # the first.
+  while IFS= read -r wedge_line; do
+    case "$wedge_line" in
+      affected=*) AFFECTED_CLASSES="${wedge_line#affected=}" ;;
+      aurioc=*) SIG_AURIOC="${wedge_line#aurioc=}" ;;
+      halc=*) SIG_HALC="${wedge_line#halc=}" ;;
     esac
-  done
+  done <<WEDGE_EOF
+$WEDGE_FIELDS
+WEDGE_EOF
   if [ -z "$AFFECTED_CLASSES" ]; then
     return 1
   fi

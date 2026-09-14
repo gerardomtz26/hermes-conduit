@@ -399,6 +399,18 @@ class AudioLaneReservationTests(unittest.TestCase):
                            if l["lane"] == planner.AUDIO_LANE_NAME]
             self.assertEqual(len(audio_lanes), 1)
 
+    def test_audio_only_inventory_plans_and_validates(self):
+        # Every unit class audio-sensitive: zero general lanes is legitimate -
+        # the lower bound must not demand one.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(make_repo(Path(tmp), self.AUDIO, []))
+            discovery = planner.discover_test_classes(str(root))
+            plan = planner.build_plan(discovery, default_cfg(), {}, self.AUDIO)
+            errors = planner.validate_plan(plan, discovery, self.AUDIO)
+            self.assertEqual(errors, [])
+            self.assertEqual([l["lane"] for l in plan["unit_lanes"]],
+                             [planner.AUDIO_LANE_NAME])
+
     def test_inventory_with_non_object_root_warns_instead_of_crashing(self):
         # A JSON root of [] (or any non-object) must degrade to a warning -
         # never an AttributeError out of planning.

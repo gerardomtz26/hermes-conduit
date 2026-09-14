@@ -559,7 +559,7 @@ assert_eq "isolation statuses" "$(isolation_statuses)" "['fail', 'fail']"
 # ===========================================================================
 WEDGE_INVENTORY="$WORK/wedge-inventory.json"
 cat > "$WEDGE_INVENTORY" <<'JSON'
-{"classes": ["VoiceTests"]}
+{"classes": ["VoiceTests", "AudioTwoTests"]}
 JSON
 export AUDIO_INVENTORY="$WEDGE_INVENTORY"
 
@@ -630,21 +630,30 @@ if [ "$n" -gt 1 ]; then
   echo "Test Case failed (stub)"
   exit 65
 fi
-cls=$(printf '%s\n' "$@" | grep 'only-testing:' | head -1 | sed 's|.*/||')
-echo "retry:$cls" >> "$INVOCATION_LOG"
+pairs=""
+for a in "$@"; do
+  case "$a" in
+    -only-testing:*)
+      c="${a#-only-testing:*/}"
+      echo "retry:$c" >> "$INVOCATION_LOG"
+      case "$FAKE_WEDGE_RETRY" in
+        pass) pairs="$pairs $c:Passed" ;;
+        *) pairs="$pairs $c:Failed" ;;
+      esac
+      ;;
+  esac
+done
+write_doc "$FAKE_CANNED" $pairs
 case "$FAKE_WEDGE_RETRY" in
   pass)
-    write_doc "$FAKE_CANNED" "$cls:Passed"
     exit 0
     ;;
   signature)
-    write_doc "$FAKE_CANNED" "$cls:Failed"
     emit_signature
     echo "Test Case failed (stub)"
     exit 65
     ;;
   *)
-    write_doc "$FAKE_CANNED" "$cls:Failed"
     echo "Test Case failed (stub)"
     exit 65
     ;;
@@ -671,15 +680,18 @@ write_wedge_stub_xcodebuild
 export FAKE_CANNED="$WORK/canned-wedge.json"
 export INVOCATION_LOG="$WORK/w1-invocations.log"; : > "$INVOCATION_LOG"
 export FAKE_WEDGE_A1="signature" FAKE_WEDGE_RETRY="pass"
-run_lane "VoiceTests,HealthyTests" 300 unused 3
+export FAKE_WEDGE_FAIL_CLASSES="VoiceTests AudioTwoTests"
+run_lane "VoiceTests,AudioTwoTests,HealthyTests" 300 unused 3
+export FAKE_WEDGE_FAIL_CLASSES=""
 assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "0"
 assert_eq "verdict" "$(lane_field "['status']")" "pass"
 assert_eq "attempts" "$(attempts_statuses)" "['audio-wedge', 'passed']"
-assert_eq "recovery recorded, not a flake" "$(lane_field "['infra_recovered_classes']")" "['VoiceTests']"
+assert_eq "recovery recorded, not a flake" "$(lane_field "['infra_recovered_classes']")" "['VoiceTests', 'AudioTwoTests']"
 assert_eq "wedge metadata embedded" "$(coreaudio_wedge_field "['wedge']")" "True"
 assert_eq "signature counts in metadata" "$(coreaudio_wedge_field "['signals']['auremoteio_10851']")" "200"
 assert_eq "one full-lane invocation" "$(grep -c '^inv:filters=2$' "$INVOCATION_LOG")" "1"
-assert_eq "only the affected class re-ran" "$(grep -c '^retry:VoiceTests$' "$INVOCATION_LOG")" "1"
+assert_eq "first affected class re-ran" "$(grep -c '^retry:VoiceTests$' "$INVOCATION_LOG")" "1"
+assert_eq "second affected class re-ran" "$(grep -c '^retry:AudioTwoTests$' "$INVOCATION_LOG")" "1"
 assert_eq "healthy class never re-ran" "$(grep -c '^retry:HealthyTests$' "$INVOCATION_LOG")" "0"
 if grep -q "CoreAudio infrastructure wedge detected" "$WORKCASE/stdout.log" \
    && grep -q "AURemoteIO -10851 occurrences: 200" "$WORKCASE/stdout.log" \

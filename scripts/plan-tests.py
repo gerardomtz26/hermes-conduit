@@ -612,8 +612,10 @@ def validate_plan(plan: dict, discovery: dict,
     # is additive (it exists exactly once iff the inventory names a
     # discovered class) and must never push a legitimate 8-general-lane plan
     # over max_lanes.
-    n_unit = len(unit_names)
-    lo = min(plan["config"]["min_lanes"], n_unit)
+    general_names_count = len([
+        c for c in unit_names
+        if c not in set(plan.get("audio_sensitive_classes", []))])
+    lo = min(plan["config"]["min_lanes"], general_names_count)
     hi = plan["config"]["max_lanes"]
     general_count = sum(1 for l in plan["unit_lanes"] if l["lane"] != AUDIO_LANE_NAME)
     if general_count < lo or general_count > hi:
