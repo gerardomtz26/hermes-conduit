@@ -787,7 +787,13 @@ final class AppState: ObservableObject {
     /// Bumped at every server-identity boundary; responses captured under an
     /// older epoch are dropped, so a stale async roster can never overwrite
     /// the state of a different dashboard/profile.
-    private var botRosterEpoch = 0    /// Bot chats belong to the BOT's profile, not the dashboard's. Every
+    private var botRosterEpoch = 0
+    /// Ownership token for the in-flight roster refresh: only the refresh
+    /// that captured the CURRENT token may release the single-flight flag,
+    /// so no superseded refresh can clear a newer one's claim and no
+    /// identity change can strand the flag.
+    private var botRosterRefreshToken: UUID?
+    /// Bot chats belong to the BOT's profile, not the dashboard's. Every
     /// re-resume of an open bot chat (reconnect, refresh, preserve-current
     /// sync) consults this in-memory registry to scope the resume RPC; it is
     /// never persisted — a canonical Bot Chat has no client-side pointer.
@@ -1315,7 +1321,7 @@ final class AppState: ObservableObject {
         )
         let restorationKeys: Set<String>? = {
             guard let restorationGuard = restoredPendingDecisionCardsAwaitingConfirmation,
-                  restorationGuard.profile == activeProfile,
+                  restorationGuard.profile == presentationProfile(for: activeSessionId),
                   activeSessionId == restorationGuard.sessionID else {
                 return nil
             }
@@ -1335,7 +1341,7 @@ final class AppState: ObservableObject {
         // store's pending keys or the flush would drop the card before the
         // notification-open resume merge could restore it.
         let storedPendingDecisionKeys = sessionPresentationCache.storedPendingDecisionKeys(
-            profile: activeProfile,
+            profile: presentationProfile(for: activeSessionId),
             sessionIDs: ids
         )
         let pendingDecisionKeysToPreserve = restorationKeys
@@ -1345,7 +1351,7 @@ final class AppState: ObservableObject {
             || !storedPendingDecisionKeys.isEmpty
         sessionPresentationCache.save(
             cacheableMessages,
-            profile: activeProfile,
+            profile: presentationProfile(for: activeSessionId),
             sessionIDs: ids,
             preservePendingDecisionCards: preservePendingDecisionCards,
             unconfirmedPendingDecisionKeys: pendingDecisionKeysToPreserve
@@ -1640,7 +1646,7 @@ final class AppState: ObservableObject {
 
     private func pendingDecisionRestorationMessages(for sessionID: String) -> [ChatMessage] {
         guard let restorationGuard = restoredPendingDecisionCardsAwaitingConfirmation,
-              restorationGuard.profile == activeProfile,
+              restorationGuard.profile == presentationProfile(for: sessionID),
               restorationGuard.sessionID == sessionID else {
             return []
         }
@@ -2306,6 +2312,7 @@ final class AppState: ObservableObject {
         botChatSessionProfiles.removeAll()
         botChatOpenFlights.removeAll()
         botRoster = []
+        botRosterRefreshToken = nil
         isRefreshingBotRoster = false
         botModePhase = .idle
     }
@@ -4306,7 +4313,9 @@ final class AppState: ObservableObject {
                         .union(presentationMigrationSessionIDs)
                         .subtracting([admittedDurable])
                     sessionPresentationCache.consolidateUnderDurableKey(
-                        profile: profile,
+                        // The conversation's own namespace: a bot chat's
+                        // presentation survives dashboard-profile switches.
+                        profile: conversationScopeProfile ?? profile,
                         durableSessionID: admittedDurable,
                         runtimeAliases: Array(runtimeAliases)
                     )
@@ -4364,7 +4373,7 @@ final class AppState: ObservableObject {
                     ?? sessionId
                 sessionPresentationCache.save(
                     transcript.messages,
-                    profile: profile,
+                    profile: conversationScopeProfile ?? profile,
                     sessionIDs: Self.durableOwnedPresentationIDs(
                         [sessionId, result.sessionId, transcript.resolvedSessionId].compactMap { $0 },
                         durableSessionID: presentationDurableID
@@ -4859,7 +4868,7 @@ final class AppState: ObservableObject {
         }
         let restored = sessionPresentationCache.merge(
             result.messages + retainedMessages,
-            profile: activeProfile,
+            profile: presentationProfile(for: result.sessionId),
             sessionIDs: sessionIDs,
             includePendingClarifications: restorePendingDecisionCards,
             includePendingApprovals: restorePendingDecisionCards
@@ -4929,18 +4938,18 @@ final class AppState: ObservableObject {
         )
         sessionPresentationCache.save(
             shouldPersistMergedPresentation ? messages : result.messages,
-            profile: activeProfile,
+            profile: presentationProfile(for: result.sessionId),
             sessionIDs: persistedSessionIDs,
             preservePendingDecisionCards: gatewayConfirmsActiveTurn || !unconfirmedPendingDecisionKeys.isEmpty,
             unconfirmedPendingDecisionKeys: unconfirmedPendingDecisionKeys
         )
         if result.snapshot.running != true && !restoredPendingDecisionKeys.isEmpty {
             let restoredAt = sessionPresentationCache.unconfirmedPendingDecisionDate(
-                profile: activeProfile,
+                profile: presentationProfile(for: result.sessionId),
                 sessionIDs: sessionIDs
             ) ?? Date()
             restoredPendingDecisionCardsAwaitingConfirmation = PendingDecisionRestorationGuard(
-                profile: activeProfile,
+                profile: presentationProfile(for: result.sessionId),
                 sessionID: result.sessionId,
                 pendingDecisionKeys: restoredPendingDecisionKeys,
                 restoredAt: restoredAt,
@@ -7682,7 +7691,19 @@ final class AppState: ObservableObject {
             return
         }
         isRefreshingBotRoster = true
-        defer { isRefreshingBotRoster = false }
+        let refreshToken = UUID()
+        botRosterRefreshToken = refreshToken
+        // Ownership-checked release: only the refresh holding the CURRENT
+        // token releases the flag. A refresh superseded by invalidation
+        // (token cleared) or by a newer refresh (token replaced) never
+        // clears someone else's claim, and no identity transition can
+        // strand the flag.
+        defer {
+            if botRosterRefreshToken == refreshToken {
+                botRosterRefreshToken = nil
+                isRefreshingBotRoster = false
+            }
+        }
         if botRoster.isEmpty {
             botModePhase = .loading
         }
@@ -7744,9 +7765,14 @@ final class AppState: ObservableObject {
         if let flight = botChatOpenFlights[flightKey] {
             return await flight.task?.value ?? false
         }
+        // The closure captures the box WEAKLY: a strong capture would form
+        // a flight<->task retain cycle that outlives the map entry.
         let flight = BotChatOpenFlight()
-        let task = Task { @MainActor [weak self] () -> Bool in
-            guard let self else { return false }
+        let task = Task { @MainActor [weak self, weak flight] () -> Bool in
+            // `flight` is retained strongly by the creating scope across
+            // `await task.value`, so the weak capture only breaks the
+            // box<->task cycle — it can never fire nil here.
+            guard let self, let flight else { return false }
             // Identity-checked cleanup: a flight orphaned by a server switch
             // (map cleared, then a newer flight for the same bot) must never
             // evict that newer flight's entry.
@@ -7816,19 +7842,24 @@ final class AppState: ObservableObject {
     ) async -> Bool {
         noteBotChatSession(resumeID, profile: bot.name)
         noteBotChatSession(registryID, profile: bot.name)
-        let opened = await openSession(
+        let outcome = await performSessionOpen(
             resumeID,
+            reusing: nil,
             conversationProfile: bot.name,
             preferredTitle: bot.displayLabel
         )
-        if !opened, !Task.isCancelled,
+        // Only a GENUINE failure owned by this invocation may publish: a
+        // superseded open (the user navigated elsewhere, or re-tapped this
+        // same bot so a newer open owns the viewport) is navigation state,
+        // not an error.
+        if outcome == .failed, !Task.isCancelled,
            botOpenFenceIsCurrent(epoch: epoch, client: client),
            errorMessage == nil {
             errorMessage = AppLocalization.string(
                 "Could not open \(bot.displayLabel)'s Bot Chat."
             )
         }
-        return opened
+        return outcome == .opened
     }
 
     /// Creates the bot's ONE forever chat (lookup confirmed absence): hidden,
@@ -7976,9 +8007,19 @@ final class AppState: ObservableObject {
         botChatSessionProfiles[sessionID]
     }
 
+    /// The presentation-cache namespace for a conversation. Canonical Bot
+    /// Chats are partitioned under their OWN profile so presentation rows
+    /// and pending decision cards survive dashboard-profile switches and
+    /// reconcile under the same key they were written with; ordinary
+    /// conversations resolve to the dashboard profile exactly as before.
+    private func presentationProfile(for sessionID: String?) -> String {
+        guard let sessionID else { return activeProfile }
+        return botConversationProfile(for: sessionID) ?? activeProfile
+    }
+
     @discardableResult
     func openSession(_ sessionId: String) async -> Bool {
-        await openSession(sessionId, reusing: nil)
+        await performSessionOpen(sessionId, reusing: nil) == .opened
     }
 
     /// Entry for conversations that live outside the dashboard's own profile
@@ -7990,12 +8031,12 @@ final class AppState: ObservableObject {
         conversationProfile: String?,
         preferredTitle: String? = nil
     ) async -> Bool {
-        await openSession(
+        await performSessionOpen(
             sessionId,
             reusing: nil,
             conversationProfile: conversationProfile,
             preferredTitle: preferredTitle
-        )
+        ) == .opened
     }
 
     @discardableResult
@@ -8021,14 +8062,24 @@ final class AppState: ObservableObject {
         explicitSessionOpenTask = nil
     }
 
-    private func openSession(
+    /// Why an open did not complete. A SUPERSEDED open (a newer navigation
+    /// owns the viewport transition) is navigation state, never a failure:
+    /// callers must not publish failure text for it, even when the newer
+    /// navigation re-opened the SAME session id.
+    enum SessionOpenOutcome {
+        case opened
+        case superseded
+        case failed
+    }
+
+    private func performSessionOpen(
         _ sessionId: String,
         reusing viewportTransitionGeneration: UInt64?,
         presentationMigrationSessionIDs: Set<String> = [],
         conversationProfile: String? = nil,
         preferredTitle: String? = nil
-    ) async -> Bool {
-        guard let client else { return false }
+    ) async -> SessionOpenOutcome {
+        guard let client else { return .failed }
         let previousTurnState = turnState
         // The catalog-ownership guard protects ORDINARY opens from another
         // dashboard profile's rows. A bot open carries the conversation's
@@ -8040,19 +8091,19 @@ final class AppState: ObservableObject {
                $0.id == sessionId || $0.alternateIds.contains(sessionId)
            }), !sessionBelongsToProfile(session, profile: activeProfile) {
             errorMessage = AppLocalization.string("That conversation belongs to another workspace. Switch profiles to open it.")
-            return false
+            return .failed
         }
         let transitionGeneration: UInt64
         if let viewportTransitionGeneration {
             guard chatViewportTransitionIsCurrent(
                 generation: viewportTransitionGeneration
-            ) else { return false }
+            ) else { return .superseded }
             transitionGeneration = viewportTransitionGeneration
         } else {
             transitionGeneration = beginExplicitChatViewportTransition()
         }
         guard chatViewportTransitionIsCurrent(generation: transitionGeneration) else {
-            return false
+            return .superseded
         }
         markChatViewportReplacement()
         // Atomically switch session identity BEFORE clearing the transcript.
@@ -8094,15 +8145,18 @@ final class AppState: ObservableObject {
             conversationProfile: conversationProfile
         )
         guard chatViewportTransitionIsCurrent(generation: transitionGeneration) else {
-            return false
+            return .superseded
         }
         if !reconciled {
             finishChatViewportTransition(generation: transitionGeneration)
             if Task.isCancelled, turnState == .synchronizing {
                 turnState = previousTurnState
             }
+            // This open still owns the viewport, so the reconcile failure is
+            // genuine (identity rejection and friends set their own message).
+            return .failed
         }
-        return reconciled
+        return .opened
     }
 
     /// Routes a notification to its originating profile/session without
@@ -8222,7 +8276,7 @@ final class AppState: ObservableObject {
                 cacheSessionIDs: [requestedID]
             )
         }
-        let opened = await openSession(
+        let opened = await performSessionOpen(
             route.resumeTargetID,
             reusing: transitionGeneration,
             // The push-named runtime id is a PRESENTATION MIGRATION SOURCE,
@@ -8232,7 +8286,7 @@ final class AppState: ObservableObject {
             // rejected open nothing migrates (the hook only runs on
             // admission success).
             presentationMigrationSessionIDs: [requestedID]
-        )
+        ) == .opened
         // Commit the payload's dual identity as positive evidence only once
         // the open actually succeeded — a failed resume (e.g. the durable
         // conversation was deleted server-side) must not leave a mapping
@@ -8258,7 +8312,7 @@ final class AppState: ObservableObject {
             // conversation.
             sessionPresentationCache.removePendingDecision(
                 key: evictionKey,
-                profile: activeProfile,
+                profile: presentationProfile(for: requestedID),
                 sessionIDs: [requestedID]
             )
         }
@@ -8301,6 +8355,11 @@ final class AppState: ObservableObject {
         cacheSessionIDs: [String]? = nil
     ) {
         let persistedIDs = cacheSessionIDs ?? sessionIDs
+        // The notified conversation's own namespace: the live session on
+        // screen is not necessarily the conversation the push named, and
+        // the later open/eviction of the named conversation must find the
+        // card under the same key it was recorded under.
+        let recordProfile = presentationProfile(for: persistedIDs.first ?? activeSessionId)
         switch decision {
         case let .approval(sessionKey, description, choices):
             // Compare trimmed on both sides: the payload parser trims the
@@ -8330,7 +8389,7 @@ final class AppState: ObservableObject {
             )
             sessionPresentationCache.recordPendingDecision(
                 message,
-                profile: activeProfile,
+                profile: recordProfile,
                 sessionIDs: persistedIDs
             )
         case let .clarify(requestId, question, choices):
@@ -8354,7 +8413,7 @@ final class AppState: ObservableObject {
             )
             sessionPresentationCache.recordPendingDecision(
                 message,
-                profile: activeProfile,
+                profile: recordProfile,
                 sessionIDs: persistedIDs
             )
         case let .clarifyBatch(requestId, questions):
@@ -8371,7 +8430,7 @@ final class AppState: ObservableObject {
             )
             sessionPresentationCache.recordPendingDecision(
                 message,
-                profile: activeProfile,
+                profile: recordProfile,
                 sessionIDs: persistedIDs
             )
         }
@@ -14358,7 +14417,7 @@ final class AppState: ObservableObject {
         for requestId in supersededRequestIds {
             sessionPresentationCache.removePendingDecision(
                 key: "clarify:\(requestId)",
-                profile: activeProfile,
+                profile: presentationProfile(for: activeSessionId),
                 sessionIDs: cacheSessionIDs
             )
         }

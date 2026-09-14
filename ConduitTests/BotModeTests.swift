@@ -43,7 +43,7 @@ final class BotModeTests: XCTestCase {
 
         XCTAssertTrue(snapshot.supportsBotProtocol)
         XCTAssertEqual(snapshot.bots.count, 1)
-        let bot = snapshot.bots[0]
+        let bot = try XCTUnwrap(snapshot.bots.first)
         XCTAssertEqual(bot.name, "atlas")
         XCTAssertEqual(bot.displayLabel, "Scout", "the customized bot title outranks the profile display name")
         XCTAssertEqual(bot.profileDescription, "Research agent")
@@ -69,8 +69,9 @@ final class BotModeTests: XCTestCase {
         let snapshot = try XCTUnwrap(BotRosterDecoder.decode(.object(payload)))
 
         XCTAssertFalse(snapshot.supportsBotProtocol, "an older gateway omits the protocol flag")
-        XCTAssertEqual(snapshot.bots[0].displayLabel, "Default Profile")
-        XCTAssertNil(snapshot.bots[0].canonicalSession)
+        let bot = try XCTUnwrap(snapshot.bots.first)
+        XCTAssertEqual(bot.displayLabel, "Default Profile")
+        XCTAssertNil(bot.canonicalSession)
     }
 
     func testRosterDecodeRejectsNonProfilesEnvelope() {
@@ -602,6 +603,166 @@ final class BotModeTests: XCTestCase {
             try resolution.get(),
             .openExisting(registryID: "a-1", resumeID: "a-1"),
             "a pin that matches none of the forks falls back to the listing order"
+        )
+    }
+
+    // MARK: - PR #170 review triage regressions
+
+    func testLookupDecoderRejectsAnyMalformedRowInsteadOfDiscarding() {
+        // A conforming gateway always emits non-empty ids, but the decoder
+        // is the identity registry: one malformed row makes the WHOLE
+        // lookup unreliable, and an unreliable lookup must read as failure —
+        // never as confirmed absence (which is what authorizes minting).
+        let payload: [String: AnyCodable] = [
+            "sessions": .array([
+                .object([
+                    "id": .string("stored-1"),
+                    "title": .string("Bot Chat")
+                ]),
+                // Structurally malformed: no id at all.
+                .object([
+                    "title": .string("Bot Chat")
+                ])
+            ])
+        ]
+
+        XCTAssertNil(
+            BotChatLookupDecoder.decode(.object(payload)),
+            "a malformed row must fail the whole lookup, never shrink it"
+        )
+    }
+
+    func testLookupDecoderRejectsNonDictionaryRow() {
+        let payload: [String: AnyCodable] = [
+            "sessions": .array([
+                .string("not-a-row")
+            ])
+        ]
+
+        XCTAssertNil(BotChatLookupDecoder.decode(.object(payload)))
+    }
+
+    func testSupersededRosterRefreshDoesNotClearNewerRefreshClaim() async {
+        // Boxes the two seam invocations can poll from the test body.
+        final class Gate: @unchecked Sendable {
+            var open = false
+        }
+        let releaseFirst = Gate()
+        var calls = 0
+        let rosterBot = makeBot(name: "atlas")
+        let staleBot = makeBot(name: "stale-bot")
+        let harness = makeBotHarness(
+            configureDefaults: { defaults in
+                defaults.set(
+                    "https://one.example",
+                    forKey: "conduit.chatResumeServerIdentity.v1"
+                )
+            },
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                botRoster: { _ in
+                    calls += 1
+                    if calls == 1 {
+                        while !releaseFirst.open {
+                            try? await Task.sleep(nanoseconds: 10_000_000)
+                        }
+                        return BotRosterSnapshot(bots: [staleBot], supportsBotProtocol: true)
+                    }
+                    // The newer refresh holds the claim long enough for the
+                    // superseded one to finish and (wrongly) release it.
+                    try? await Task.sleep(nanoseconds: 200_000_000)
+                    return BotRosterSnapshot(bots: [rosterBot], supportsBotProtocol: true)
+                }
+            )
+        )
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+
+        let first = Task { @MainActor [weak harnessState = harness.appState] in
+            await harnessState?.refreshBotRoster()
+        }
+        try? await Task.sleep(nanoseconds: 60_000_000)
+        // Server switch: bumps the epoch and resets the single-flight flag.
+        _ = harness.appState.prepareChatResumeForConnection(
+            to: "https://elsewhere.example",
+            dashboardID: UUID()
+        )
+        let second = Task { @MainActor [weak harnessState = harness.appState] in
+            await harnessState?.refreshBotRoster()
+        }
+        try? await Task.sleep(nanoseconds: 60_000_000)
+        XCTAssertTrue(
+            harness.appState.isRefreshingBotRoster,
+            "the newer refresh owns the single-flight claim"
+        )
+
+        releaseFirst.open = true
+        await first.value
+        XCTAssertTrue(
+            harness.appState.isRefreshingBotRoster,
+            "the superseded refresh completing must NOT clear the newer refresh's claim"
+        )
+        await second.value
+        XCTAssertFalse(harness.appState.isRefreshingBotRoster)
+        XCTAssertEqual(harness.appState.botRoster.map(\.name), ["atlas"])
+    }
+
+    func testSupersededSameSessionBotOpenStaysSilent() async {
+        // While the bot open is mid-resume, a newer ordinary open of the
+        // SAME session id takes over the viewport. The superseded bot open
+        // completes afterwards and must stay silent: supersession is
+        // navigation state, not an error.
+        final class Gate: @unchecked Sendable {
+            var open = false
+        }
+        let releaseBotResume = Gate()
+        var resumeCalls = 0
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            openSessionWithProfile: { _, id, _, _ in
+                resumeCalls += 1
+                if resumeCalls == 1 {
+                    while !releaseBotResume.open {
+                        try? await Task.sleep(nanoseconds: 10_000_000)
+                    }
+                }
+                return SessionResumeResult(
+                    sessionId: id,
+                    storedSessionId: "stored-1",
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            findBotChat: { _, _ in
+                [BotChatLookupRow(id: "stored-1", resolvedID: "runtime-1", title: "Bot Chat")]
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        let bot = makeBot(name: "atlas")
+
+        let botOpen = Task { @MainActor [weak harnessState = harness.appState] in
+            await harnessState?.openBotChat(for: bot)
+        }
+        try? await Task.sleep(nanoseconds: 60_000_000)
+        // A newer navigation re-opens the SAME session id through the
+        // ordinary path; it takes over the viewport transition.
+        _ = await harness.appState.openSession("runtime-1")
+        releaseBotResume.open = true
+
+        let opened = (await botOpen.value) ?? false
+
+        XCTAssertEqual(resumeCalls, 2)
+        XCTAssertFalse(
+            opened,
+            "the superseded open did not complete — the newer navigation owns the viewport"
+        )
+        XCTAssertNil(
+            harness.appState.errorMessage,
+            "a superseded bot open is navigation state, never an error"
         )
     }
 

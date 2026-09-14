@@ -188,22 +188,35 @@ struct BotChatLookupRow: Equatable {
 }
 
 enum BotChatLookupDecoder {
-    /// Decodes the exact-title `session.list` answer. Nil when the payload is
-    /// not a sessions envelope.
+    /// Decodes the exact-title `session.list` answer.
+    ///
+    /// FAIL-CLOSED on structure: a conforming gateway always returns a
+    /// non-empty `id` per row (upstream `_session_row_summary`), but this
+    /// decoder is the identity registry, not a listing — one structurally
+    /// malformed row makes the WHOLE answer unreliable, and an unreliable
+    /// lookup must read as failure (never silently discard the row and
+    /// continue), because "empty" is what authorizes creating the forever
+    /// chat. Nil therefore means "lookup failed", and every caller refuses
+    /// to mint.
     static func decode(_ result: AnyCodable) -> [BotChatLookupRow]? {
         guard let rows = result.objectValue?["sessions"]?.arrayValue else { return nil }
-        return rows.compactMap { row in
+        var decoded: [BotChatLookupRow] = []
+        decoded.reserveCapacity(rows.count)
+        for row in rows {
             guard let object = row.objectValue,
                   let id = object["id"]?.stringValue?
                       .trimmingCharacters(in: .whitespacesAndNewlines),
-                  !id.isEmpty else { return nil }
-            return BotChatLookupRow(
+                  !id.isEmpty else {
+                return nil
+            }
+            decoded.append(BotChatLookupRow(
                 id: id,
                 resolvedID: object["resolved_id"]?.stringValue,
                 title: object["title"]?.stringValue,
                 rootTitle: object["root_title"]?.stringValue
-            )
+            ))
         }
+        return decoded
     }
 }
 

@@ -6,6 +6,9 @@ import SwiftUI
 /// Profile CRUD, groups, and presence are deliberately out of Phase 1 scope.
 struct BotRosterView: View {
     @EnvironmentObject private var appState: AppState
+    /// Language changes must re-render localized strings immediately while
+    /// the Bots tab stays selected (same contract as SessionList/CronList).
+    @ObservedObject private var appLanguage = AppLanguageStore.shared
 
     var body: some View {
         Group {
@@ -90,16 +93,16 @@ struct BotRosterView: View {
                     }
                 }
             } else {
-                // Everything loaded earlier is meta-hidden: keep the calm
-                // copy, but retain Retry for a transient refresh failure
-                // (or a bot un-hidden server-side since the last load).
+                // Everything loaded earlier is meta-hidden: the user can't
+                // see any bot, but the refresh failure must still surface —
+                // it may be transient (or a bot was un-hidden server-side).
                 ContentUnavailableView {
                     Label(
-                        AppLocalization.string("No Bots Yet"),
-                        systemImage: "person.2"
+                        AppLocalization.string("Could not refresh bots."),
+                        systemImage: "exclamationmark.triangle"
                     )
                 } description: {
-                    Text(AppLocalization.string("Bots you create with Hermes appear here."))
+                    Text(message)
                 } actions: {
                     Button(AppLocalization.string("Retry")) {
                         Task { await appState.refreshBotRoster() }

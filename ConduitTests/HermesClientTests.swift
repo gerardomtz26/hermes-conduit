@@ -340,13 +340,14 @@ final class HermesClientTests: XCTestCase {
                 ]]
             ]
         ]
-        socket.deliver(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)!)
+        socket.deliver(try XCTUnwrap(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)))
 
         let rows = try await awaitResult(of: lookupTask, "the canonical-chat lookup response")
         XCTAssertEqual(rows.count, 1)
-        XCTAssertEqual(rows[0].id, "stored-1")
-        XCTAssertEqual(rows[0].resolvedID, "runtime-1")
-        XCTAssertTrue(rows[0].isCanonicalTitle())
+        let row = try XCTUnwrap(rows.first)
+        XCTAssertEqual(row.id, "stored-1")
+        XCTAssertEqual(row.resolvedID, "runtime-1")
+        XCTAssertTrue(row.isCanonicalTitle())
         client.disconnect()
     }
 
@@ -391,7 +392,7 @@ final class HermesClientTests: XCTestCase {
                 "stored_session_id": "stored-new"
             ]
         ]
-        socket.deliver(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)!)
+        socket.deliver(try XCTUnwrap(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)))
 
         let created = try await awaitResult(of: createTask, "the canonical chat create response")
         XCTAssertEqual(created.sessionId, "runtime-new")
@@ -433,7 +434,7 @@ final class HermesClientTests: XCTestCase {
             "id": id,
             "result": ["title": "Bot Chat"]
         ]
-        socket.deliver(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)!)
+        socket.deliver(try XCTUnwrap(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)))
 
         _ = try await titleTask.value
         client.disconnect()
@@ -472,7 +473,7 @@ final class HermesClientTests: XCTestCase {
             "id": id,
             "result": ["session_id": "runtime-1", "messages": [Any]()]
         ]
-        socket.deliver(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)!)
+        socket.deliver(try XCTUnwrap(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)))
 
         _ = try await awaitResult(of: openTask, "the profile-scoped resume response")
         client.disconnect()
@@ -507,7 +508,7 @@ final class HermesClientTests: XCTestCase {
             "id": id,
             "result": ["sessions": [Any]()]
         ]
-        socket.deliver(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)!)
+        socket.deliver(try XCTUnwrap(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)))
 
         let rows = try await awaitResult(of: lookupTask, "the lookup response")
         XCTAssertTrue(rows.isEmpty)
@@ -549,7 +550,7 @@ final class HermesClientTests: XCTestCase {
                 ]]
             ]
         ]
-        socket.deliver(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)!)
+        socket.deliver(try XCTUnwrap(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)))
 
         let snapshot = try await awaitResult(of: rosterTask, "the profiles.list response")
         XCTAssertTrue(snapshot.supportsBotProtocol)
@@ -592,7 +593,7 @@ final class HermesClientTests: XCTestCase {
                 "info": ["running": false]
             ]
         ]
-        socket.deliver(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)!)
+        socket.deliver(try XCTUnwrap(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)))
 
         let result = try await awaitResult(of: openTask, "the legacy session.resume response")
         XCTAssertEqual(result.messages.map({ $0.role }), [.user, .assistant])
@@ -653,7 +654,7 @@ final class HermesClientTests: XCTestCase {
                 "info": ["running": false]
             ]
         ]
-        socket.deliver(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)!)
+        socket.deliver(try XCTUnwrap(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)))
 
         let result = try await awaitResult(of: openTask, "the legacy session.resume response")
         XCTAssertEqual(result.messages.map({ $0.role }), [.user, .system, .system])
@@ -704,7 +705,7 @@ final class HermesClientTests: XCTestCase {
                 "id": id,
                 "result": ["status": gatewayStatus]
             ]
-            socket.deliver(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)!)
+            socket.deliver(try XCTUnwrap(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)))
 
             let outcome = try await awaitResult(of: submitTask, "the prompt.submit response")
             XCTAssertEqual(outcome, expected)
@@ -761,7 +762,7 @@ final class HermesClientTests: XCTestCase {
                 ]
             ]
         ]
-        socket.deliver(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)!)
+        socket.deliver(try XCTUnwrap(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)))
 
         let rows = try await awaitResult(of: probeTask, "the session.active_list response")
         XCTAssertEqual(rows.count, 2, "Rows without a runtime id are dropped")
@@ -811,7 +812,7 @@ final class HermesClientTests: XCTestCase {
             "id": id,
             "result": ["sessions": []]
         ]
-        socket.deliver(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)!)
+        socket.deliver(try XCTUnwrap(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)))
 
         let rows = try await awaitResult(of: probeTask, "the session.active_list response")
         XCTAssertTrue(rows.isEmpty)
@@ -858,7 +859,7 @@ final class HermesClientTests: XCTestCase {
             "id": id,
             "result": result
         ]
-        socket.deliver(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)!)
+        socket.deliver(try XCTUnwrap(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)))
 
         let outcome = try await awaitResult(of: respondTask, "the clarify.respond response", file: file, line: line)
         client.disconnect()
@@ -1019,7 +1020,7 @@ final class HermesClientTests: XCTestCase {
                 ]
             ]
         ]
-        socket.deliver(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)!)
+        socket.deliver(try XCTUnwrap(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)))
 
         let result = try await awaitResult(of: compressTask, "the session.compress response")
         XCTAssertEqual(result.status, .compressed)
@@ -1060,7 +1061,7 @@ final class HermesClientTests: XCTestCase {
             "id": id,
             "result": ["status": "pending", "message": "compression still running in the background"]
         ]
-        socket.deliver(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)!)
+        socket.deliver(try XCTUnwrap(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)))
 
         let result = try await awaitResult(of: compressTask, "the pending session.compress response")
         XCTAssertTrue(result.isPending)
