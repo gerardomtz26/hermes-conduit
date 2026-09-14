@@ -778,7 +778,7 @@ cat > "$STUBS/xcodebuild" <<'STUB'
 for a in "$@"; do
   case "$a" in *.xcresult)
     mkdir -p "$a"
-    RESULT_DIR=$(dirname "$(dirname "$a")")
+    RESULT_DIR=$(dirname "$a")
     ;;
   esac
 done
@@ -860,10 +860,12 @@ chmod +x "$STUBS/xcodebuild"
 export INVOCATION_LOG="$WORK/w7-invocations.log"; : > "$INVOCATION_LOG"
 export ISOLATION_BUDGET_S=200 CLASS_TIMEOUT_MIN_S=1 CLASS_TIMEOUT_MULTIPLIER=0.1
 run_lane "AlphaTests,BetaTests" 3 unused 1
-assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
-assert_eq "verdict" "$(lane_field "['status']")" "timeout"
+# Isolation diagnoses both classes clean, so the lane ends as the documented
+# isolation-recovery pass - NOT a wedge recovery.
+assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "0"
+assert_eq "verdict" "$(lane_field "['status']")" "pass"
 assert_eq "first attempt is a timeout" "$(attempts_statuses | grep -o 'timeout' | head -1)" "timeout"
-assert_eq "no audio-retry attempt" "$(grep -c 'audio-retry' "$WORKCASE/lane-result.json" 2>/dev/null || echo 0)" "0"
+assert_eq "no audio-retry attempt" "$(grep -o 'audio-retry' "$WORKCASE/lane-result.json" 2>/dev/null | wc -l | tr -d ' ')" "0"
 if grep -q "CoreAudio infrastructure wedge detected" "$WORKCASE/stdout.log"; then
   bad "the wedge recovery must not fire on a watchdog timeout"
 else
@@ -910,7 +912,7 @@ run_lane "VoiceTests" 300 infra-once 1
 assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "0"
 assert_eq "verdict" "$(lane_field "['status']")" "pass"
 assert_eq "attempts are the ordinary infra chain" "$(attempts_statuses)" "['infra-recovered', 'passed']"
-assert_eq "no audio-retry marker" "$(grep -c 'audio-retry' "$WORKCASE/lane-result.json" 2>/dev/null || echo 0)" "0"
+assert_eq "no audio-retry marker" "$(grep -o 'audio-retry' "$WORKCASE/lane-result.json" 2>/dev/null | wc -l | tr -d ' ')" "0"
 
 export AUDIO_INVENTORY=""
 
