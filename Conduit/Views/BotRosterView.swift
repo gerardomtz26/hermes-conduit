@@ -90,8 +90,9 @@ struct BotRosterView: View {
                     }
                 }
             } else {
-                // Everything loaded earlier is meta-hidden: nothing to
-                // show, and no retry that would change that.
+                // Everything loaded earlier is meta-hidden: keep the calm
+                // copy, but retain Retry for a transient refresh failure
+                // (or a bot un-hidden server-side since the last load).
                 ContentUnavailableView {
                     Label(
                         AppLocalization.string("No Bots Yet"),
@@ -99,6 +100,10 @@ struct BotRosterView: View {
                     )
                 } description: {
                     Text(AppLocalization.string("Bots you create with Hermes appear here."))
+                } actions: {
+                    Button(AppLocalization.string("Retry")) {
+                        Task { await appState.refreshBotRoster() }
+                    }
                 }
             }
         case .available:

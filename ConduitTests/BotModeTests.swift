@@ -575,6 +575,36 @@ final class BotModeTests: XCTestCase {
         XCTAssertEqual(harness.appState.botModePhase, .idle)
     }
 
+    func testResolverPinsRosterCanonicalAmongLegacyForks() throws {
+        let rows = [
+            BotChatLookupRow(id: "stray-1", title: "Bot Chat"),
+            BotChatLookupRow(id: "stored-1", resolvedID: "runtime-1", title: "Bot Chat")
+        ]
+
+        let resolution = BotChatResolver.resolve(rows: rows, rosterCanonicalID: "stored-1")
+
+        XCTAssertEqual(
+            try resolution.get(),
+            .openExisting(registryID: "stored-1", resumeID: "runtime-1"),
+            "the roster's server-resolved registry breaks ties among legacy forks"
+        )
+    }
+
+    func testResolverFallsBackToFirstCanonicalWhenRosterPinMisses() throws {
+        let rows = [
+            BotChatLookupRow(id: "a-1", title: "Bot Chat"),
+            BotChatLookupRow(id: "b-1", title: "Bot Chat")
+        ]
+
+        let resolution = BotChatResolver.resolve(rows: rows, rosterCanonicalID: "not-present")
+
+        XCTAssertEqual(
+            try resolution.get(),
+            .openExisting(registryID: "a-1", resumeID: "a-1"),
+            "a pin that matches none of the forks falls back to the listing order"
+        )
+    }
+
     // MARK: - review-hardening regressions
 
     func testStrayCatalogRowDoesNotBlockCanonicalOpen() async {

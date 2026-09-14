@@ -4386,7 +4386,7 @@ final class AppState: ObservableObject {
                 requestedSessionId: sessionId,
                 resolvedSessionId: transcript?.resolvedSessionId,
                 runtimeSessionId: result.sessionId,
-                profile: profile
+                profile: conversationScopeProfile ?? profile
             ) ? priorWindow : nil
             let presentationResult: SessionResumeResult
             var graftedBackfilledPrefix = false
@@ -7788,9 +7788,7 @@ final class AppState: ObservableObject {
         guard botOpenFenceIsCurrent(epoch: epoch, client: client) else { return false }
         switch BotChatResolver.resolve(rows: rows, rosterCanonicalID: bot.canonicalSessionID) {
         case .failure(.unconfirmedAbsence):
-            errorMessage = AppLocalization.string(
-                "Could not confirm \(bot.displayLabel)'s Bot Chat — not starting a new chat."
-            )
+            refuseBotChatConfirmation(bot)
             return false
         case .success(.openExisting(let registryID, let resumeID)):
             return await openCanonicalBotChat(
@@ -7856,6 +7854,7 @@ final class AppState: ObservableObject {
             if BotChatTitleCollision.isError(error) {
                 return await adoptWinningBotChat(bot, client: client, epoch: epoch)
             }
+            guard botOpenFenceIsCurrent(epoch: epoch, client: client) else { return false }
             return failBotChatOpen(bot, error: error, stage: .create)
         }
         guard botOpenFenceIsCurrent(epoch: epoch, client: client) else { return false }
@@ -7873,6 +7872,7 @@ final class AppState: ObservableObject {
             if BotChatTitleCollision.isError(error) {
                 return await adoptWinningBotChat(bot, client: client, epoch: epoch)
             }
+            guard botOpenFenceIsCurrent(epoch: epoch, client: client) else { return false }
             return failBotChatOpen(bot, error: error, stage: .title)
         }
         guard botOpenFenceIsCurrent(epoch: epoch, client: client) else { return false }
@@ -7906,9 +7906,7 @@ final class AppState: ObservableObject {
             // A cancelled or server-switched flight abandons silently, like
             // every other stage; only a current flight speaks.
             guard botOpenFenceIsCurrent(epoch: epoch, client: client) else { return false }
-            errorMessage = AppLocalization.string(
-                "Could not confirm \(bot.displayLabel)'s Bot Chat — not starting a new chat."
-            )
+            refuseBotChatConfirmation(bot)
             return false
         }
         guard botOpenFenceIsCurrent(epoch: epoch, client: client) else { return false }
@@ -7922,9 +7920,7 @@ final class AppState: ObservableObject {
                 client: client
             )
         }
-        errorMessage = AppLocalization.string(
-            "Could not confirm \(bot.displayLabel)'s Bot Chat — not starting a new chat."
-        )
+        refuseBotChatConfirmation(bot)
         return false
     }
 
@@ -7959,6 +7955,12 @@ final class AppState: ObservableObject {
             }
         }
         return false
+    }
+
+    private func refuseBotChatConfirmation(_ bot: BotProfile) {
+        errorMessage = AppLocalization.string(
+            "Could not confirm \(bot.displayLabel)'s Bot Chat — not starting a new chat."
+        )
     }
 
     private func noteBotChatSession(_ sessionID: String?, profile: String) {
