@@ -12,6 +12,7 @@ import Network
 import SafariServices
 import Security
 import SwiftUI
+import UIKit
 
 struct NativeOAuthTokenSet: Codable, Equatable {
     let accessToken: String
@@ -51,15 +52,15 @@ enum NativeOAuthError: LocalizedError, Equatable {
 
     var errorDescription: String? {
         switch self {
-        case .invalidURL: return "The dashboard returned an invalid sign-in URL."
-        case .randomGenerationFailed: return "Could not prepare a secure sign-in request."
-        case .listenerFailed: return "Could not start the secure sign-in callback."
-        case .callbackMalformed: return "The dashboard returned an invalid sign-in response."
-        case .callbackRejected: return "The identity provider did not complete sign-in."
-        case .stateMismatch: return "The sign-in response failed its security check."
-        case .tokenResponseMalformed: return "The dashboard returned invalid authentication tokens."
-        case .timedOut: return "Sign-in timed out. Please try again."
-        case .requestFailed(let status): return "Dashboard sign-in failed (HTTP \(status))."
+        case .invalidURL: return AppLocalization.string("The dashboard returned an invalid sign-in URL.")
+        case .randomGenerationFailed: return AppLocalization.string("Could not prepare a secure sign-in request.")
+        case .listenerFailed: return AppLocalization.string("Could not start the secure sign-in callback.")
+        case .callbackMalformed: return AppLocalization.string("The dashboard returned an invalid sign-in response.")
+        case .callbackRejected: return AppLocalization.string("The identity provider did not complete sign-in.")
+        case .stateMismatch: return AppLocalization.string("The sign-in response failed its security check.")
+        case .tokenResponseMalformed: return AppLocalization.string("The dashboard returned invalid authentication tokens.")
+        case .timedOut: return AppLocalization.string("Sign-in timed out. Please try again.")
+        case .requestFailed(let status): return AppLocalization.string("Dashboard sign-in failed (HTTP \(status)).")
         }
     }
 }
@@ -134,15 +135,15 @@ enum NativeOAuthFlow {
             guard values[item.name] == nil else { throw NativeOAuthError.callbackMalformed }
             values[item.name] = item.value ?? ""
         }
-        if values["error"]?.isEmpty == false { throw NativeOAuthError.callbackRejected }
         guard values["state"] == expectedState else { throw NativeOAuthError.stateMismatch }
+        if values["error"]?.isEmpty == false { throw NativeOAuthError.callbackRejected }
         guard let code = values["code"], !code.isEmpty else { throw NativeOAuthError.callbackMalformed }
         components.query = nil
         return code
     }
 }
 
-struct NativeOAuthAPIClient {
+final class NativeOAuthAPIClient {
     let baseURL: String
     let cloudflareAccess: CloudflareAccessCredentials?
     private let session: URLSession
@@ -162,6 +163,14 @@ struct NativeOAuthAPIClient {
         let redirectDelegate = SecureRedirectDelegate(passwordLoginURL: nil)
         self.redirectDelegate = redirectDelegate
         self.session = URLSession(configuration: sessionConfiguration, delegate: redirectDelegate, delegateQueue: nil)
+    }
+
+    deinit {
+        session.invalidateAndCancel()
+    }
+
+    func invalidate() {
+        session.invalidateAndCancel()
     }
 
     func exchange(code: String, verifier: String) async throws -> NativeOAuthTokenSet {
@@ -206,7 +215,7 @@ struct NativeOAuthAPIClient {
             throw DashboardTicketBridgeError.oversizedResponse(limit: maxResponseBytes)
         }
         guard (200...299).contains(http.statusCode) else {
-            if http.statusCode == 401 || http.statusCode == 403 {
+            if http.statusCode == 401 {
                 throw DashboardTicketBridgeError.signInRequired
             }
             throw DashboardTicketBridgeError.http(
@@ -281,6 +290,18 @@ final class NativeOAuthSession {
         self.client = NativeOAuthAPIClient(baseURL: baseURL, cloudflareAccess: cloudflareAccess)
     }
 
+    init(tokens: NativeOAuthTokenSet, dashboardID: UUID, client: NativeOAuthAPIClient) {
+        self.dashboardID = dashboardID
+        self.tokens = tokens
+        self.client = client
+    }
+
+    func invalidate() {
+        refreshTask?.cancel()
+        refreshTask = nil
+        client.invalidate()
+    }
+
     func requestJSON(
         path: String,
         method: String = "GET",
@@ -351,7 +372,7 @@ final class NativeOAuthSession {
             let refreshed = try await task.value
             tokens = refreshed
             KeychainHelper.saveNativeOAuthTokens(refreshed, dashboardID: dashboardID)
-        } catch NativeOAuthError.requestFailed(let status) where status == 400 || status == 401 || status == 403 {
+        } catch NativeOAuthError.requestFailed(let status) where status == 400 || status == 401 {
             KeychainHelper.clearNativeOAuthTokens(dashboardID: dashboardID)
             throw DashboardTicketBridgeError.signInRequired
         }
@@ -359,6 +380,7 @@ final class NativeOAuthSession {
 }
 
 final class NativeOAuthLoopbackServer: @unchecked Sendable {
+    private static let maximumRequestBytes = 64 * 1024
     private let queue = DispatchQueue(label: "com.milim.conduit.native-oauth-loopback")
     private let expectedState: String
     private var listener: NWListener?
@@ -435,32 +457,77 @@ final class NativeOAuthLoopbackServer: @unchecked Sendable {
 
     private func handle(connection: NWConnection) {
         connection.start(queue: queue)
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 16_384) { [weak self] data, _, _, _ in
+        receiveRequest(on: connection, accumulated: Data())
+    }
+
+    private func receiveRequest(on connection: NWConnection, accumulated: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 4_096) { [weak self] data, _, isComplete, error in
             guard let self else { return }
-            let requestLine = data.flatMap { String(data: $0, encoding: .utf8) }?
-                .components(separatedBy: "\r\n").first
-            let target = requestLine?.split(separator: " ").dropFirst().first.map(String.init)
-            let html = "<!doctype html><meta charset=\"utf-8\"><title>Signed in</title><body style=\"font:15px system-ui;margin:3rem;text-align:center\"><h2>✓ Signed in to Hermes</h2><p>You can close this window and return to Conduit.</p>"
-            let body = Data(html.utf8)
-            let headers = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
-            var response = Data(headers.utf8)
-            response.append(body)
-            connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
-            guard let target, target.contains("code=") || target.contains("error=") else { return }
-            guard let port = self.port else {
-                self.finish(.failure(NativeOAuthError.callbackMalformed))
+            var request = accumulated
+            if let data { request.append(data) }
+            guard request.count <= Self.maximumRequestBytes else {
+                self.sendResponse(on: connection, status: "431 Request Header Fields Too Large", message: "The sign-in response was too large.")
                 return
             }
-            do {
-                self.finish(.success(try NativeOAuthFlow.callbackCode(
-                    requestTarget: target,
-                    expectedState: self.expectedState,
-                    expectedPort: port
-                )))
-            } catch {
-                self.finish(.failure(error))
+            if request.range(of: Data("\r\n\r\n".utf8)) != nil {
+                self.processRequest(request, on: connection)
+            } else if isComplete || error != nil {
+                self.sendResponse(on: connection, status: "400 Bad Request", message: "The sign-in response was incomplete.")
+            } else {
+                self.receiveRequest(on: connection, accumulated: request)
             }
         }
+    }
+
+    private func processRequest(_ request: Data, on connection: NWConnection) {
+        guard let requestText = String(data: request, encoding: .utf8),
+              let requestLine = requestText.components(separatedBy: "\r\n").first else {
+            sendResponse(on: connection, status: "400 Bad Request", message: "The sign-in response was invalid.")
+            return
+        }
+        let parts = requestLine.split(separator: " ", omittingEmptySubsequences: true)
+        guard parts.count == 3, parts[0] == "GET" else {
+            sendResponse(on: connection, status: "405 Method Not Allowed", message: "Only GET callbacks are accepted.")
+            return
+        }
+        guard let port else {
+            sendResponse(on: connection, status: "503 Service Unavailable", message: "The sign-in callback is not ready.")
+            finish(.failure(NativeOAuthError.listenerFailed))
+            return
+        }
+        do {
+            let code = try NativeOAuthFlow.callbackCode(
+                requestTarget: String(parts[1]),
+                expectedState: expectedState,
+                expectedPort: port
+            )
+            sendResponse(on: connection, status: "200 OK", message: "✓ Signed in to Hermes. You can close this window and return to Conduit.")
+            finish(.success(code))
+        } catch NativeOAuthError.callbackRejected {
+            sendResponse(on: connection, status: "400 Bad Request", message: "Sign-in was not completed. You can return to Conduit.")
+            finish(.failure(NativeOAuthError.callbackRejected))
+        } catch NativeOAuthError.stateMismatch {
+            // A different local process must not be able to terminate the
+            // pending login without knowing the high-entropy state value.
+            sendResponse(on: connection, status: "400 Bad Request", message: "The sign-in response failed its security check.")
+        } catch {
+            // Ignore malformed probes and keep listening for the real browser
+            // callback until cancellation or the bounded timeout.
+            sendResponse(on: connection, status: "400 Bad Request", message: "The sign-in response was invalid.")
+        }
+    }
+
+    private func sendResponse(on connection: NWConnection, status: String, message: String) {
+        let escaped = message
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+        let html = "<!doctype html><meta charset=\"utf-8\"><title>Hermes sign-in</title><body style=\"font:15px system-ui;margin:3rem;text-align:center\"><p>\(escaped)</p>"
+        let body = Data(html.utf8)
+        let headers = "HTTP/1.1 \(status)\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: \(body.count)\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n"
+        var response = Data(headers.utf8)
+        response.append(body)
+        connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
     }
 
     private func finish(_ result: Result<String, Error>) {
@@ -472,7 +539,10 @@ final class NativeOAuthLoopbackServer: @unchecked Sendable {
         listener = nil
         if let continuation = startContinuation {
             startContinuation = nil
-            continuation.resume(throwing: NativeOAuthError.listenerFailed)
+            switch result {
+            case .failure(let error): continuation.resume(throwing: error)
+            case .success: continuation.resume(throwing: NativeOAuthError.listenerFailed)
+            }
         }
         if let continuation = callbackContinuation {
             callbackContinuation = nil
@@ -561,26 +631,39 @@ private struct SafariAuthenticationView: UIViewControllerRepresentable {
     let url: URL
     let onCancel: () -> Void
 
-    func makeUIViewController(context: Context) -> SFSafariViewController {
-        let configuration = SFSafariViewController.Configuration()
-        configuration.entersReaderIfAvailable = false
-        configuration.barCollapsingEnabled = false
-        let controller = SFSafariViewController(url: url, configuration: configuration)
-        controller.delegate = context.coordinator
-        return controller
+    func makeUIViewController(context: Context) -> SafariPresenterViewController {
+        SafariPresenterViewController(url: url, onCancel: onCancel)
     }
 
-    func updateUIViewController(_ uiViewController: SFSafariViewController, context: Context) {}
+    func updateUIViewController(_ uiViewController: SafariPresenterViewController, context: Context) {}
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(onCancel: onCancel)
-    }
+    final class SafariPresenterViewController: UIViewController, SFSafariViewControllerDelegate {
+        private let url: URL
+        private let onCancel: () -> Void
+        private var safariViewController: SFSafariViewController?
 
-    final class Coordinator: NSObject, SFSafariViewControllerDelegate {
-        let onCancel: () -> Void
-
-        init(onCancel: @escaping () -> Void) {
+        init(url: URL, onCancel: @escaping () -> Void) {
+            self.url = url
             self.onCancel = onCancel
+            super.init(nibName: nil, bundle: nil)
+        }
+
+        @available(*, unavailable)
+        required init?(coder: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        override func viewDidAppear(_ animated: Bool) {
+            super.viewDidAppear(animated)
+            guard safariViewController == nil else { return }
+            let configuration = SFSafariViewController.Configuration()
+            configuration.entersReaderIfAvailable = false
+            configuration.barCollapsingEnabled = false
+            let safari = SFSafariViewController(url: url, configuration: configuration)
+            safari.delegate = self
+            safari.modalPresentationStyle = .fullScreen
+            safariViewController = safari
+            present(safari, animated: true)
         }
 
         func safariViewControllerDidFinish(_ controller: SFSafariViewController) {

@@ -442,6 +442,8 @@ final class DashboardTicketBridge: NSObject {
         guard !isInvalidated else { return }
         isInvalidated = true
         isReady = false
+        nativeOAuthSession?.invalidate()
+        nativeOAuthSession = nil
         // A torn-down bridge must report plain unreadiness: leaving a stale
         // login verdict would surface .signInRequired (with its session
         // recovery) from an invalidated instance.

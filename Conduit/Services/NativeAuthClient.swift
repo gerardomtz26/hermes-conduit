@@ -140,18 +140,17 @@ enum HermesProviderCheck {
     }
 
     static func hasNativeOAuthProvider(_ providers: [[String: Any]]) -> Bool {
-        providers.contains { provider in
-            provider["supports_session"] as? Bool != false
-                && provider["supports_password"] as? Bool != true
-        }
+        // `/api/auth/providers` is built from Hermes' list_session_providers(),
+        // so membership is the explicit session-capability signal. Current
+        // Hermes payloads intentionally omit a `supports_session` field.
+        providers.contains { $0["supports_password"] as? Bool != true }
     }
 
     /// Pin the provider only when discovery found exactly one OAuth-capable
     /// session provider. With several, omit it so Hermes renders its chooser.
     static func nativeOAuthProvider(_ providers: [[String: Any]]) -> String? {
         let names = providers.compactMap { provider -> String? in
-            guard provider["supports_session"] as? Bool != false,
-                  provider["supports_password"] as? Bool != true else { return nil }
+            guard provider["supports_password"] as? Bool != true else { return nil }
             return provider["name"] as? String
         }
         return names.count == 1 ? names[0] : nil

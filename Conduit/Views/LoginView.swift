@@ -166,6 +166,7 @@ struct LoginView: View {
                 provider: nativeOAuthProvider,
                 onSuccess: { result in
                     Task { @MainActor in
+                        failure = nil
                         let baseURL = nativeOAuthBaseURL
                         guard let dashboardID = appState.resolveDashboardID(forURL: baseURL, registerIfMissing: true) else {
                             failure = .notice(title: AppLocalization.string("Could not save this dashboard."))
@@ -178,9 +179,7 @@ struct LoginView: View {
                         }
                         KeychainHelper.clearCredentials(dashboardID: dashboardID)
                         KeychainHelper.clearDashboardCookies(dashboardID: dashboardID)
-                        if let access = configuredCloudflareAccess {
-                            KeychainHelper.saveCloudflareAccess(access, origin: baseURL, dashboardID: dashboardID)
-                        } else {
+                        if configuredCloudflareAccess == nil {
                             KeychainHelper.clearCloudflareAccess(dashboardID: dashboardID)
                         }
                         appState.rememberDashboardURL(baseURL)
@@ -479,8 +478,8 @@ struct LoginView: View {
         .padding(.horizontal, 24)
     }
 
-    /// Trimmed-presence check so whitespace-only input is treated the same
-    /// by the Connect button and by connect()'s guard.
+    /// URL-presence check shared by the Connect button and connect()'s guard.
+    /// Provider discovery decides whether credentials are required.
     private var connectInputsArePresent: Bool {
         Self.hasConnectableInput(serverURL: serverUrl, username: username, password: password)
     }

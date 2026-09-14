@@ -2,6 +2,33 @@ import Foundation
 import XCTest
 @testable import Conduit
 
+private final class NativeOAuthURLProtocolStub: URLProtocol {
+    static var handler: ((URLRequest) throws -> (Int, [String: Any]))?
+
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+
+    override func startLoading() {
+        do {
+            guard let handler = Self.handler else { throw URLError(.badServerResponse) }
+            let (status, body) = try handler(request)
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: status,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: try JSONSerialization.data(withJSONObject: body))
+            client?.urlProtocolDidFinishLoading(self)
+        } catch {
+            client?.urlProtocol(self, didFailWithError: error)
+        }
+    }
+
+    override func stopLoading() {}
+}
+
 final class NativeOAuthTests: XCTestCase {
     private var backend: InMemoryKeychainBackend!
 
@@ -9,10 +36,12 @@ final class NativeOAuthTests: XCTestCase {
         super.setUp()
         backend = InMemoryKeychainBackend()
         KeychainHelper.useBackendForTesting(backend)
+        NativeOAuthURLProtocolStub.handler = nil
     }
 
     override func tearDown() {
         KeychainHelper.useBackendForTesting(KeychainHelper.SystemKeychainBackend())
+        NativeOAuthURLProtocolStub.handler = nil
         backend = nil
         super.tearDown()
     }
@@ -97,6 +126,11 @@ final class NativeOAuthTests: XCTestCase {
             expectedState: "expected",
             expectedPort: 49152
         )) { XCTAssertEqual($0 as? NativeOAuthError, .callbackMalformed) }
+        XCTAssertThrowsError(try NativeOAuthFlow.callbackCode(
+            requestTarget: "/callback?error=access_denied&state=attacker",
+            expectedState: "expected",
+            expectedPort: 49152
+        )) { XCTAssertEqual($0 as? NativeOAuthError, .stateMismatch) }
     }
 
     func testTokenResponseDecodesAndRefreshBoundaryIsEarly() throws {
@@ -133,10 +167,149 @@ final class NativeOAuthTests: XCTestCase {
         XCTAssertTrue(HermesProviderCheck.hasNativeOAuthProvider([password, google]))
     }
 
+    func testProviderClassificationUsesHermesSessionProviderEndpointContract() {
+        // Hermes' `/api/auth/providers` lists session providers and currently
+        // emits no `supports_session` key. A non-password entry is therefore
+        // an interactive OAuth provider, not an ambiguous legacy provider.
+        let google: [String: Any] = ["name": "google", "supports_password": false]
+        XCTAssertTrue(HermesProviderCheck.hasNativeOAuthProvider([google]))
+        XCTAssertEqual(HermesProviderCheck.nativeOAuthProvider([google]), "google")
+    }
+
     func testMultipleOAuthProvidersDelegateChoiceToHermes() {
         let google: [String: Any] = ["name": "google", "supports_password": false]
         let oidc: [String: Any] = ["name": "corporate", "supports_password": false]
         XCTAssertTrue(HermesProviderCheck.hasNativeOAuthProvider([google, oidc]))
         XCTAssertNil(HermesProviderCheck.nativeOAuthProvider([google, oidc]))
+    }
+
+    private func makeClient() -> NativeOAuthAPIClient {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [NativeOAuthURLProtocolStub.self]
+        return NativeOAuthAPIClient(baseURL: "https://hermes.example", sessionConfiguration: configuration)
+    }
+
+    private func tokens(access: String = "old-access", expiresAt: TimeInterval = 4_000_000_000) -> NativeOAuthTokenSet {
+        NativeOAuthTokenSet(
+            accessToken: access,
+            refreshToken: "refresh-token",
+            expiresAt: expiresAt,
+            provider: "google",
+            userID: "user"
+        )
+    }
+
+    @MainActor
+    func test401RefreshesAndReplaysSafeRequestOnce() async throws {
+        let dashboardID = UUID()
+        let initial = tokens()
+        var apiCalls = 0
+        var refreshCalls = 0
+        NativeOAuthURLProtocolStub.handler = { request in
+            switch request.url?.path {
+            case "/auth/native/refresh":
+                refreshCalls += 1
+                return (200, [
+                    "access_token": "new-access", "refresh_token": "new-refresh",
+                    "expires_at": 4_000_000_100, "provider": "google", "user_id": "user",
+                ])
+            case "/api/status":
+                apiCalls += 1
+                if apiCalls == 1 { return (401, ["detail": "expired"]) }
+                XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer new-access")
+                return (200, ["ok": true])
+            default:
+                throw URLError(.badURL)
+            }
+        }
+        let session = NativeOAuthSession(tokens: initial, dashboardID: dashboardID, client: makeClient())
+
+        let response = try await session.requestJSON(path: "/api/status")
+
+        XCTAssertEqual(response["ok"] as? Bool, true)
+        XCTAssertEqual(apiCalls, 2)
+        XCTAssertEqual(refreshCalls, 1)
+        XCTAssertEqual(KeychainHelper.loadNativeOAuthTokens(dashboardID: dashboardID)?.accessToken, "new-access")
+        session.invalidate()
+    }
+
+    @MainActor
+    func test401RefreshDoesNotReplayMutation() async throws {
+        let dashboardID = UUID()
+        var mutationCalls = 0
+        NativeOAuthURLProtocolStub.handler = { request in
+            if request.url?.path == "/auth/native/refresh" {
+                return (200, [
+                    "access_token": "new-access", "refresh_token": "new-refresh",
+                    "expires_at": 4_000_000_100, "provider": "google", "user_id": "user",
+                ])
+            }
+            mutationCalls += 1
+            return (401, ["detail": "expired"])
+        }
+        let session = NativeOAuthSession(tokens: tokens(), dashboardID: dashboardID, client: makeClient())
+
+        do {
+            _ = try await session.requestJSON(path: "/api/mutate", method: "POST", body: ["value": 1])
+            XCTFail("A non-idempotent request must require an explicit retry")
+        } catch DashboardTicketBridgeError.http(let status, _) {
+            XCTAssertEqual(status, 401)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        XCTAssertEqual(mutationCalls, 1)
+        XCTAssertEqual(KeychainHelper.loadNativeOAuthTokens(dashboardID: dashboardID)?.accessToken, "new-access")
+        session.invalidate()
+    }
+
+    @MainActor
+    func testRejectedRefreshClearsOnlyThisDashboardTokens() async throws {
+        let dashboardID = UUID()
+        let otherID = UUID()
+        let expired = tokens(expiresAt: 1)
+        KeychainHelper.saveNativeOAuthTokens(expired, dashboardID: dashboardID)
+        KeychainHelper.saveNativeOAuthTokens(tokens(access: "other"), dashboardID: otherID)
+        NativeOAuthURLProtocolStub.handler = { request in
+            XCTAssertEqual(request.url?.path, "/auth/native/refresh")
+            return (401, ["error": "session_expired"])
+        }
+        let session = NativeOAuthSession(tokens: expired, dashboardID: dashboardID, client: makeClient())
+
+        do {
+            _ = try await session.requestJSON(path: "/api/status")
+            XCTFail("Rejected refresh must require sign-in")
+        } catch DashboardTicketBridgeError.signInRequired {
+            // Expected.
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        XCTAssertNil(KeychainHelper.loadNativeOAuthTokens(dashboardID: dashboardID))
+        XCTAssertEqual(KeychainHelper.loadNativeOAuthTokens(dashboardID: otherID)?.accessToken, "other")
+        session.invalidate()
+    }
+
+    @MainActor
+    func testPermission403DoesNotRefreshOrClearTokens() async throws {
+        let dashboardID = UUID()
+        let initial = tokens()
+        KeychainHelper.saveNativeOAuthTokens(initial, dashboardID: dashboardID)
+        var calls = 0
+        NativeOAuthURLProtocolStub.handler = { _ in
+            calls += 1
+            return (403, ["detail": "forbidden"])
+        }
+        let session = NativeOAuthSession(tokens: initial, dashboardID: dashboardID, client: makeClient())
+
+        do {
+            _ = try await session.requestJSON(path: "/api/admin")
+            XCTFail("A permission failure must propagate")
+        } catch DashboardTicketBridgeError.http(let status, _) {
+            XCTAssertEqual(status, 403)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(KeychainHelper.loadNativeOAuthTokens(dashboardID: dashboardID), initial)
+        session.invalidate()
     }
 }
