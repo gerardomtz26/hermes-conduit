@@ -8022,23 +8022,6 @@ final class AppState: ObservableObject {
         await performSessionOpen(sessionId, reusing: nil) == .opened
     }
 
-    /// Entry for conversations that live outside the dashboard's own profile
-    /// scope (canonical Bot Chats): the open, reconcile, and hydration all
-    /// ride the conversation's profile while every identity fence stays
-    /// exactly the ordinary machinery's.
-    func openSession(
-        _ sessionId: String,
-        conversationProfile: String?,
-        preferredTitle: String? = nil
-    ) async -> Bool {
-        await performSessionOpen(
-            sessionId,
-            reusing: nil,
-            conversationProfile: conversationProfile,
-            preferredTitle: preferredTitle
-        ) == .opened
-    }
-
     @discardableResult
     func requestOpenSession(_ sessionId: String) -> Task<Bool, Never> {
         cancelExplicitSessionOpen()
@@ -11071,7 +11054,10 @@ final class AppState: ObservableObject {
         }
         let merged = sessionPresentationCache.merge(
             compressed + retainedDecisionMessages,
-            profile: activeProfile,
+            // The compressed conversation's own namespace: for a bot chat
+            // this must agree with the reconcile/open writes, or retained
+            // decision cards and presentation land in a foreign partition.
+            profile: presentationProfile(for: sessionID),
             sessionIDs: [sessionID],
             includePendingClarifications: false,
             includePendingApprovals: false
@@ -13886,6 +13872,17 @@ final class AppState: ObservableObject {
     /// alias-addressed terminal edges and pending continuations share one
     /// counter across runtime rebinds.
     private func serverCompactionGenerationKey(for sessionId: String) -> String {
+        // A bot chat's runtime->durable mapping is indexed under the BOT
+        // profile; ordinary sessions keep the dashboard lookup. Try the
+        // conversation's own scope first, then the dashboard scope as a
+        // fallback so a pre-existing mapping is never orphaned.
+        let scopeProfile = botConversationProfile(for: sessionId) ?? activeProfile
+        if let durable = conversationIdentityIndex.durableID(
+            forRuntime: sessionId,
+            profile: scopeProfile
+        ) {
+            return durable
+        }
         if let durable = conversationIdentityIndex.durableID(
             forRuntime: sessionId,
             profile: activeProfile
