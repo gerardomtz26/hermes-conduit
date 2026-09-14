@@ -15344,6 +15344,7 @@ enum KeychainHelper {
     private static let dashboardCookieKey = "hermes-conduit.dashboard-cookies.v1"
     private static let credentialsKey = "hermes-conduit.credentials.v1"
     private static let cloudflareAccessKey = "hermes-conduit.cloudflare-access.v1"
+    private static let nativeOAuthTokensKey = "hermes-conduit.native-oauth-tokens.v1"
     private static let pushRegistrationKey = "hermes-conduit.push-registration.v1"
     private static let service = "com.milim.conduit"
 
@@ -15467,6 +15468,25 @@ enum KeychainHelper {
     static func clearConnection(dashboardID: UUID) {
         delete(account: scopedAccount(key, dashboardID: dashboardID))
         delete(account: scopedAccount(dashboardCookieKey, dashboardID: dashboardID))
+        delete(account: scopedAccount(nativeOAuthTokensKey, dashboardID: dashboardID))
+    }
+
+    static func saveNativeOAuthTokens(_ tokens: NativeOAuthTokenSet, dashboardID: UUID) {
+        guard let data = try? JSONEncoder().encode(tokens) else { return }
+        save(
+            data,
+            account: scopedAccount(nativeOAuthTokensKey, dashboardID: dashboardID),
+            accessibility: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        )
+    }
+
+    static func loadNativeOAuthTokens(dashboardID: UUID) -> NativeOAuthTokenSet? {
+        guard let data = load(account: scopedAccount(nativeOAuthTokensKey, dashboardID: dashboardID)) else { return nil }
+        return try? JSONDecoder().decode(NativeOAuthTokenSet.self, from: data)
+    }
+
+    static func clearNativeOAuthTokens(dashboardID: UUID) {
+        delete(account: scopedAccount(nativeOAuthTokensKey, dashboardID: dashboardID))
     }
 
     static func saveDashboardCookies(_ data: Data, dashboardID: UUID) {

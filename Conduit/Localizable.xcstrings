@@ -1,6 +1,46 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "Could not save this dashboard." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法保存此仪表板。"
+          }
+        }
+      }
+    },
+    "Please try again." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "请重试。"
+          }
+        }
+      }
+    },
+    "Preparing secure sign-in…" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "正在准备安全登录…"
+          }
+        }
+      }
+    },
+    "Sign-in failed." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "登录失败。"
+          }
+        }
+      }
+    },
     "\n… (%lld more lines)" : {
       "localizations" : {
         "en" : {

@@ -138,6 +138,24 @@ enum HermesProviderCheck {
     static func supportsPassword(_ providers: [[String: Any]]) -> Bool {
         providers.contains { $0["supports_password"] as? Bool == true }
     }
+
+    static func hasNativeOAuthProvider(_ providers: [[String: Any]]) -> Bool {
+        providers.contains { provider in
+            provider["supports_session"] as? Bool != false
+                && provider["supports_password"] as? Bool != true
+        }
+    }
+
+    /// Pin the provider only when discovery found exactly one OAuth-capable
+    /// session provider. With several, omit it so Hermes renders its chooser.
+    static func nativeOAuthProvider(_ providers: [[String: Any]]) -> String? {
+        let names = providers.compactMap { provider -> String? in
+            guard provider["supports_session"] as? Bool != false,
+                  provider["supports_password"] as? Bool != true else { return nil }
+            return provider["name"] as? String
+        }
+        return names.count == 1 ? names[0] : nil
+    }
 }
 
 /// URLSession-based Hermes dashboard authentication. Automatic URLSession
@@ -230,6 +248,19 @@ struct NativeAuthClient {
             return .unrecognized
         }
         return .providers(providers)
+    }
+
+    /// Hermes advertises native-client capability on the public status body.
+    /// Absence or an unrecognized answer means an older server, for which the
+    /// existing browser-cookie path remains the compatibility fallback.
+    func supportsNativeOAuth() async -> Bool {
+        guard let request = try? request(path: "/api/status"),
+              let result = try? await perform(request),
+              let http = result.response as? HTTPURLResponse,
+              (200...299).contains(http.statusCode),
+              let json = try? JSONSerialization.jsonObject(with: result.data) as? [String: Any],
+              let flows = json["auth_flows"] as? [String] else { return false }
+        return flows.contains("native_pkce")
     }
 
     func login(username: String, password: String) async throws -> [HTTPCookie] {
@@ -579,7 +610,7 @@ private final class URLSessionTaskHolder: @unchecked Sendable {
     }
 }
 
-private final class SecureRedirectDelegate: NSObject, URLSessionTaskDelegate {
+final class SecureRedirectDelegate: NSObject, URLSessionTaskDelegate {
     private let lock = NSLock()
     private var cookiesByTask: [Int: [HTTPCookie]] = [:]
     /// The configured password-login endpoint, including any base-URL path
