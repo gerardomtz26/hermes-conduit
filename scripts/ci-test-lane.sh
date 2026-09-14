@@ -931,8 +931,6 @@ WEDGE_EOF
     verdictR=0
     python3 "$classifier" classify \
       --invocation-log "$LOG_DIR/attempt-2-audio-retry.log" \
-      --detail "$RESULT_DIR/parts/detail-lane-a2.json" \
-      --inventory "$inventory" \
       --min-auremoteio "${COREAUDIO_WEDGE_MIN_AURIOC:-150}" \
       --min-halc-overload "${COREAUDIO_WEDGE_MIN_HALC:-20}" \
       --out "$RESULT_DIR/coreaudio-wedge-retry.json" \
