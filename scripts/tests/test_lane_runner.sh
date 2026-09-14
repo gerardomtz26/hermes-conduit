@@ -573,7 +573,11 @@ write_wedge_stub_xcodebuild() {
   cat > "$STUBS/xcodebuild" <<'STUB'
 #!/bin/bash
 for a in "$@"; do
-  case "$a" in *.xcresult) mkdir -p "$a" ;; esac
+  case "$a" in *.xcresult)
+    mkdir -p "$a"
+    bundle="$a"
+    ;;
+  esac
 done
 n=$(printf '%s\n' "$@" | grep -c -- '-only-testing:' || true)
 echo "inv:filters=$n" >> "$INVOCATION_LOG"
@@ -606,7 +610,11 @@ write_doc() {
     "children": [$nodes]}]}]}
 DOC
 }
-if [ "$n" -gt 1 ]; then
+case "$bundle" in
+  *attempt-2-audio-retry.xcresult) is_retry=1 ;;
+  *) is_retry=0 ;;
+esac
+if [ "$is_retry" -eq 0 ]; then
   # Attempt 1 covers the whole lane: every class named in $FAKE_WEDGE_FAIL_CLASSES
   # (default: the first filter) fails, the rest pass.
   pairs=""
