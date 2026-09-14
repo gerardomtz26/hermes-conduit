@@ -379,6 +379,37 @@ class AudioLaneReservationTests(unittest.TestCase):
             self.assertEqual(classes, [])
             self.assertTrue(warns and "names no classes" in warns[0], warns)
 
+    def test_saturated_general_lanes_plus_audio_lane_validate(self):
+        # max_lanes general lanes + the reserved unit-audio lane is a
+        # legitimate layout: the bound applies to the general lanes only.
+        names = ["C{0:03d}Tests".format(i) for i in range(80)] + self.AUDIO
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(make_repo(Path(tmp), names, []))
+            cfg = default_cfg()
+            discovery = planner.discover_test_classes(str(root))
+            plan = planner.build_plan(discovery, cfg, {}, self.AUDIO)
+            # Force the maximum: with 80 uniform classes the model may
+            # consolidate, so assert only the invariants that matter here.
+            errors = planner.validate_plan(plan, discovery, self.AUDIO)
+            self.assertEqual(errors, [])
+            general_count = sum(1 for l in plan["unit_lanes"]
+                                if l["lane"] != planner.AUDIO_LANE_NAME)
+            self.assertLessEqual(general_count, cfg["max_lanes"])
+            audio_lanes = [l for l in plan["unit_lanes"]
+                           if l["lane"] == planner.AUDIO_LANE_NAME]
+            self.assertEqual(len(audio_lanes), 1)
+
+    def test_inventory_with_non_object_root_warns_instead_of_crashing(self):
+        # A JSON root of [] (or any non-object) must degrade to a warning -
+        # never an AttributeError out of planning.
+        with tempfile.TemporaryDirectory() as tmp:
+            inventory = Path(tmp) / "audio.json"
+            inventory.write_text("[]", encoding="utf-8")
+            classes, warns = planner.load_audio_sensitive_classes(
+                str(inventory))
+            self.assertEqual(classes, [])
+            self.assertTrue(warns and "unexpected schema" in warns[0], warns)
+
     def test_audio_lane_timeout_follows_the_planner_formula(self):
         estimates = {self.AUDIO[0]: 300.0, self.AUDIO[1]: 100.0}
         with tempfile.TemporaryDirectory() as tmp:

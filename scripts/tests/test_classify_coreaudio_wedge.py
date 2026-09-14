@@ -200,16 +200,33 @@ class ClassifierUnitTests(unittest.TestCase):
                 classifier.load_failed_classes(detail),
                 [AUDIO_CLASS, PLAIN_CLASS])
 
-    def test_non_dict_failure_entries_are_skipped(self):
+    def test_unattributable_failure_records_hard_error(self):
+        # A record without a usable class can hide an out-of-inventory
+        # regression behind a subset retry, so it is a hard input error
+        # (exit 2 upstream), never a silently skipped entry.
         with tempfile.TemporaryDirectory() as tmp:
             detail = os.path.join(tmp, "detail.json")
             with open(detail, "w", encoding="utf-8") as fh:
                 json.dump({"failures": ["not-a-dict", {"class": AUDIO_CLASS},
                                         {"no_class_key": True},
                                         {"class": PLAIN_CLASS}]}, fh)
-            self.assertEqual(
-                classifier.load_failed_classes(detail),
-                [AUDIO_CLASS, PLAIN_CLASS])
+            with self.assertRaises(ValueError):
+                classifier.load_failed_classes(detail)
+
+    def test_classless_failure_record_fails_closed(self):
+        # One attributed audio failure + one unattributable failure: the
+        # unattributable record could hide an out-of-inventory regression,
+        # so the classifier must hard-error (exit 2 upstream), never
+        # authorize a subset retry.
+        with tempfile.TemporaryDirectory() as tmp:
+            detail = os.path.join(tmp, "detail.json")
+            with open(detail, "w", encoding="utf-8") as fh:
+                json.dump({"failures": [
+                    {"class": AUDIO_CLASS, "test": "testA()"},
+                    {"test": "testNoClass()"},
+                ]}, fh)
+            with self.assertRaises(ValueError):
+                classifier.load_failed_classes(detail)
 
     def test_real_inventory_loads_and_is_authoritative(self):
         classes = classifier.load_inventory_classes(INVENTORY)

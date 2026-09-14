@@ -412,6 +412,9 @@ def load_audio_sensitive_classes(path) -> tuple:
     except (OSError, json.JSONDecodeError) as exc:
         return [], [f"audio-sensitive inventory unreadable ({exc}); "
                     "planning without a reserved unit-audio lane"]
+    if not isinstance(doc, dict):
+        return [], ["audio-sensitive inventory has unexpected schema; "
+                    "planning without a reserved unit-audio lane"]
     classes = doc.get("classes")
     if not isinstance(classes, list) or not all(isinstance(c, str) for c in classes):
         return [], ["audio-sensitive inventory has unexpected schema; "

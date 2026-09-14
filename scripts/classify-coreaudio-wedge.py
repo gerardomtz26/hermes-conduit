@@ -107,6 +107,8 @@ def count_signals(invocation_log: str) -> dict:
 def load_inventory_classes(path: str) -> list:
     with open(path, encoding="utf-8") as fh:
         doc = json.load(fh)
+    if not isinstance(doc, dict):
+        raise ValueError(f"inventory {path}: expected a JSON object")
     classes = doc.get("classes")
     if not isinstance(classes, list) or not all(isinstance(c, str) for c in classes):
         raise ValueError(f"inventory {path}: 'classes' must be a list of strings")
@@ -126,7 +128,15 @@ def load_failed_classes(detail_path: str) -> list:
     ordered = []
     for failure in failed:
         cls = failure.get("class") if isinstance(failure, dict) else None
-        if cls and cls not in seen:
+        if not cls or not isinstance(cls, str):
+            # A failure we cannot attribute must never be silently dropped:
+            # it could hide an out-of-inventory regression behind a wedge
+            # recovery that retries only the classified classes. Hard input
+            # error -> exit 2 -> the runner fails closed.
+            raise ValueError(
+                f"detail {detail_path}: failure record without a valid "
+                f"'class': {failure!r}")
+        if cls not in seen:
             seen.add(cls)
             ordered.append(cls)
     return ordered
