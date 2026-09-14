@@ -546,15 +546,15 @@ finish_lane() { # $1=status $2=attempts_json $3=isolation_json $4=exit_code
           rm -rf "$b"
         fi
       done
-      else
-        # A green unit lane deletes its attempt bundles - EXCEPT when a
-        # CoreAudio wedge recovery ran: the attempt-1 bundle is the only
-        # evidence of the wedge, and the attempt-2 bundle documents the
-        # recovery.
-        if [ "$COREAUDIO_RECOVERY" -eq 0 ]; then
-          rm -rf "$RESULT_DIR"/attempt-*.xcresult "$RESULT_DIR"/iso-*.xcresult 2>/dev/null || true
-        fi
+    else
+      # A green unit lane deletes its attempt bundles - EXCEPT when a
+      # CoreAudio wedge recovery ran: the attempt-1 bundle is the only
+      # evidence of the wedge, and the attempt-2 bundle documents the
+      # recovery.
+      if [ "$COREAUDIO_RECOVERY" -eq 0 ]; then
+        rm -rf "$RESULT_DIR"/attempt-*.xcresult "$RESULT_DIR"/iso-*.xcresult 2>/dev/null || true
       fi
+    fi
   fi
   exit "$4"
 }
@@ -720,6 +720,12 @@ print(doc.get('signals', {}).get('halc_overload', 0))
     return 1
   fi
   COREAUDIO_RECOVERY=1
+  # Infra-recovery bookkeeping: the affected classes ran twice and the retry
+  # rescued an environment wedge (not a test flake) - reported through the
+  # existing lane-result field, never as a clean pass.
+  for wedge_cls in $AFFECTED_CLASSES; do
+    echo "$wedge_cls" >> "$INFRA_RECOVERED_LINES"
+  done
   echo "::warning::CoreAudio infrastructure wedge detected in lane $LANE: AURemoteIO -10851 occurrences: ${SIG_AURIOC}, HALC overload skips: ${SIG_HALC}"
   echo "::warning::affected tests: $(printf '%s ' $AFFECTED_CLASSES)"
   echo "action: resetting simulator and retrying affected tests"
@@ -761,8 +767,7 @@ print(doc.get('signals', {}).get('halc_overload', 0))
       >>"$LOG_DIR/merge-parts.log" 2>&1 || \
       echo "::warning::timing part merge failed safely for lane $LANE; timing history keeps previous values"
     echo "::warning::lane $LANE passed after the CoreAudio wedge recovery on a clean simulator - infrastructure recovery, not a test flake; affected classes: $(printf '%s' "$AFFECTED_CLASSES" | tr ' ' ',')"
-    finish_lane "pass" '[{"n": 1, "mode": "lane", "status": "audio-wedge"}, {"n": 2, "mode": "audio-retry", "status": "passed"}]' \
-      "$(printf '%s,' $AFFECTED_CLASSES | sed 's/,$//')" 0
+    finish_lane "pass" '[{"n": 1, "mode": "lane", "status": "audio-wedge"}, {"n": 2, "mode": "audio-retry", "status": "passed"}]' "" 0
   fi
 
   if [ "$statusR" -eq 124 ]; then

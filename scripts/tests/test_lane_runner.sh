@@ -572,6 +572,9 @@ export AUDIO_INVENTORY="$WEDGE_INVENTORY"
 write_wedge_stub_xcodebuild() {
   cat > "$STUBS/xcodebuild" <<'STUB'
 #!/bin/bash
+for a in "$@"; do
+  case "$a" in *.xcresult) mkdir -p "$a" ;; esac
+done
 n=$(printf '%s\n' "$@" | grep -c -- '-only-testing:' || true)
 echo "inv:filters=$n" >> "$INVOCATION_LOG"
 emit_signature() {
@@ -604,7 +607,25 @@ write_doc() {
 DOC
 }
 if [ "$n" -gt 1 ]; then
-  write_doc "$FAKE_CANNED" "VoiceTests:Failed" "HealthyTests:Passed"
+  # Attempt 1 covers the whole lane: every class named in $FAKE_WEDGE_FAIL_CLASSES
+  # (default: the first filter) fails, the rest pass.
+  pairs=""
+  for a in "$@"; do
+    case "$a" in
+      -only-testing:*)
+        c="${a#-only-testing:*/}"
+        case " $FAKE_WEDGE_FAIL_CLASSES " in *" $c "*)
+          pairs="$pairs $c:Failed" ;; *) pairs="$pairs $c:Passed" ;;
+        esac
+        ;;
+    esac
+  done
+  if [ -z "$FAKE_WEDGE_FAIL_CLASSES" ]; then
+    first=$(printf '%s\n' "$@" | grep 'only-testing:' | head -1 | sed 's|.*/||')
+    pairs="$first:Failed $pairs"
+    pairs=$(printf '%s\n' "$pairs" | sed "s/ $first:Passed//")
+  fi
+  write_doc "$FAKE_CANNED" $pairs
   [ "$FAKE_WEDGE_A1" = "signature" ] && emit_signature
   echo "Test Case failed (stub)"
   exit 65
@@ -705,7 +726,9 @@ end_case
 begin_case "out-of-inventory failure voids the wedge path" "$WORK/w4"
 export INVOCATION_LOG="$WORK/w4-invocations.log"; : > "$INVOCATION_LOG"
 export FAKE_WEDGE_A1="signature" FAKE_WEDGE_RETRY="pass"
+export FAKE_WEDGE_FAIL_CLASSES="VoiceTests OtherTests"
 run_lane "VoiceTests,OtherTests" 300 unused 3
+export FAKE_WEDGE_FAIL_CLASSES=""
 assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
 assert_eq "verdict" "$(lane_field "['status']")" "fail"
 assert_eq "attempts" "$(attempts_statuses)" "['test-failures']"
@@ -721,6 +744,16 @@ end_case
 begin_case "weak signature never authorizes recovery" "$WORK/w5"
 cat > "$STUBS/xcodebuild" <<'STUB'
 #!/bin/bash
+for a in "$@"; do
+  case "$a" in *.xcresult) mkdir -p "$a" ;; esac
+done
+cat > "$FAKE_CANNED" <<'DOC'
+{"testNodes": [{"nodeType": "Test Plan", "name": "Conduit", "result": "Passed",
+  "children": [{"nodeType": "Unit test bundle", "name": "ConduitTests", "result": "Passed",
+    "children": [{"nodeType": "Test Suite", "name": "VoiceTests", "result": "Failed",
+      "children": [{"nodeType": "Test Case", "name": "testC()", "result": "Failed",
+        "durationInSeconds": 0.1}]}]}]}]}
+DOC
 n=$(printf '%s\n' "$@" | grep -c -- '-only-testing:' || true)
 echo "inv:filters=$n" >> "$INVOCATION_LOG"
 echo "2026-09-14 00:00:00.000 Conduit[9:9] [aurioc]            AURemoteIO.cpp:1135  failed: -10851 (enable 1)"
