@@ -8113,7 +8113,12 @@ final class AppState: ObservableObject {
         clearStreamingText()
         activeAssistantMessageId = nil
         resetReasoningTurn()
-        updateActiveSessionTitle(for: sessionId)
+        // A bot open carries its own title (the bot's display label) and
+        // must never write the catalog's wire title — or any title — into
+        // the dashboard profile's persisted title cache.
+        if conversationProfile == nil {
+            updateActiveSessionTitle(for: sessionId)
+        }
         if let preferredTitle, !preferredTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             activeSessionTitle = preferredTitle
         }
