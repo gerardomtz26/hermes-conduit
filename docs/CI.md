@@ -241,9 +241,11 @@ the rest of CI v2.
      recorded at lane level and no per-class recovery is claimed). A weak
      or absent signature preserves the unchanged isolation semantics.
    - Outcome semantics are identical on both paths: retry passes ->
-     infrastructure recovery (`coreaudio_wedge` metadata in
+     infrastructure recovery (`coreaudio_wedge` signal metadata in
      lane-result.json, rendered in the CI Test Report even on green
-     lanes; both attempt bundles kept); retry fails without the
+     lanes; the affected scope is drawn from `infra_recovered_classes` on
+     the failure path and shown as the whole lane on the timeout path;
+     both attempt bundles kept); retry fails without the
      signature -> real product failure; retry carries the signature
      again -> **persistent CoreAudio runner failure** (an environment
      verdict, not a product claim); retry timeout / unclassifiable ->

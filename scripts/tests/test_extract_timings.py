@@ -603,8 +603,6 @@ simulator_erase=False, hung_class="", retried_classes="", persistent_infra_class
                 "wedge": True, "signature_strong": True,
                 "signals": {"auremoteio_10851": 185, "halc_overload": 48,
                             "chhaptic_engine": 20},
-                "audio_sensitive_failures": ["AppStateVoiceSuspensionTests"],
-                "outside_inventory_failures": [],
             }), encoding="utf-8")
             out = Path(tmp) / "lane-result.json"
             args = SimpleNamespace(

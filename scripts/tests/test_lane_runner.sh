@@ -886,7 +886,39 @@ assert_eq "verdict" "$(lane_field "['status']")" "pass"
 assert_eq "attempts are the ordinary infra chain" "$(attempts_statuses)" "['infra-recovered', 'passed']"
 assert_eq "no audio-retry marker" "$(grep -o 'audio-retry' "$WORKCASE/lane-result.json" 2>/dev/null | wc -l | tr -d ' ')" "0"
 
-unset AUDIO_INVENTORY
+# --- host case: timeout-path retry fails WITHOUT signature -> product failure -
+end_case
+begin_case "timeout host-retry failure without signature is a product failure" "$WORK/w8"
+write_wedge_stub_xcodebuild
+export INVOCATION_LOG="$WORK/w8-invocations.log"; : > "$INVOCATION_LOG"
+export FAKE_WEDGE_A1="hang-signature" FAKE_WEDGE_HOST_RETRY="fail"
+export FAKE_WEDGE_FAIL_CLASSES="ChatResumeTests"
+export ISOLATION_BUDGET_S=200 CLASS_TIMEOUT_MIN_S=1 CLASS_TIMEOUT_MULTIPLIER=0.1
+run_lane "ChatResumeTests,PickerTests" 3 unused 1
+assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
+assert_eq "verdict" "$(lane_field "['status']")" "fail"
+assert_eq "attempts" "$(attempts_statuses)" "['host-wedge-timeout', 'test-failures']"
+assert_eq "hard limit: exactly two invocations" "$(grep -c '^inv:filters=' "$INVOCATION_LOG")" "2"
+assert_eq "no per-class recovery claims" "$(lane_field "['infra_recovered_classes']")" "[]"
+
+# --- host case: timeout-path retry signature-again -> persistent, no loop -----
+end_case
+begin_case "timeout host-retry signature-again is persistent infrastructure" "$WORK/w9"
+write_wedge_stub_xcodebuild
+export INVOCATION_LOG="$WORK/w9-invocations.log"; : > "$INVOCATION_LOG"
+export FAKE_WEDGE_A1="hang-signature" FAKE_WEDGE_HOST_RETRY="signature"
+export FAKE_WEDGE_FAIL_CLASSES="ChatResumeTests"
+export ISOLATION_BUDGET_S=200 CLASS_TIMEOUT_MIN_S=1 CLASS_TIMEOUT_MULTIPLIER=0.1
+run_lane "ChatResumeTests,PickerTests" 3 unused 1
+assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
+assert_eq "verdict" "$(lane_field "['status']")" "fail"
+assert_eq "attempts" "$(attempts_statuses)" "['host-wedge-timeout', 'persistent-coreaudio-wedge']"
+assert_eq "hard limit: exactly two invocations" "$(grep -c '^inv:filters=' "$INVOCATION_LOG")" "2"
+if grep -q "persistent CoreAudio runner failure" "$WORKCASE/stdout.log"; then
+  ok "persistent timeout-path wedge reported as an environment verdict"
+else
+  bad "a persistent timeout-path wedge must say so explicitly"
+fi
 
 echo ""
 end_case

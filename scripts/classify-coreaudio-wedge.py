@@ -60,7 +60,7 @@ import os
 import re
 import sys
 
-DEFAULT_MIN_AURREMOTEIO = 150
+DEFAULT_MIN_AUREMOTEIO = 150
 DEFAULT_MIN_HALC_OVERLOAD = 20
 
 # The exact observed record shape: AURemoteIO reporting the -10851 activation
@@ -148,7 +148,7 @@ def main(argv=None) -> int:
     classify_p.add_argument("--invocation-log", required=True,
                             help="xcodebuild stdout log of the failed invocation")
     classify_p.add_argument("--min-auremoteio", type=int,
-                            default=DEFAULT_MIN_AURREMOTEIO)
+                            default=DEFAULT_MIN_AUREMOTEIO)
     classify_p.add_argument("--min-halc-overload", type=int,
                             default=DEFAULT_MIN_HALC_OVERLOAD)
     classify_p.add_argument("--out", default="",
@@ -171,7 +171,7 @@ def main(argv=None) -> int:
 
     try:
         signals = count_signals(args.invocation_log)
-    except OSError as exc:
+    except Exception as exc:  # any unreadable/odd input fails closed
         print(f"::warning::coreaudio-wedge classifier could not read its "
               f"input ({exc}) - failing closed as a product failure")
         return 2

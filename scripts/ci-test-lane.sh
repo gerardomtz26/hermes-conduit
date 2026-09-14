@@ -697,6 +697,13 @@ attempt_coreaudio_host_recovery_after_timeout() { # $1 = attempt-1 log
     --min-auremoteio "${COREAUDIO_WEDGE_MIN_AURIOC:-150}" \
     --min-halc-overload "${COREAUDIO_WEDGE_MIN_HALC:-20}" \
     --out "$COREAUDIO_WEDGE_JSON" >"$LOG_DIR/coreaudio-wedge-timeout.log" 2>&1 || verdict=$?
+  if [ "$verdict" -eq 2 ]; then
+    # The classifier cannot read the timed-out invocation's log: whether the
+    # host is poisoned is UNKNOWN, and a timeout yields no test results to
+    # attribute - fail closed as unclassified instead of burning isolation.
+    echo "::error::lane $LANE CoreAudio host wedge classifier could not run on the timed-out invocation - failing closed as unclassified"
+    finish_lane "error" '[{"n": 1, "mode": "lane", "status": "host-wedge-timeout"}, {"n": 2, "mode": "host-retry", "status": "unclassified"}]' "" 1
+  fi
   [ "$verdict" -eq 0 ] || return 1
 
   WEDGE_FIELDS=$(python3 -c "
@@ -862,8 +869,8 @@ WEDGE_EOF
   # move it into parts/ so the post-retry merge-parts fold keeps attempt-1
   # results for the healthy classes and lets attempt-2 own the affected ones.
   mkdir -p "$RESULT_DIR/parts"
-  mv "$RESULT_DIR/observations.json" "$RESULT_DIR/parts/observations-lane-a1.json"
-  mv "$RESULT_DIR/detail.json" "$RESULT_DIR/parts/detail-lane-a1.json"
+  [ -f "$RESULT_DIR/observations.json" ] &&     mv "$RESULT_DIR/observations.json" "$RESULT_DIR/parts/observations-lane-a1.json"
+  [ -f "$RESULT_DIR/detail.json" ] &&     mv "$RESULT_DIR/detail.json" "$RESULT_DIR/parts/detail-lane-a1.json"
 
   # Fold the attempt parts into the lane-level observations/detail BEFORE any
   # verdict: a red wedge lane must still carry its failures and class timings

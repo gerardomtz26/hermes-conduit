@@ -655,11 +655,22 @@ def aggregate(args) -> int:
                              "(persistent CoreAudio runner failure)")
             else:
                 recovered = f"lane status **{res.get('status')}**"
+            # The affected scope comes from the lane result, never from the
+            # classifier: the failure path names the identified failed
+            # classes; the timeout path retried the whole lane and claims
+            # no per-test scope.
+            if any(a.get("status") == "host-wedge-timeout"
+                   for a in res.get("attempts", [])):
+                affected = "whole lane (timeout path - no per-test scope)"
+            else:
+                affected = ", ".join(
+                    "`" + c + "`"
+                    for c in res.get("infra_recovered_classes", [])) or "none"
             lines.append(
                 f"- **CoreAudio infrastructure wedge detected** [{name}]: "
                 f"AURemoteIO -10851 x{signals.get('auremoteio_10851', '?')}, "
                 f"HALC overload skips x{signals.get('halc_overload', '?')}; "
-                f"affected: {', '.join('`' + c + '`' for c in wedge.get('audio_sensitive_failures', [])) or 'none'}; "
+                f"affected: {affected}; "
                 f"{recovered} (attempts: {chain})"
             )
     lines.append("")
