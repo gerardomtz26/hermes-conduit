@@ -1,0 +1,658 @@
+import XCTest
+@testable import Conduit
+
+@MainActor
+final class BotModeTests: XCTestCase {
+    // MARK: - profiles.list decoding
+
+    func testRosterDecoderExtractsBotFieldsFromProfilesListPayload() throws {
+        let payload: [String: AnyCodable] = [
+            "profiles": .array([
+                .object([
+                    "name": .string("atlas"),
+                    "display_name": .string("Atlas"),
+                    "description": .string("Research agent"),
+                    "model": .string("hermes-4"),
+                    "provider": .string("nous"),
+                    "is_default": .bool(false),
+                    "has_avatar": .bool(true),
+                    "ui_meta": .object([
+                        "hermes-bots": .object([
+                            "title": .string("Scout"),
+                            "pinned": .bool(true),
+                            "hidden": .bool(false),
+                            "color": .string("teal")
+                        ])
+                    ]),
+                    "canonical_session": .object([
+                        "id": .string("stored-1"),
+                        "resolved_id": .string("runtime-1"),
+                        "last_active": .number(1_700_000_000),
+                        "preview": .string("Working on it")
+                    ]),
+                    "last_session": .object([
+                        "last_active": .number(1_700_000_500),
+                        "preview": .string("Newest human chat")
+                    ])
+                ])
+            ]),
+            "bot_mode_protocol": .bool(true)
+        ]
+
+        let snapshot = try XCTUnwrap(BotRosterDecoder.decode(.object(payload)))
+
+        XCTAssertTrue(snapshot.supportsBotProtocol)
+        XCTAssertEqual(snapshot.bots.count, 1)
+        let bot = snapshot.bots[0]
+        XCTAssertEqual(bot.name, "atlas")
+        XCTAssertEqual(bot.displayLabel, "Scout", "the customized bot title outranks the profile display name")
+        XCTAssertEqual(bot.profileDescription, "Research agent")
+        XCTAssertEqual(bot.model, "hermes-4")
+        XCTAssertTrue(bot.hasAvatar)
+        XCTAssertTrue(bot.isPinned)
+        XCTAssertEqual(bot.canonicalSession?.id, "stored-1")
+        XCTAssertEqual(bot.canonicalSession?.resolvedID, "runtime-1")
+        XCTAssertEqual(bot.canonicalSession?.preview, "Working on it")
+        XCTAssertEqual(bot.lastActive, 1_700_000_500)
+    }
+
+    func testRosterDecodeFallsBackToDisplayNameAndToleratesMissingCanonical() throws {
+        let payload: [String: AnyCodable] = [
+            "profiles": .array([
+                .object([
+                    "name": .string("default"),
+                    "display_name": .string("Default Profile")
+                ])
+            ])
+        ]
+
+        let snapshot = try XCTUnwrap(BotRosterDecoder.decode(.object(payload)))
+
+        XCTAssertFalse(snapshot.supportsBotProtocol, "an older gateway omits the protocol flag")
+        XCTAssertEqual(snapshot.bots[0].displayLabel, "Default Profile")
+        XCTAssertNil(snapshot.bots[0].canonicalSession)
+    }
+
+    func testRosterDecodeRejectsNonProfilesEnvelope() {
+        XCTAssertNil(BotRosterDecoder.decode(.object(["error": .string("nope")])))
+    }
+
+    func testDisplayOrderPinsFirstThenSortsByActivityThenName() {
+        let pinned = makeBot(name: "pinned", pinned: true, canonicalLastActive: 10)
+        let fresh = makeBot(name: "fresh", canonicalLastActive: 500)
+        let older = makeBot(name: "older", canonicalLastActive: 100)
+        let plainA = makeBot(name: "aaa", lastActive: 5)
+        let plainB = makeBot(name: "bbb", lastActive: 5)
+
+        let ordered = BotProfile.displayOrder([plainB, plainA, older, fresh, pinned])
+
+        XCTAssertEqual(ordered.map(\.name), ["pinned", "fresh", "older", "aaa", "bbb"])
+    }
+
+    // MARK: - canonical-chat lookup rows
+
+    func testLookupRowMatchesCanonicalTitleThroughRootTitlePrecedence() {
+        XCTAssertTrue(BotChatLookupRow(id: "s1", title: "Bot Chat").isCanonicalTitle())
+        XCTAssertTrue(
+            BotChatLookupRow(id: "s1", title: "Drifted", rootTitle: "Bot Chat").isCanonicalTitle(),
+            "the durable lineage-root title wins over the listing title"
+        )
+        XCTAssertFalse(BotChatLookupRow(id: "s1", title: "Project planning").isCanonicalTitle())
+        XCTAssertFalse(
+            BotChatLookupRow(id: "s1", rootTitle: "Project planning").isCanonicalTitle(),
+            "a plain-title match must not override a different root title"
+        )
+    }
+
+    func testLookupRowResumeTargetPrefersResolvedTip() {
+        XCTAssertEqual(BotChatLookupRow(id: "stored-1", resolvedID: "runtime-1").resumeTargetID, "runtime-1")
+        XCTAssertEqual(BotChatLookupRow(id: "stored-1").resumeTargetID, "stored-1")
+        XCTAssertEqual(BotChatLookupRow(id: "stored-1", resolvedID: "  ").resumeTargetID, "stored-1")
+    }
+
+    // MARK: - fail-closed resolution
+
+    func testResolverOpensExistingCanonicalChatWithLineageTip() throws {
+        let rows = [BotChatLookupRow(id: "stored-1", resolvedID: "runtime-1", title: "Bot Chat")]
+
+        let resolution = BotChatResolver.resolve(rows: rows, rosterCanonicalID: "stored-1")
+
+        XCTAssertEqual(
+            try resolution.get(),
+            .openExisting(registryID: "stored-1", resumeID: "runtime-1")
+        )
+    }
+
+    func testResolverCreatesOnlyOnConfirmedAbsence() throws {
+        let resolution = BotChatResolver.resolve(rows: [], rosterCanonicalID: nil)
+
+        XCTAssertEqual(try resolution.get(), .create)
+    }
+
+    func testResolverFailsClosedWhenEmptyLookupContradictsRosterCanonical() {
+        // The roster positively confirms this profile HAD a canonical chat;
+        // an empty lookup answer is unconfirmed absence (a mid-restart
+        // profile backend can answer successfully and empty). Minting here
+        // is the forever-chat fork.
+        let resolution = BotChatResolver.resolve(rows: [], rosterCanonicalID: "stored-1")
+
+        XCTAssertEqual(resolution, .failure(.unconfirmedAbsence))
+    }
+
+    func testResolverFailsClosedWhenLookupFindsOnlyForeignTitles() {
+        let rows = [BotChatLookupRow(id: "stored-9", title: "Bot Chatty")]
+
+        let resolution = BotChatResolver.resolve(rows: rows, rosterCanonicalID: "stored-1")
+
+        XCTAssertEqual(resolution, .failure(.unconfirmedAbsence))
+    }
+
+    // MARK: - adopt-before-mint classification
+
+    func testTitleCollisionClassifierMatchesGatewayRejection() {
+        XCTAssertTrue(BotChatTitleCollision.isError(RpcError(code: 4022, message: "Title 'Bot Chat' is already in use by session x")))
+        XCTAssertTrue(BotChatTitleCollision.isError(RpcError(code: 5000, message: "Title 'Bot Chat' is already in use by session x")))
+        XCTAssertFalse(BotChatTitleCollision.isError(RpcError(code: 5000, message: "database is locked")))
+        XCTAssertFalse(BotChatTitleCollision.isError(RpcError(code: -32601, message: "unknown method")))
+    }
+
+    // MARK: - gateway missing-method classification
+
+    func testMissingMethodClassifierCoversProfilesListGap() {
+        XCTAssertTrue(HermesClient.isMissingRPCMethod(RpcError(code: -32601, message: "unknown method")))
+        XCTAssertTrue(HermesClient.isMissingRPCMethod(RpcError(code: nil, message: "method not found")))
+        XCTAssertFalse(HermesClient.isMissingRPCMethod(RpcError(code: 4001, message: "session not found")))
+        XCTAssertFalse(HermesClient.isMissingRPCMethod(RpcError(code: 5000, message: "state.db is locked")))
+    }
+
+    // MARK: - sessions-list hygiene
+
+    func testHygieneHidesCanonicalRegistryAndTipRows() {
+        let bot = makeBot(name: "atlas", canonicalID: "stored-1", resolvedID: "runtime-1")
+        let registryRow = makeSessionSummary(id: "stored-1", title: "Bot Chat")
+        let tipRow = makeSessionSummary(id: "runtime-1", title: "Bot Chat", storedID: "stored-1")
+        let titledStaleRow = makeSessionSummary(id: "stray-1", title: "Bot Chat", profile: "atlas")
+
+        XCTAssertTrue(BotChatHygiene.isCanonicalBotChatRow(registryRow, roster: [bot]))
+        XCTAssertTrue(BotChatHygiene.isCanonicalBotChatRow(tipRow, roster: [bot]))
+        XCTAssertTrue(BotChatHygiene.isCanonicalBotChatRow(titledStaleRow, roster: [bot]))
+    }
+
+    func testHygieneNeverHidesOrdinarySessions() {
+        let bot = makeBot(name: "atlas", canonicalID: "stored-1", resolvedID: "runtime-1")
+        // A user conversation that merely shares the canonical title on the
+        // dashboard profile stays visible: hidden + exact title is the
+        // canonical discriminator, the title alone is not.
+        let dashboardTitled = makeSessionSummary(id: "user-1", title: "Bot Chat", profile: "default")
+        // An ordinary bot-profile session with a different title is a real
+        // conversation and stays visible.
+        let botProfileSession = makeSessionSummary(id: "bot-work-1", title: "Project planning", profile: "atlas")
+        // A session matching nothing is untouched.
+        let unrelated = makeSessionSummary(id: "user-2", title: "Groceries")
+
+        XCTAssertFalse(BotChatHygiene.isCanonicalBotChatRow(dashboardTitled, roster: [bot]))
+        XCTAssertFalse(BotChatHygiene.isCanonicalBotChatRow(botProfileSession, roster: [bot]))
+        XCTAssertFalse(BotChatHygiene.isCanonicalBotChatRow(unrelated, roster: [bot]))
+    }
+
+    func testActiveProfileSessionsProjectionDropsCanonicalButKeepsCatalog() async {
+        let bot = makeBot(name: "atlas", canonicalID: "stored-1")
+        let canonicalRow = makeSessionSummary(id: "stored-1", title: "Bot Chat")
+        let ordinaryRow = makeSessionSummary(id: "ordinary", title: "Design review")
+
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            botRoster: { _ in
+                BotRosterSnapshot(bots: [bot], supportsBotProtocol: true)
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        harness.appState.sessions = [canonicalRow, ordinaryRow]
+
+        // Seeding the roster through the probe path must project the
+        // canonical row out of the Sessions list...
+        await harness.appState.refreshBotRoster()
+
+        XCTAssertEqual(harness.appState.botRoster.map(\.name), ["atlas"])
+        XCTAssertEqual(harness.appState.botModePhase, .available)
+        XCTAssertEqual(harness.appState.activeProfileSessions.map(\.id), ["ordinary"])
+        // ...while the identity machinery's catalog still sees the row:
+        // the filter is presentation hygiene, never discovery.
+        XCTAssertEqual(harness.appState.sessions.map(\.id), ["stored-1", "ordinary"])
+    }
+
+    // MARK: - open flow: fail-closed and identity semantics
+
+    func testLookupFailureDoesNotCreateAndSurfacesRetryError() async {
+        var createCalls = 0
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            findBotChat: { _, _ in
+                throw RpcError(code: 5000, message: "state.db is locked")
+            },
+            createBotChat: { _, _ in
+                createCalls += 1
+                return ("runtime-x", nil)
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        let bot = makeBot(name: "atlas")
+
+        let opened = await harness.appState.openBotChat(for: bot)
+
+        XCTAssertFalse(opened)
+        XCTAssertEqual(createCalls, 0, "a failed registry lookup must never mint a chat")
+        XCTAssertNil(harness.appState.activeSessionId)
+        XCTAssertNotNil(harness.appState.errorMessage)
+        XCTAssertEqual(harness.appState.botModePhase, .idle, "an ordinary lookup failure is not a gateway gap")
+    }
+
+    func testMissingMethodLookupMarksGatewayUnsupportedWithoutCreating() async {
+        var createCalls = 0
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            findBotChat: { _, _ in
+                throw RpcError(code: -32601, message: "unknown method")
+            },
+            createBotChat: { _, _ in
+                createCalls += 1
+                return ("runtime-x", nil)
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        let bot = makeBot(name: "atlas")
+
+        let opened = await harness.appState.openBotChat(for: bot)
+
+        XCTAssertFalse(opened)
+        XCTAssertEqual(createCalls, 0)
+        XCTAssertEqual(harness.appState.botModePhase, .gatewayUnsupported)
+    }
+
+    func testUnconfirmedAbsenceRefusesToCreate() async throws {
+        var createCalls = 0
+        let rosterBot = makeBot(name: "atlas", canonicalID: "stored-1")
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            botRoster: { _ in
+                BotRosterSnapshot(bots: [rosterBot], supportsBotProtocol: true)
+            },
+            findBotChat: { _, _ in [] },
+            createBotChat: { _, _ in
+                createCalls += 1
+                return ("runtime-x", nil)
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        await harness.appState.refreshBotRoster()
+        let bot = try XCTUnwrap(harness.appState.botRoster.first)
+
+        let opened = await harness.appState.openBotChat(for: bot)
+
+        XCTAssertFalse(opened)
+        XCTAssertEqual(createCalls, 0, "empty lookup while the roster confirms a canonical chat must not mint")
+        XCTAssertNotNil(harness.appState.errorMessage)
+    }
+
+    func testExistingCanonicalOpensResolvedTipThroughOrdinaryResume() async {
+        var created = 0
+        var resumedIDs: [String] = []
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            openSession: { _, id, _ in
+                resumedIDs.append(id)
+                return SessionResumeResult(
+                    sessionId: id,
+                    storedSessionId: "stored-1",
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            findBotChat: { _, _ in
+                [BotChatLookupRow(id: "stored-1", resolvedID: "runtime-1", title: "Bot Chat")]
+            },
+            createBotChat: { _, _ in
+                created += 1
+                return ("runtime-x", nil)
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+
+        let opened = await harness.appState.openBotChat(for: makeBot(name: "atlas"))
+
+        XCTAssertTrue(opened)
+        XCTAssertEqual(created, 0)
+        XCTAssertEqual(resumedIDs, ["runtime-1"], "the open addresses the compression-lineage tip")
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-1")
+        XCTAssertEqual(harness.appState.activeSessionTitle, "atlas", "the bot's display label titles the chat")
+        XCTAssertNil(harness.appState.errorMessage)
+    }
+
+    func testMissingCanonicalCreatesHiddenTitledChatThenOpensRuntime() async {
+        var order: [String] = []
+        var resumedIDs: [String] = []
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            openSession: { _, id, _ in
+                order.append("open")
+                resumedIDs.append(id)
+                return SessionResumeResult(
+                    sessionId: id,
+                    storedSessionId: "stored-new",
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            findBotChat: { _, _ in
+                order.append("lookup")
+                return []
+            },
+            createBotChat: { _, profile in
+                order.append("create:\(profile)")
+                return ("runtime-new", "stored-new")
+            },
+            titleBotChat: { _, sessionID, title in
+                order.append("title:\(sessionID):\(title)")
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+
+        let opened = await harness.appState.openBotChat(for: makeBot(name: "atlas"))
+
+        XCTAssertTrue(opened)
+        XCTAssertEqual(
+            order.first, "lookup",
+            "the registry lookup always precedes creation"
+        )
+        XCTAssertTrue(order.contains("create:atlas"))
+        XCTAssertTrue(
+            order.contains("title:runtime-new:\(BotMode.canonicalChatTitle)"),
+            "the eager title materializes the lazy row before any open"
+        )
+        XCTAssertTrue(
+            (order.firstIndex(of: "open") ?? order.endIndex) > (order.firstIndex { $0.hasPrefix("title:") } ?? 0),
+            "the open only happens after the canonical title landed"
+        )
+        XCTAssertEqual(resumedIDs, ["runtime-new"])
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-new")
+    }
+
+    func testCreationTitleCollisionAdoptsWinnerInsteadOfForking() async {
+        var createCalls = 0
+        var lookups = 0
+        var resumedIDs: [String] = []
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            openSession: { _, id, _ in
+                resumedIDs.append(id)
+                return SessionResumeResult(
+                    sessionId: id,
+                    storedSessionId: "stored-winner",
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            findBotChat: { _, _ in
+                lookups += 1
+                // First consultation: confirmed absence. Second (post-collision
+                // adoption re-lookup): another writer holds the canonical row.
+                return lookups == 1
+                    ? []
+                    : [BotChatLookupRow(id: "stored-winner", resolvedID: "runtime-winner", title: "Bot Chat")]
+            },
+            createBotChat: { _, _ in
+                createCalls += 1
+                return ("runtime-stray", nil)
+            },
+            titleBotChat: { _, _, _ in
+                throw RpcError(code: 4022, message: "Title 'Bot Chat' is already in use by session stored-winner")
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+
+        let opened = await harness.appState.openBotChat(for: makeBot(name: "atlas"))
+
+        XCTAssertTrue(opened)
+        XCTAssertEqual(createCalls, 1, "the stray lazy session is created once and then abandoned")
+        XCTAssertEqual(lookups, 2, "the collision re-consults the registry")
+        XCTAssertEqual(resumedIDs, ["runtime-winner"], "the winner's lineage tip is opened, never our stray")
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-winner")
+        XCTAssertNil(harness.appState.errorMessage)
+    }
+
+    func testTitleFailureOtherThanCollisionFailsClosedWithoutOpening() async {
+        var openCalls = 0
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            openSession: { _, _, _ in
+                openCalls += 1
+                return SessionResumeResult(
+                    sessionId: "runtime-stray",
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            findBotChat: { _, _ in [] },
+            createBotChat: { _, _ in ("runtime-stray", nil) },
+            titleBotChat: { _, _, _ in
+                throw RpcError(code: 5000, message: "state.db is locked")
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+
+        let opened = await harness.appState.openBotChat(for: makeBot(name: "atlas"))
+
+        XCTAssertFalse(opened)
+        XCTAssertEqual(openCalls, 0, "an untitled lazy row must never be opened: the registry has no entry yet")
+        XCTAssertNotNil(harness.appState.errorMessage)
+    }
+
+    func testBotOpenDoesNotSeedTheColdRestoreResumeStore() async {
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            openSession: { _, id, _ in
+                SessionResumeResult(
+                    sessionId: id,
+                    storedSessionId: "stored-1",
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            findBotChat: { _, _ in
+                [BotChatLookupRow(id: "stored-1", resolvedID: "runtime-1", title: "Bot Chat")]
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        harness.store.setLastSessionID("ordinary-previous", for: "default")
+
+        _ = await harness.appState.openBotChat(for: makeBot(name: "atlas"))
+
+        XCTAssertEqual(
+            harness.store.lastSessionID(for: "default"),
+            "ordinary-previous",
+            "a bot chat is not the dashboard workspace's selected conversation"
+        )
+    }
+
+    func testConcurrentBotOpensShareOneFlight() async {
+        var lookupCalls = 0
+        var resumeCalls = 0
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            openSession: { _, id, _ in
+                resumeCalls += 1
+                try? await Task.sleep(nanoseconds: 20_000_000)
+                return SessionResumeResult(
+                    sessionId: id,
+                    storedSessionId: "stored-1",
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            findBotChat: { _, _ in
+                lookupCalls += 1
+                return [BotChatLookupRow(id: "stored-1", resolvedID: "runtime-1", title: "Bot Chat")]
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        let bot = makeBot(name: "atlas")
+
+        async let first: Bool = harness.appState.openBotChat(for: bot)
+        async let second: Bool = harness.appState.openBotChat(for: bot)
+        let (firstResult, secondResult) = await (first, second)
+
+        XCTAssertTrue(firstResult)
+        XCTAssertTrue(secondResult)
+        XCTAssertEqual(lookupCalls, 1, "double-tapping a row must not consult the registry twice")
+        XCTAssertEqual(resumeCalls, 1)
+    }
+
+    func testRosterRefreshDropsStaleResponseAfterServerIdentityChange() async {
+        // The seam captures the state by box so the response can race the
+        // outgoing server's teardown: by the time it lands,
+        // prepareChatResumeForConnection has already bumped the epoch.
+        var capturedState: AppState?
+        let staleBot = makeBot(name: "stale-bot")
+        let harness = makeBotHarness(
+            configureDefaults: { defaults in
+                defaults.set(
+                    "https://one.example",
+                    forKey: "conduit.chatResumeServerIdentity.v1"
+                )
+            },
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                botRoster: { _ in
+                    _ = capturedState?.prepareChatResumeForConnection(
+                        to: "https://elsewhere.example",
+                        dashboardID: UUID()
+                    )
+                    return BotRosterSnapshot(bots: [staleBot], supportsBotProtocol: true)
+                }
+            )
+        )
+        capturedState = harness.appState
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+
+        await harness.appState.refreshBotRoster()
+
+        XCTAssertEqual(
+            harness.appState.botRoster.map(\.name), [],
+            "a roster answer captured under an older epoch must never describe the new server"
+        )
+        XCTAssertEqual(harness.appState.botModePhase, .idle)
+    }
+
+    // MARK: - harness
+
+    private func makeBotHarness(
+        configureDefaults: (UserDefaults) -> Void = { _ in },
+        lifecycleOperations: ChatResumeLifecycleOperations
+    ) -> (appState: AppState, store: ChatResumeStore) {
+        let suite = "BotModeTests.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            fatalError("Failed to create test UserDefaults suite")
+        }
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suite)
+        }
+        configureDefaults(defaults)
+        let store = ChatResumeStore(defaults: defaults)
+        let coordinator = ChatResumeCoordinator(store: store)
+        let appState = AppState(
+            defaults: defaults,
+            chatResumeCoordinator: coordinator,
+            recoverySequence: ChatResumeRecoverySequence(),
+            loadSavedConnection: false,
+            clearSessionPresentationCache: {},
+            chatResumeLifecycleOperations: lifecycleOperations
+        )
+        appState.isConnected = true
+        return (appState, store)
+    }
+
+    // MARK: - fixtures
+
+    private func makeBot(
+        name: String,
+        pinned: Bool = false,
+        canonicalID: String? = nil,
+        resolvedID: String? = nil,
+        canonicalLastActive: Double? = nil,
+        lastActive: Double? = nil
+    ) -> BotProfile {
+        let resolvedCanonicalID = canonicalID
+            ?? (canonicalLastActive != nil ? "stored-\(name)" : nil)
+        return BotProfile(
+            name: name,
+            botTitle: nil,
+            displayName: name,
+            profileDescription: "",
+            model: nil,
+            provider: nil,
+            hasAvatar: false,
+            isPinned: pinned,
+            isHiddenByMeta: false,
+            appearanceColor: nil,
+            canonicalSession: resolvedCanonicalID.map { id in
+                BotCanonicalSession(
+                    id: id,
+                    resolvedID: resolvedID,
+                    lastActive: canonicalLastActive,
+                    preview: nil
+                )
+            },
+            lastActive: lastActive,
+            lastPreview: nil
+        )
+    }
+
+    private func makeSessionSummary(
+        id: String,
+        title: String,
+        storedID: String? = nil,
+        profile: String? = "default"
+    ) -> SessionSummary {
+        SessionSummary(
+            id: id,
+            storedSessionId: storedID,
+            alternateIds: [],
+            title: title,
+            model: "Hermes",
+            updatedLabel: "now",
+            profile: profile,
+            source: .chat,
+            isActive: false,
+            isArchived: false,
+            lineageRootId: nil
+        )
+    }
+}
