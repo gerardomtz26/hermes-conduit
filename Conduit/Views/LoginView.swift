@@ -30,6 +30,7 @@ struct LoginView: View {
     @State private var showNativeOAuth = false
     @State private var nativeOAuthProvider: String?
     @State private var nativeOAuthBaseURL = ""
+    @State private var nativeOAuthDashboardID = UUID()
     /// The presented failure state: classified connection failures with
     /// recovery actions, or plain validation notices. The view never renders
     /// raw Foundation error strings directly.
@@ -164,26 +165,21 @@ struct LoginView: View {
                 baseURL: nativeOAuthBaseURL,
                 cloudflareAccess: configuredCloudflareAccess,
                 provider: nativeOAuthProvider,
+                dashboardID: nativeOAuthDashboardID,
                 onSuccess: { result in
                     Task { @MainActor in
                         failure = nil
                         let baseURL = nativeOAuthBaseURL
-                        guard let dashboardID = appState.resolveDashboardID(forURL: baseURL, registerIfMissing: true) else {
-                            failure = .notice(title: AppLocalization.string("Could not save this dashboard."))
+                        guard await appState.connectWithNativeOAuth(result, baseURL: baseURL) else {
+                            failure = .notice(
+                                title: AppLocalization.string("Sign-in failed."),
+                                message: AppLocalization.string("Please try again.")
+                            )
                             return
                         }
-                        KeychainHelper.saveNativeOAuthTokens(result.tokens, dashboardID: dashboardID)
-                        guard KeychainHelper.loadNativeOAuthTokens(dashboardID: dashboardID) == result.tokens else {
-                            failure = .notice(title: AppLocalization.string("Could not save this dashboard."))
-                            return
-                        }
-                        KeychainHelper.clearCredentials(dashboardID: dashboardID)
-                        KeychainHelper.clearDashboardCookies(dashboardID: dashboardID)
                         if configuredCloudflareAccess == nil {
-                            KeychainHelper.clearCloudflareAccess(dashboardID: dashboardID)
+                            KeychainHelper.clearCloudflareAccess(dashboardID: nativeOAuthDashboardID)
                         }
-                        appState.rememberDashboardURL(baseURL)
-                        await appState.connect(with: HermesConnection(baseUrl: baseURL, ticket: result.ticket))
                     }
                 },
                 onError: { error in
@@ -482,12 +478,12 @@ struct LoginView: View {
     /// URL-presence check shared by the Connect button and connect()'s guard.
     /// Provider discovery decides whether credentials are required.
     private var connectInputsArePresent: Bool {
-        Self.hasConnectableInput(serverURL: serverUrl, username: username, password: password)
+        Self.hasConnectableInput(serverURL: serverUrl)
     }
 
     /// URL-only gate: provider discovery decides whether credentials are
     /// required. OAuth-only dashboards must not need dummy username/password.
-    static func hasConnectableInput(serverURL: String, username: String, password: String) -> Bool {
+    static func hasConnectableInput(serverURL: String) -> Bool {
         !serverURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
@@ -560,7 +556,7 @@ struct LoginView: View {
                 let supportsPassword = HermesProviderCheck.supportsPassword(providers)
                 let supportsOAuth = HermesProviderCheck.hasNativeOAuthProvider(providers)
                 if supportsOAuth && (!supportsPassword || !credentialsArePresent),
-                   await client.supportsNativeOAuth() {
+                   try await client.supportsNativeOAuth() {
                     shouldUseNativeOAuth = true
                     discoveredNativeProvider = HermesProviderCheck.nativeOAuthProvider(providers)
                 } else {
@@ -570,10 +566,15 @@ struct LoginView: View {
                 requiresBrowserSignIn = true
             }
             if shouldUseNativeOAuth {
+                guard let dashboardID = appState.resolveDashboardID(forURL: serverUrl, registerIfMissing: true) else {
+                    failure = .notice(title: AppLocalization.string("Could not save this dashboard."))
+                    return
+                }
                 nativeOAuthBaseURL = serverUrl
                 nativeOAuthProvider = discoveredNativeProvider
+                nativeOAuthDashboardID = dashboardID
                 showNativeOAuth = true
-                if let access, let dashboardID = appState.resolveDashboardID(forURL: serverUrl, registerIfMissing: true) {
+                if let access {
                     KeychainHelper.saveCloudflareAccess(access, origin: serverUrl, dashboardID: dashboardID)
                 }
                 return
@@ -606,10 +607,6 @@ struct LoginView: View {
             let authenticatedConnection = try await client.connect(username: username, password: password)
             let dashboardID = appState.resolveDashboardID(forURL: serverUrl, registerIfMissing: true)
             if let dashboardID {
-                // The just-validated password session is authoritative. A
-                // durable native token from an older sign-in must not shadow
-                // its cookie-backed transport in DashboardTicketBridge.
-                KeychainHelper.clearNativeOAuthTokens(dashboardID: dashboardID)
                 if saveCredentials {
                     KeychainHelper.saveCredentials(DashboardCredentials(
                         baseURL: serverUrl,

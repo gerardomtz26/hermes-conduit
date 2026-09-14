@@ -60,8 +60,8 @@ final class LoginFieldNavigationTests: XCTestCase {
     }
 
     func testURLAloneEnablesProviderDiscovery() {
-        XCTAssertFalse(LoginView.hasConnectableInput(serverURL: "   ", username: "chris", password: "pw"))
-        XCTAssertTrue(LoginView.hasConnectableInput(serverURL: "https://hermes.example", username: "", password: ""))
-        XCTAssertTrue(LoginView.hasConnectableInput(serverURL: " https://hermes.example ", username: " ", password: " "))
+        XCTAssertFalse(LoginView.hasConnectableInput(serverURL: "   "))
+        XCTAssertTrue(LoginView.hasConnectableInput(serverURL: "https://hermes.example"))
+        XCTAssertTrue(LoginView.hasConnectableInput(serverURL: " https://hermes.example "))
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import XCTest
 @testable import Conduit
 
@@ -12,12 +13,13 @@ private final class NativeOAuthURLProtocolStub: URLProtocol {
         do {
             guard let handler = Self.handler else { throw URLError(.badServerResponse) }
             let (status, body) = try handler(request)
-            let response = HTTPURLResponse(
-                url: request.url!,
+            guard let url = request.url,
+                  let response = HTTPURLResponse(
+                url: url,
                 statusCode: status,
                 httpVersion: "HTTP/1.1",
                 headerFields: ["Content-Type": "application/json"]
-            )!
+            ) else { throw URLError(.badURL) }
             client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
             client?.urlProtocol(self, didLoad: try JSONSerialization.data(withJSONObject: body))
             client?.urlProtocolDidFinishLoading(self)
@@ -160,6 +162,24 @@ final class NativeOAuthTests: XCTestCase {
         XCTAssertEqual(KeychainHelper.loadNativeOAuthTokens(dashboardID: b), tokensB)
     }
 
+    func testCommittingPasswordCookiesMakesCookieAuthenticationAuthoritative() {
+        let dashboardID = UUID()
+        KeychainHelper.saveNativeOAuthTokens(
+            NativeOAuthTokenSet(
+                accessToken: "stale-access",
+                refreshToken: "stale-refresh",
+                expiresAt: 3_000,
+                provider: "google",
+                userID: "user"
+            ),
+            dashboardID: dashboardID
+        )
+
+        NativeAuthConnection.debugStub(ticket: "password-ticket").commitCookies(dashboardID: dashboardID)
+
+        XCTAssertNil(KeychainHelper.loadNativeOAuthTokens(dashboardID: dashboardID))
+    }
+
     func testProviderClassificationSupportsOAuthOnlyAndMixedDashboards() {
         let password: [String: Any] = ["name": "basic", "supports_password": true, "supports_session": true]
         let google: [String: Any] = ["name": "google", "supports_password": false, "supports_session": true]
@@ -180,7 +200,7 @@ final class NativeOAuthTests: XCTestCase {
 
     func testProviderClassificationRequiresExplicitNonPasswordSignal() {
         let ambiguous: [String: Any] = ["name": "legacy"]
-        let disabled: [String: Any] = ["name": "disabled", "supports_session": false]
+        let disabled: [String: Any] = ["name": "disabled", "supports_password": false, "supports_session": false]
         XCTAssertFalse(HermesProviderCheck.hasNativeOAuthProvider([ambiguous, disabled]))
         XCTAssertNil(HermesProviderCheck.nativeOAuthProvider([ambiguous, disabled]))
     }
@@ -214,6 +234,44 @@ final class NativeOAuthTests: XCTestCase {
         }
     }
 
+    func testLoopbackStopCancelsClientWithWithheldHeaders() async throws {
+        let server = NativeOAuthLoopbackServer(expectedState: "expected")
+        let port = try await server.start(timeout: 5)
+        let connection = NWConnection(
+            host: NWEndpoint.Host("127.0.0.1"),
+            port: try XCTUnwrap(NWEndpoint.Port(rawValue: port)),
+            using: .tcp
+        )
+        let ready = expectation(description: "loopback client ready")
+        connection.stateUpdateHandler = { state in
+            if case .ready = state { ready.fulfill() }
+        }
+        connection.start(queue: DispatchQueue(label: "NativeOAuthTests.partial-client"))
+        await fulfillment(of: [ready], timeout: 2)
+        connection.send(
+            content: Data("GET /callback?code=incomplete HTTP/1.1\r\nHost:".utf8),
+            completion: .contentProcessed { _ in }
+        )
+
+        for _ in 0..<20 {
+            if await server.debugActiveConnectionCount() > 0 { break }
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        let activeBeforeStop = await server.debugActiveConnectionCount()
+        XCTAssertEqual(activeBeforeStop, 1)
+
+        server.stop()
+        do {
+            _ = try await server.waitForCallback()
+            XCTFail("Expected cancellation")
+        } catch {
+            XCTAssertTrue(error is CancellationError)
+        }
+        let activeAfterStop = await server.debugActiveConnectionCount()
+        XCTAssertEqual(activeAfterStop, 0)
+        connection.cancel()
+    }
+
     func testMultipleOAuthProvidersDelegateChoiceToHermes() {
         let google: [String: Any] = ["name": "google", "supports_password": false]
         let oidc: [String: Any] = ["name": "corporate", "supports_password": false]
@@ -235,6 +293,58 @@ final class NativeOAuthTests: XCTestCase {
             provider: "google",
             userID: "user"
         )
+    }
+
+    @MainActor
+    func testBridgeAuthModeReflectsDashboardScopedTokens() {
+        let dashboardID = UUID()
+        KeychainHelper.saveNativeOAuthTokens(tokens(), dashboardID: dashboardID)
+        let bearerBridge = DashboardTicketBridge(baseURL: "https://hermes.example", dashboardID: dashboardID)
+        XCTAssertTrue(bearerBridge.usesNativeOAuth)
+        bearerBridge.invalidate()
+
+        KeychainHelper.clearNativeOAuthTokens(dashboardID: dashboardID)
+        let cookieBridge = DashboardTicketBridge(baseURL: "https://hermes.example", dashboardID: dashboardID)
+        XCTAssertFalse(cookieBridge.usesNativeOAuth)
+        cookieBridge.invalidate()
+    }
+
+    @MainActor
+    func testInvalidatedSessionCannotTouchReplacementTokens() async {
+        let dashboardID = UUID()
+        let session = NativeOAuthSession(tokens: tokens(), dashboardID: dashboardID, client: makeClient())
+        session.invalidate()
+        let replacement = tokens(access: "replacement-access")
+        KeychainHelper.saveNativeOAuthTokens(replacement, dashboardID: dashboardID)
+
+        do {
+            _ = try await session.requestJSON(path: "/api/status")
+            XCTFail("An invalidated session must not perform transport work")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Expected CancellationError, got \(error)")
+        }
+
+        XCTAssertEqual(KeychainHelper.loadNativeOAuthTokens(dashboardID: dashboardID), replacement)
+    }
+
+    @MainActor
+    func testBearerResponseStopsAtConfiguredByteLimitWithoutContentLength() async {
+        NativeOAuthURLProtocolStub.handler = { _ in
+            (200, ["payload": String(repeating: "x", count: 128)])
+        }
+        let session = NativeOAuthSession(tokens: tokens(), dashboardID: UUID(), client: makeClient())
+
+        do {
+            _ = try await session.requestJSON(path: "/api/status", maxResponseBytes: 32)
+            XCTFail("An oversized streamed response must be rejected")
+        } catch DashboardTicketBridgeError.oversizedResponse(let limit) {
+            XCTAssertEqual(limit, 32)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
+        session.invalidate()
     }
 
     @MainActor

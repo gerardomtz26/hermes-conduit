@@ -70,13 +70,17 @@ struct NativeAuthConnection {
     fileprivate let cookies: [HTTPCookie]
 
     /// Publishes this successful transaction into the DASHBOARD's owned
-    /// native cookie jar (#148) for DashboardTicketBridge/WebKit. Calling
-    /// this more than once is harmless; callers should commit only the
-    /// connection they are about to make active. The dashboard identity is
-    /// mandatory: cookies without an owner would be readable through the
-    /// wrong dashboard.
+    /// native cookie jar (#148) for DashboardTicketBridge/WebKit and makes
+    /// cookie authentication authoritative by removing any older bearer
+    /// session. Centralizing that transition here covers normal login, saved
+    /// credential restore, setup/repair activation, and silent re-auth without
+    /// relying on every caller to repeat the same cleanup. Calling this more
+    /// than once is harmless; callers should commit only the connection they
+    /// are about to make active. The dashboard identity is mandatory: cookies
+    /// without an owner would be readable through the wrong dashboard.
     func commitCookies(dashboardID: UUID) {
         NativeAuthCookiePolicy.persist(cookies, dashboardID: dashboardID)
+        KeychainHelper.clearNativeOAuthTokens(dashboardID: dashboardID)
     }
 }
 
@@ -143,14 +147,18 @@ enum HermesProviderCheck {
         // `/api/auth/providers` is built from Hermes' list_session_providers(),
         // so membership is the explicit session-capability signal. Current
         // Hermes payloads intentionally omit a `supports_session` field.
-        providers.contains { $0["supports_password"] as? Bool == false }
+        providers.contains {
+            $0["supports_password"] as? Bool == false
+                && $0["supports_session"] as? Bool != false
+        }
     }
 
     /// Pin the provider only when discovery found exactly one OAuth-capable
     /// session provider. With several, omit it so Hermes renders its chooser.
     static func nativeOAuthProvider(_ providers: [[String: Any]]) -> String? {
         let names = providers.compactMap { provider -> String? in
-            guard provider["supports_password"] as? Bool == false else { return nil }
+            guard provider["supports_password"] as? Bool == false,
+                  provider["supports_session"] as? Bool != false else { return nil }
             return provider["name"] as? String
         }
         return names.count == 1 ? names[0] : nil
@@ -254,15 +262,38 @@ final class NativeAuthClient {
     }
 
     /// Hermes advertises native-client capability on the public status body.
-    /// Absence or an unrecognized answer means an older server, for which the
-    /// existing browser-cookie path remains the compatibility fallback.
-    func supportsNativeOAuth() async -> Bool {
-        guard let request = try? request(path: "/api/status"),
-              let result = try? await perform(request),
-              let http = result.response as? HTTPURLResponse,
-              (200...299).contains(http.statusCode),
-              let json = try? JSONSerialization.jsonObject(with: result.data) as? [String: Any],
-              let flows = json["auth_flows"] as? [String] else { return false }
+    /// A successful, recognizable older-server response may omit `auth_flows`
+    /// and safely returns false. Transport, HTTP, and malformed-payload errors
+    /// remain errors: silently treating them as "unsupported" would route a
+    /// Google provider back into the prohibited embedded WebView.
+    func supportsNativeOAuth() async throws -> Bool {
+        let request = try request(path: "/api/status")
+        let result = try await perform(request)
+        guard let http = result.response as? HTTPURLResponse else {
+            throw AuthClientError.providerDiscoveryFailed(
+                status: nil,
+                detail: AppLocalization.string("No response")
+            )
+        }
+        guard (200...299).contains(http.statusCode) else {
+            throw AuthClientError.providerDiscoveryFailed(
+                status: http.statusCode,
+                detail: parseError(result.data) ?? "HTTP \(http.statusCode)"
+            )
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: result.data) as? [String: Any] else {
+            throw AuthClientError.providerDiscoveryFailed(
+                status: http.statusCode,
+                detail: AppLocalization.string("Unexpected response")
+            )
+        }
+        guard let rawFlows = json["auth_flows"] else { return false }
+        guard let flows = rawFlows as? [String] else {
+            throw AuthClientError.providerDiscoveryFailed(
+                status: http.statusCode,
+                detail: AppLocalization.string("Unexpected response")
+            )
+        }
         return flows.contains("native_pkce")
     }
 

@@ -37,6 +37,16 @@ struct NativeOAuthTokenSet: Codable, Equatable {
 struct NativeOAuthLoginResult {
     let tokens: NativeOAuthTokenSet
     let ticket: String
+    /// Snapshot replaced when the authorization code was redeemed. Repair
+    /// activation uses it to roll back atomically if the new socket cannot
+    /// become authoritative.
+    let previousTokens: NativeOAuthTokenSet?
+
+    init(tokens: NativeOAuthTokenSet, ticket: String, previousTokens: NativeOAuthTokenSet? = nil) {
+        self.tokens = tokens
+        self.ticket = ticket
+        self.previousTokens = previousTokens
+    }
 }
 
 enum NativeOAuthError: LocalizedError, Equatable {
@@ -47,6 +57,7 @@ enum NativeOAuthError: LocalizedError, Equatable {
     case callbackRejected
     case stateMismatch
     case tokenResponseMalformed
+    case tokenStorageFailed
     case timedOut
     case requestFailed(status: Int)
 
@@ -59,6 +70,7 @@ enum NativeOAuthError: LocalizedError, Equatable {
         case .callbackRejected: return AppLocalization.string("The identity provider did not complete sign-in.")
         case .stateMismatch: return AppLocalization.string("The sign-in response failed its security check.")
         case .tokenResponseMalformed: return AppLocalization.string("The dashboard returned invalid authentication tokens.")
+        case .tokenStorageFailed: return AppLocalization.string("Could not save this dashboard.")
         case .timedOut: return AppLocalization.string("Sign-in timed out. Please try again.")
         case .requestFailed(let status): return AppLocalization.string("Dashboard sign-in failed (HTTP \(String(status))).")
         }
@@ -224,15 +236,19 @@ final class NativeOAuthAPIClient {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
         }
-        let (data, response) = try await session.data(for: request)
+        let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw DashboardTicketBridgeError.http(status: 0, detail: "No response from the dashboard.")
         }
         if let length = http.value(forHTTPHeaderField: "Content-Length").flatMap(Int.init), length > maxResponseBytes {
             throw DashboardTicketBridgeError.oversizedResponse(limit: maxResponseBytes)
         }
-        guard data.count <= maxResponseBytes else {
-            throw DashboardTicketBridgeError.oversizedResponse(limit: maxResponseBytes)
+        var data = Data()
+        for try await byte in bytes {
+            guard data.count < maxResponseBytes else {
+                throw DashboardTicketBridgeError.oversizedResponse(limit: maxResponseBytes)
+            }
+            data.append(byte)
         }
         guard (200...299).contains(http.statusCode) else {
             if http.statusCode == 401 {
@@ -269,8 +285,20 @@ final class NativeOAuthAPIClient {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, response) = try await session.data(for: request)
+        let (bytes, response) = try await session.bytes(for: request)
         guard let http = response as? HTTPURLResponse else { throw NativeOAuthError.requestFailed(status: 0) }
+        let maximumTokenResponseBytes = 64 * 1024
+        if let length = http.value(forHTTPHeaderField: "Content-Length").flatMap(Int.init),
+           length > maximumTokenResponseBytes {
+            throw NativeOAuthError.tokenResponseMalformed
+        }
+        var data = Data()
+        for try await byte in bytes {
+            guard data.count < maximumTokenResponseBytes else {
+                throw NativeOAuthError.tokenResponseMalformed
+            }
+            data.append(byte)
+        }
         guard (200...299).contains(http.statusCode) else {
             throw NativeOAuthError.requestFailed(status: http.statusCode)
         }
@@ -302,6 +330,7 @@ final class NativeOAuthSession {
     private let client: NativeOAuthAPIClient
     private var tokens: NativeOAuthTokenSet
     private var refreshTask: Task<NativeOAuthTokenSet, Error>?
+    private var isInvalidated = false
 
     init?(baseURL: String, dashboardID: UUID, cloudflareAccess: CloudflareAccessCredentials?) {
         guard let tokens = KeychainHelper.loadNativeOAuthTokens(dashboardID: dashboardID) else { return nil }
@@ -317,6 +346,7 @@ final class NativeOAuthSession {
     }
 
     func invalidate() {
+        isInvalidated = true
         refreshTask?.cancel()
         refreshTask = nil
         client.invalidate()
@@ -329,9 +359,11 @@ final class NativeOAuthSession {
         timeoutMilliseconds: Int = 12_000,
         maxResponseBytes: Int = DataURLLimits.maxJSONResponseBytes
     ) async throws -> [String: Any] {
+        guard !isInvalidated else { throw CancellationError() }
         if tokens.needsRefresh() { try await refresh() }
+        let rejectedAccessToken = tokens.accessToken
         do {
-            return try await client.requestJSON(
+            let response = try await client.requestJSON(
                 path: path,
                 method: method,
                 body: body,
@@ -339,8 +371,10 @@ final class NativeOAuthSession {
                 timeoutMilliseconds: timeoutMilliseconds,
                 maxResponseBytes: maxResponseBytes
             )
+            guard !isInvalidated else { throw CancellationError() }
+            return response
         } catch DashboardTicketBridgeError.signInRequired {
-            try await refresh()
+            try await refresh(rejectedAccessToken: rejectedAccessToken)
             let normalizedMethod = method.uppercased()
             let replayIsSafe = normalizedMethod == "GET"
                 || normalizedMethod == "HEAD"
@@ -352,7 +386,7 @@ final class NativeOAuthSession {
                 )
             }
             do {
-                return try await client.requestJSON(
+                let response = try await client.requestJSON(
                     path: path,
                     method: method,
                     body: body,
@@ -360,10 +394,18 @@ final class NativeOAuthSession {
                     timeoutMilliseconds: timeoutMilliseconds,
                     maxResponseBytes: maxResponseBytes
                 )
+                guard !isInvalidated else { throw CancellationError() }
+                return response
             } catch DashboardTicketBridgeError.signInRequired {
-                KeychainHelper.clearNativeOAuthTokens(dashboardID: dashboardID)
+                if !isInvalidated {
+                    KeychainHelper.clearNativeOAuthTokens(dashboardID: dashboardID)
+                }
                 throw DashboardTicketBridgeError.signInRequired
+            } catch let error as URLError where error.code == .cancelled && isInvalidated {
+                throw CancellationError()
             }
+        } catch let error as URLError where error.code == .cancelled && isInvalidated {
+            throw CancellationError()
         }
     }
 
@@ -375,9 +417,18 @@ final class NativeOAuthSession {
         return ticket
     }
 
-    private func refresh() async throws {
+    private func refresh(rejectedAccessToken: String? = nil) async throws {
+        guard !isInvalidated else { throw CancellationError() }
+        // Another request may already have refreshed the grant after this
+        // request left with the rejected token. In that case reuse the newer
+        // access token rather than rotating the refresh grant again.
+        if let rejectedAccessToken, rejectedAccessToken != tokens.accessToken {
+            return
+        }
         if let refreshTask {
-            tokens = try await refreshTask.value
+            let refreshed = try await refreshTask.value
+            guard !isInvalidated else { throw CancellationError() }
+            tokens = refreshed
             return
         }
         guard !tokens.refreshToken.isEmpty else {
@@ -390,11 +441,16 @@ final class NativeOAuthSession {
         defer { refreshTask = nil }
         do {
             let refreshed = try await task.value
+            guard !isInvalidated else { throw CancellationError() }
             tokens = refreshed
             KeychainHelper.saveNativeOAuthTokens(refreshed, dashboardID: dashboardID)
         } catch NativeOAuthError.requestFailed(let status) where status == 400 || status == 401 {
-            KeychainHelper.clearNativeOAuthTokens(dashboardID: dashboardID)
+            if !isInvalidated {
+                KeychainHelper.clearNativeOAuthTokens(dashboardID: dashboardID)
+            }
             throw DashboardTicketBridgeError.signInRequired
+        } catch let error as URLError where error.code == .cancelled && isInvalidated {
+            throw CancellationError()
         }
     }
 }
@@ -408,38 +464,44 @@ final class NativeOAuthLoopbackServer: @unchecked Sendable {
     private var port: UInt16?
     private var terminalResult: Result<String, Error>?
     private var timeoutWorkItem: DispatchWorkItem?
+    /// Every accepted local connection is queue-confined here until its
+    /// response owns cancellation. Finishing the login cancels any client
+    /// withholding the end of its headers, which also releases its read Task.
+    private var activeConnections: [ObjectIdentifier: NWConnection] = [:]
 
     init(expectedState: String) {
         self.expectedState = expectedState
     }
 
     func start(timeout: TimeInterval = 5 * 60) async throws -> UInt16 {
-        try await withCheckedThrowingContinuation { continuation in
-            queue.async {
-                if let result = self.terminalResult {
-                    switch result {
-                    case .failure(let error): continuation.resume(throwing: error)
-                    case .success: continuation.resume(throwing: NativeOAuthError.listenerFailed)
+        try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in
+                queue.async {
+                    if let result = self.terminalResult {
+                        switch result {
+                        case .failure(let error): continuation.resume(throwing: error)
+                        case .success: continuation.resume(throwing: NativeOAuthError.listenerFailed)
+                        }
+                        return
                     }
-                    return
-                }
-                do {
-                    let parameters = NWParameters.tcp
-                    parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
-                    let listener = try NWListener(using: parameters)
-                    self.listener = listener
-                    self.startContinuation = continuation
-                    listener.stateUpdateHandler = { [weak self] state in self?.handle(state: state) }
-                    listener.newConnectionHandler = { [weak self] connection in self?.handle(connection: connection) }
-                    listener.start(queue: self.queue)
-                    let timeoutItem = DispatchWorkItem { [weak self] in self?.finish(.failure(NativeOAuthError.timedOut)) }
-                    self.timeoutWorkItem = timeoutItem
-                    self.queue.asyncAfter(deadline: .now() + timeout, execute: timeoutItem)
-                } catch {
-                    continuation.resume(throwing: NativeOAuthError.listenerFailed)
+                    do {
+                        let parameters = NWParameters.tcp
+                        parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
+                        let listener = try NWListener(using: parameters)
+                        self.listener = listener
+                        self.startContinuation = continuation
+                        listener.stateUpdateHandler = { [weak self] state in self?.handle(state: state) }
+                        listener.newConnectionHandler = { [weak self] connection in self?.handle(connection: connection) }
+                        listener.start(queue: self.queue)
+                        let timeoutItem = DispatchWorkItem { [weak self] in self?.finish(.failure(NativeOAuthError.timedOut)) }
+                        self.timeoutWorkItem = timeoutItem
+                        self.queue.asyncAfter(deadline: .now() + timeout, execute: timeoutItem)
+                    } catch {
+                        continuation.resume(throwing: NativeOAuthError.listenerFailed)
+                    }
                 }
             }
-        }
+        }, onCancel: { self.stop() })
     }
 
     func waitForCallback() async throws -> String {
@@ -459,6 +521,14 @@ final class NativeOAuthLoopbackServer: @unchecked Sendable {
     func stop() {
         queue.async { self.finish(.failure(CancellationError())) }
     }
+
+#if DEBUG
+    func debugActiveConnectionCount() async -> Int {
+        await withCheckedContinuation { continuation in
+            queue.async { continuation.resume(returning: self.activeConnections.count) }
+        }
+    }
+#endif
 
     private func handle(state: NWListener.State) {
         switch state {
@@ -482,6 +552,11 @@ final class NativeOAuthLoopbackServer: @unchecked Sendable {
     }
 
     private func handle(connection: NWConnection) {
+        guard terminalResult == nil else {
+            connection.cancel()
+            return
+        }
+        activeConnections[ObjectIdentifier(connection)] = connection
         connection.start(queue: queue)
         Task { [weak self] in
             guard let self else { return }
@@ -560,6 +635,7 @@ final class NativeOAuthLoopbackServer: @unchecked Sendable {
     }
 
     private func sendResponse(on connection: NWConnection, status: String, message: String) {
+        activeConnections.removeValue(forKey: ObjectIdentifier(connection))
         let escaped = message
             .replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
@@ -579,6 +655,8 @@ final class NativeOAuthLoopbackServer: @unchecked Sendable {
         timeoutWorkItem = nil
         listener?.cancel()
         listener = nil
+        for connection in activeConnections.values { connection.cancel() }
+        activeConnections.removeAll()
         if let continuation = startContinuation {
             startContinuation = nil
             switch result {
@@ -598,7 +676,37 @@ final class NativeOAuthLoginModel: ObservableObject {
     @Published private(set) var authorizeURL: URL?
     private var server: NativeOAuthLoopbackServer?
 
-    func run(baseURL: String, cloudflareAccess: CloudflareAccessCredentials?, provider: String?) async throws -> NativeOAuthLoginResult {
+    func run(
+        baseURL: String,
+        cloudflareAccess: CloudflareAccessCredentials?,
+        provider: String?,
+        dashboardID: UUID
+    ) async throws -> NativeOAuthLoginResult {
+        // A previous exchange may already have succeeded while its first
+        // ticket mint failed transiently. Reuse that durable grant before
+        // opening Safari and only reauthorize after confirmed rejection.
+        if let existing = KeychainHelper.loadNativeOAuthTokens(dashboardID: dashboardID),
+           let existingSession = NativeOAuthSession(
+            baseURL: baseURL,
+            dashboardID: dashboardID,
+            cloudflareAccess: cloudflareAccess
+           ) {
+            do {
+                let ticket = try await existingSession.mintTicket()
+                let current = KeychainHelper.loadNativeOAuthTokens(dashboardID: dashboardID) ?? existing
+                return NativeOAuthLoginResult(
+                    tokens: current,
+                    ticket: ticket,
+                    // Ticket minting may have rotated the refresh token. Any
+                    // later activation rollback must retain this newest usable
+                    // generation, not restore the rejected predecessor.
+                    previousTokens: current
+                )
+            } catch DashboardTicketBridgeError.signInRequired {
+                // The session cleared the rejected grant. Continue into a new
+                // external-browser authorization below.
+            }
+        }
         let pkce = try NativeOAuthFlow.generatePKCE()
         let state = try NativeOAuthFlow.randomURLSafe(byteCount: 24)
         let server = NativeOAuthLoopbackServer(expectedState: state)
@@ -618,9 +726,21 @@ final class NativeOAuthLoginModel: ObservableObject {
         )
         let code = try await server.waitForCallback()
         let client = NativeOAuthAPIClient(baseURL: baseURL, cloudflareAccess: cloudflareAccess)
+        let previousTokens = KeychainHelper.loadNativeOAuthTokens(dashboardID: dashboardID)
         let tokens = try await client.exchange(code: code, verifier: pkce.verifier)
-        let ticket = try await client.mintTicket(accessToken: tokens.accessToken)
-        return NativeOAuthLoginResult(tokens: tokens, ticket: ticket)
+        KeychainHelper.saveNativeOAuthTokens(tokens, dashboardID: dashboardID)
+        guard KeychainHelper.loadNativeOAuthTokens(dashboardID: dashboardID) == tokens else {
+            if let previousTokens {
+                KeychainHelper.saveNativeOAuthTokens(previousTokens, dashboardID: dashboardID)
+            } else {
+                KeychainHelper.clearNativeOAuthTokens(dashboardID: dashboardID)
+            }
+            throw NativeOAuthError.tokenStorageFailed
+        }
+        let session = NativeOAuthSession(tokens: tokens, dashboardID: dashboardID, client: client)
+        let ticket = try await session.mintTicket()
+        let current = KeychainHelper.loadNativeOAuthTokens(dashboardID: dashboardID) ?? tokens
+        return NativeOAuthLoginResult(tokens: current, ticket: ticket, previousTokens: previousTokens)
     }
 
     func cancel() {
@@ -632,6 +752,7 @@ struct NativeOAuthSignInSheet: View {
     let baseURL: String
     let cloudflareAccess: CloudflareAccessCredentials?
     let provider: String?
+    let dashboardID: UUID
     let onSuccess: (NativeOAuthLoginResult) -> Void
     let onError: (Error) -> Void
     @Environment(\.dismiss) private var dismiss
@@ -654,7 +775,8 @@ struct NativeOAuthSignInSheet: View {
                 let result = try await model.run(
                     baseURL: baseURL,
                     cloudflareAccess: cloudflareAccess,
-                    provider: provider
+                    provider: provider,
+                    dashboardID: dashboardID
                 )
                 onSuccess(result)
                 dismiss()
