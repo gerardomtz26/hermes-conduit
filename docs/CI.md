@@ -223,7 +223,9 @@ the rest of CI v2.
    from AppState construction but only ~0-7 HALC overload skips, and a
    non-audio slow-timeout lane shows 48 / 4 - the joint AND with those
    margins fails closed, and thresholds are flag-overridable for
-   recalibration. There is deliberately NO test-class allowlist: any
+   recalibration, and the lane runner honors the
+   `COREAUDIO_WEDGE_MIN_AURIOC` / `COREAUDIO_WEDGE_MIN_HALC` environment
+   variables (defaults 150 / 20) for the same purpose. There is deliberately NO test-class allowlist: any
    failed test may be poisoned by the host, and growing an allowlist per
    failing class would recreate the classification bug this domain
    exists to fix.

@@ -678,6 +678,20 @@ print(json.dumps({'budget_s': int(os.environ['ISOLATION_BUDGET_S']), 'classes': 
 # There is no second recovery attempt: a human re-running the lane is the
 # escalation path for a persistent fleet wedge. Returns 0 only when the lane
 # was fully handled here.
+# Fold attempt parts into the lane-level observations/detail. Called before
+# EVERY wedge verdict: a red wedge lane must still carry its failures and
+# class timings (attempt-1 data when the retry never ran, merged retry data
+# otherwise). No-op safe when no parts were staged.
+merge_wedge_parts() {
+  [ -d "$RESULT_DIR/parts" ] || return 0
+  python3 "$SCRIPT_DIR/extract-test-timings.py" merge-parts \
+    --parts-dir "$RESULT_DIR/parts" \
+    --observations-out "$RESULT_DIR/observations.json" \
+    --detail-out "$RESULT_DIR/detail.json" \
+    >>"$LOG_DIR/merge-parts.log" 2>&1 || \
+    echo "::warning::timing part merge failed safely for lane $LANE; timing history keeps previous values"
+}
+
 # --- CoreAudio host recovery on the TIMEOUT path (unit lanes) ----------------
 # CoreAudio starvation can hang an invocation instead of failing it. Before
 # paying for generic class-granular isolation, consult the same host-health
@@ -760,6 +774,7 @@ WEDGE_EOF
 
   if [ "$statusR" -eq 124 ]; then
     echo "::error::CoreAudio host wedge recovery for lane $LANE exceeded its "${TIMEOUT_S}"s watchdog - failing the lane; rerun the lane when the hosted fleet has recovered"
+    merge_wedge_parts
     finish_lane "timeout" '[{"n": 1, "mode": "lane", "status": "host-wedge-timeout"}, {"n": 2, "mode": "host-retry", "status": "timeout"}]' "" 1
   fi
 
@@ -789,15 +804,23 @@ print('AURemoteIO -10851 occurrences: {0}, HALC overload skips: {1}'.format(
       echo "::error::persistent CoreAudio runner failure in lane $LANE: the recovery retry carries the same wedge signature ($RETRY_SIG) - the hosted fleet is broken; this is NOT a product test failure"
       finish_lane "fail" '[{"n": 1, "mode": "lane", "status": "host-wedge-timeout"}, {"n": 2, "mode": "host-retry", "status": "persistent-coreaudio-wedge"}]' "" 1
     fi
+    if [ "$verdictR" -eq 2 ]; then
+      echo "::error::lane $LANE CoreAudio host wedge retry classifier could not run - failing closed as unclassified instead of claiming product failures"
+      merge_wedge_parts
+      finish_lane "error" '[{"n": 1, "mode": "lane", "status": "host-wedge-timeout"}, {"n": 2, "mode": "host-retry", "status": "unclassified"}]' "" 1
+    fi
     echo "lane $LANE: tests FAILED on the clean-host retry without the wedge signature - real product failures"
+    merge_wedge_parts
     finish_lane "fail" '[{"n": 1, "mode": "lane", "status": "host-wedge-timeout"}, {"n": 2, "mode": "host-retry", "status": "test-failures"}]' "" 1
   fi
 
   if [ "$FAIL_COUNT_R" -eq -1 ]; then
     echo "::error::lane $LANE CoreAudio host wedge recovery failed (exit $statusR) and its XCTest result could not be classified - failing the lane instead of retrying"
+    merge_wedge_parts
     finish_lane "error" '[{"n": 1, "mode": "lane", "status": "host-wedge-timeout"}, {"n": 2, "mode": "host-retry", "status": "unclassified"}]' "" 1
   fi
 
+  merge_wedge_parts
   echo "::error::lane $LANE CoreAudio host wedge recovery exited nonzero with zero failing tests (exit $statusR) - persistent infrastructure failure after the clean-host reset"
   finish_lane "fail" '[{"n": 1, "mode": "lane", "status": "host-wedge-timeout"}, {"n": 2, "mode": "host-retry", "status": "infra-error"}]' "" 1
 }
@@ -872,18 +895,6 @@ WEDGE_EOF
   [ -f "$RESULT_DIR/observations.json" ] &&     mv "$RESULT_DIR/observations.json" "$RESULT_DIR/parts/observations-lane-a1.json"
   [ -f "$RESULT_DIR/detail.json" ] &&     mv "$RESULT_DIR/detail.json" "$RESULT_DIR/parts/detail-lane-a1.json"
 
-  # Fold the attempt parts into the lane-level observations/detail BEFORE any
-  # verdict: a red wedge lane must still carry its failures and class timings
-  # (attempt-1 data when the retry never ran, merged retry data otherwise).
-  merge_wedge_parts() {
-    python3 "$SCRIPT_DIR/extract-test-timings.py" merge-parts \
-      --parts-dir "$RESULT_DIR/parts" \
-      --observations-out "$RESULT_DIR/observations.json" \
-      --detail-out "$RESULT_DIR/detail.json" \
-      >>"$LOG_DIR/merge-parts.log" 2>&1 || \
-      echo "::warning::timing part merge failed safely for lane $LANE; timing history keeps previous values"
-  }
-
   RESET_USED=1
   ERASE_USED=1
   if ! reset_and_boot_simulator 1; then
@@ -894,6 +905,15 @@ WEDGE_EOF
 
   RETRY_FILTERS=()
   for cls in $AFFECTED_CLASSES; do
+    # Class identifiers are alphanumeric/underscore; anything else in the
+    # scope would inject arguments into the retry invocation - fail closed
+    # instead.
+    case "$cls" in ''|*[!A-Za-z0-9_]*)
+      echo "::error::lane $LANE wedge retry scope contains an invalid class token ('$cls') - failing closed as unclassified"
+      merge_wedge_parts
+      finish_lane "error" '[{"n": 1, "mode": "lane", "status": "audio-wedge"}, {"n": 2, "mode": "audio-retry", "status": "unclassified"}]' "" 1
+      ;;
+    esac
     RETRY_FILTERS+=("-only-testing:$TARGET/$cls")
   done
 
