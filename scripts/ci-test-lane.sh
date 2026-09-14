@@ -709,7 +709,7 @@ attempt_coreaudio_host_recovery_after_timeout() { # $1 = attempt-1 log
   python3 "$classifier" classify \
     --invocation-log "$a1_log" \
     --min-auremoteio "${COREAUDIO_WEDGE_MIN_AURIOC:-150}" \
-    --min-halc-overload "${COREAUDIO_WEDGE_MIN_HALC:-20}" \
+    --min-halc-overload "${COREAUDIO_WEDGE_MIN_HALC:-10}" \
     --out "$COREAUDIO_WEDGE_JSON" >"$LOG_DIR/coreaudio-wedge-timeout.log" 2>&1 || verdict=$?
   if [ "$verdict" -eq 2 ]; then
     # The classifier cannot read the timed-out invocation's log: whether the
@@ -789,7 +789,7 @@ WEDGE_EOF
     python3 "$classifier" classify \
       --invocation-log "$LOG_DIR/attempt-2-host-retry.log" \
       --min-auremoteio "${COREAUDIO_WEDGE_MIN_AURIOC:-150}" \
-      --min-halc-overload "${COREAUDIO_WEDGE_MIN_HALC:-20}" \
+      --min-halc-overload "${COREAUDIO_WEDGE_MIN_HALC:-10}" \
       --out "$RESULT_DIR/coreaudio-wedge-retry.json" \
       >"$LOG_DIR/coreaudio-wedge-attempt2.log" 2>&1 || verdictR=$?
     if [ "$verdictR" -eq 0 ]; then
@@ -834,7 +834,7 @@ attempt_coreaudio_wedge_recovery() { # $1=attempt1 log $2=attempt1 detail
   python3 "$classifier" classify \
     --invocation-log "$a1_log" \
     --min-auremoteio "${COREAUDIO_WEDGE_MIN_AURIOC:-150}" \
-    --min-halc-overload "${COREAUDIO_WEDGE_MIN_HALC:-20}" \
+    --min-halc-overload "${COREAUDIO_WEDGE_MIN_HALC:-10}" \
     --out "$COREAUDIO_WEDGE_JSON" >"$LOG_DIR/coreaudio-wedge-attempt1.log" 2>&1 || verdict=$?
   if [ "$verdict" -eq 2 ]; then
     echo "::warning::CoreAudio wedge classifier could not run - treating the failure as a product failure (fail closed)"
@@ -959,7 +959,7 @@ WEDGE_EOF
     python3 "$classifier" classify \
       --invocation-log "$LOG_DIR/attempt-2-audio-retry.log" \
       --min-auremoteio "${COREAUDIO_WEDGE_MIN_AURIOC:-150}" \
-      --min-halc-overload "${COREAUDIO_WEDGE_MIN_HALC:-20}" \
+      --min-halc-overload "${COREAUDIO_WEDGE_MIN_HALC:-10}" \
       --out "$RESULT_DIR/coreaudio-wedge-retry.json" \
       >"$LOG_DIR/coreaudio-wedge-attempt2.log" 2>&1 || verdictR=$?
     if [ "$verdictR" -eq 0 ]; then

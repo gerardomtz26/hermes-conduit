@@ -217,10 +217,10 @@ the rest of CI v2.
    `skipping cycle due to overload` lines, then starves timing-sensitive
    assertions anywhere in the lane or hangs the invocation outright.
    `scripts/classify-coreaudio-wedge.py` is a HOST-HEALTH classifier: the
-   strong log signature alone (>= 150 AURemoteIO -10851 lines AND >= 20
+   strong log signature alone (>= 150 AURemoteIO -10851 lines AND >= 10
    HALC overload skips in that invocation) identifies the broken
    environment. Healthy lanes emit up to ~93-116 ambient AURemoteIO lines
-   from AppState construction but only ~0-7 HALC overload skips, and a
+   from AppState construction but only ~0-11 HALC overload skips, and a
    non-audio slow-timeout lane shows 48 / 4 - the joint AND with those
    margins fails closed, and thresholds are flag-overridable for
    recalibration, and the lane runner honors the

@@ -29,9 +29,15 @@ per invocation log, i.e. per single xcodebuild invocation):
 Observed distributions (docs/CI.md carries the full table):
 
     healthy unit-1        aurioc ~8-22    overload ~0-2
-    healthy unit-2        aurioc ~93-116  overload ~4-7   (ambient maximum)
+    healthy unit-2        aurioc ~93-116  overload ~4-11  (ambient maximum)
     healthy unit-audio    aurioc 0        overload 0
-    wedged unit-2         aurioc 184-186  overload 48
+    slow-timeout unit-1   aurioc ~48-102  overload ~2-11  (NOT the wedge)
+    wedged unit-2         aurioc 178-189  overload 14-48
+
+    The overload floor was recalibrated 10 < 20 after the 2026-09-14
+    rerun of run 34901103097 showed a wedge variant at 186 / 14: the
+    AURemoteIO flood is the reliable marker, the overload marker
+    varies with wedge phase.
 
 The joint AND with these margins fails closed: a single AURemoteIO line -
 or the full healthy ambient volume - never classifies an invocation as
@@ -61,7 +67,7 @@ import re
 import sys
 
 DEFAULT_MIN_AUREMOTEIO = 150
-DEFAULT_MIN_HALC_OVERLOAD = 20
+DEFAULT_MIN_HALC_OVERLOAD = 10
 
 # The exact observed record shape: AURemoteIO reporting the -10851 activation
 # failure. A plain two-substring match could inflate counts on a benign line

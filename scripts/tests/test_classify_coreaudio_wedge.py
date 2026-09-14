@@ -94,6 +94,16 @@ class ClassifierCliTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 1)
             self.assertFalse(json.loads(proc.stdout)["signature_strong"])
 
+    def test_aurioc_elevated_with_moderate_overload_is_a_wedge(self):
+        # 2026-09-14 run 34901103097 rerun: 186 AURemoteIO / 14 overload -
+        # aurioc is the reliable flood marker; the overload floor must not
+        # require the full 48-line burst every time.
+        with tempfile.TemporaryDirectory() as tmp:
+            log = wedge_log(os.path.join(tmp, "attempt-1.log"),
+                            auremoteio=186, halc=14, chhaptic=20)
+            proc = self._run(log)
+            self.assertEqual(proc.returncode, 0, proc.stdout)
+
     def test_non_audio_slow_timeout_volumes_are_not_a_wedge(self):
         # Run 34776568422: a generic stall red lane showed 48 / 4.
         with tempfile.TemporaryDirectory() as tmp:
