@@ -576,6 +576,9 @@ for a in "$@"; do
     ;;
   esac
 done
+n=$(printf '%s
+' "$@" | grep -c -- '-only-testing:' || true)
+echo "inv:filters=$n" >> "$INVOCATION_LOG"
 emit_signature() {
   i=0
   while [ "$i" -lt 200 ]; do
@@ -798,6 +801,7 @@ assert_eq "exactly one invocation" "$(grep -c '^inv:filters=' "$INVOCATION_LOG")
 # --- host case 6: strong signature + TIMEOUT -> one lane retry, no isolation --
 end_case
 begin_case "timeout with strong host signature retries the lane once" "$WORK/w5"
+write_wedge_stub_xcodebuild
 export INVOCATION_LOG="$WORK/w5-invocations.log"; : > "$INVOCATION_LOG"
 export FAKE_WEDGE_A1="hang-signature" FAKE_WEDGE_HOST_RETRY="pass"
 export FAKE_WEDGE_FAIL_CLASSES="ChatResumeTests"
