@@ -704,6 +704,8 @@ assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
 assert_eq "verdict" "$(lane_field "['status']")" "fail"
 assert_eq "attempts" "$(attempts_statuses)" "['audio-wedge', 'test-failures']"
 assert_eq "no third invocation" "$(grep -c '^inv:filters=' "$INVOCATION_LOG")" "2"
+assert_eq "failed wedge lane reports the failures" "$(lane_field "['failures']" | grep -c VoiceTests)" "1"
+assert_eq "failed wedge lane claims no recovery" "$(lane_field "['infra_recovered_classes']")" "[]"
 
 # --- wedge case C: retry carries the signature -> persistent, no loop ---------
 end_case
@@ -767,6 +769,148 @@ assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
 assert_eq "verdict" "$(lane_field "['status']")" "fail"
 assert_eq "attempts" "$(attempts_statuses)" "['test-failures']"
 assert_eq "exactly one invocation" "$(grep -c '^inv:filters=' "$INVOCATION_LOG")" "1"
+
+# --- wedge case F: unclassifiable retry classifier -> unclassified error ------
+end_case
+begin_case "wedge retry classifier failure fails closed as unclassified" "$WORK/w6"
+cat > "$STUBS/xcodebuild" <<'STUB'
+#!/bin/bash
+for a in "$@"; do
+  case "$a" in *.xcresult)
+    mkdir -p "$a"
+    RESULT_DIR=$(dirname "$(dirname "$a")")
+    ;;
+  esac
+done
+n=$(printf '%s\n' "$@" | grep -c -- '-only-testing:' || true)
+if [ "$n" -gt 1 ]; then
+  cat > "$FAKE_CANNED" <<'DOC'
+{"testNodes": [{"nodeType": "Test Plan", "name": "Conduit", "result": "Passed",
+  "children": [{"nodeType": "Unit test bundle", "name": "ConduitTests", "result": "Passed",
+    "children": [{"nodeType": "Test Suite", "name": "VoiceTests", "result": "Failed",
+      "children": [{"nodeType": "Test Case", "name": "testC()", "result": "Failed",
+        "durationInSeconds": 0.1}]}]}]}]}
+DOC
+  i=0
+  while [ "$i" -lt 200 ]; do
+    echo "2026-09-14 00:00:00.000 Conduit[9:9] [aurioc]            AURemoteIO.cpp:1135  failed: -10851 (enable 1)"
+    i=$((i + 1))
+  done
+  i=0
+  while [ "$i" -lt 30 ]; do
+    echo "2026-09-14 00:00:00.000 Conduit[9:9] [AMCP]          HALC_ProxyIOContext.cpp:1623  HALC_ProxyIOContext::IOWorkLoop: skipping cycle due to overload"
+    i=$((i + 1))
+  done
+  echo "Test Case failed (stub)"
+  exit 65
+fi
+# Recovery retry: pass, then destroy the invocation log so the retry
+# classifier cannot read its inputs.
+echo "retry:removed-log" >> "$INVOCATION_LOG"
+cat > "$FAKE_CANNED" <<'DOC'
+{"testNodes": [{"nodeType": "Test Plan", "name": "Conduit", "result": "Passed",
+  "children": [{"nodeType": "Unit test bundle", "name": "ConduitTests", "result": "Passed",
+    "children": [{"nodeType": "Test Suite", "name": "VoiceTests", "result": "Failed",
+      "children": [{"nodeType": "Test Case", "name": "testC()", "result": "Failed",
+        "durationInSeconds": 0.1}]}]}]}]}
+DOC
+rm -f "$RESULT_DIR/logs/attempt-2-audio-retry.log"
+echo "Test Case failed (stub)"
+exit 65
+STUB
+chmod +x "$STUBS/xcodebuild"
+export INVOCATION_LOG="$WORK/w6-invocations.log"; : > "$INVOCATION_LOG"
+export FAKE_WEDGE_A1="signature" FAKE_WEDGE_RETRY=""
+run_lane "VoiceTests,HealthyTests" 300 unused 3
+assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
+assert_eq "verdict" "$(lane_field "['status']")" "error"
+assert_eq "attempts" "$(attempts_statuses)" "['audio-wedge', 'unclassified']"
+if grep -q "failing closed as unclassified" "$WORKCASE/stdout.log"; then
+  ok "retry classifier failure is not claimed as a product failure"
+else
+  bad "an unclassifiable retry must fail closed as unclassified"
+fi
+
+# --- wedge case G: timeout + signature stays on the UNCHANGED timeout path ----
+# A watchdog kill is handled by isolation, never by the wedge recovery: the
+# recovery targets identified test failures only. Pins that domain 4 behavior
+# is untouched by the classifier.
+end_case
+begin_case "timeout with wedge signature still goes to isolation" "$WORK/w7"
+cat > "$STUBS/xcodebuild" <<'STUB'
+#!/bin/bash
+n=$(printf '%s\n' "$@" | grep -c -- '-only-testing:' || true)
+if [ "$n" -gt 1 ]; then
+  i=0
+  while [ "$i" -lt 200 ]; do
+    echo "2026-09-14 00:00:00.000 Conduit[9:9] [aurioc]            AURemoteIO.cpp:1135  failed: -10851 (enable 1)"
+    i=$((i + 1))
+  done
+  i=0
+  while [ "$i" -lt 30 ]; do
+    echo "2026-09-14 00:00:00.000 Conduit[9:9] [AMCP]          HALC_ProxyIOContext.cpp:1623  HALC_ProxyIOContext::IOWorkLoop: skipping cycle due to overload"
+    i=$((i + 1))
+  done
+  sleep 300
+  exit 0
+fi
+exit 0
+STUB
+chmod +x "$STUBS/xcodebuild"
+export INVOCATION_LOG="$WORK/w7-invocations.log"; : > "$INVOCATION_LOG"
+export ISOLATION_BUDGET_S=200 CLASS_TIMEOUT_MIN_S=1 CLASS_TIMEOUT_MULTIPLIER=0.1
+run_lane "AlphaTests,BetaTests" 3 unused 1
+assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
+assert_eq "verdict" "$(lane_field "['status']")" "timeout"
+assert_eq "first attempt is a timeout" "$(attempts_statuses | grep -o 'timeout' | head -1)" "timeout"
+assert_eq "no audio-retry attempt" "$(grep -c 'audio-retry' "$WORKCASE/lane-result.json" 2>/dev/null || echo 0)" "0"
+if grep -q "CoreAudio infrastructure wedge detected" "$WORKCASE/stdout.log"; then
+  bad "the wedge recovery must not fire on a watchdog timeout"
+else
+  ok "timeout path consulted no wedge recovery"
+fi
+
+# --- wedge case H: signature + zero failing tests -> ordinary infra retry ------
+# The zero-failing-test infrastructure domain (domain 3) keeps its full-lane
+# retry; the wedge classifier requires identified failures and never fires.
+end_case
+begin_case "signature with zero failing tests takes the infra path" "$WORK/w8"
+cat > "$STUBS/xcodebuild" <<'STUB'
+#!/bin/bash
+for a in "$@"; do
+  case "$a" in *.xcresult) mkdir -p "$a" ;; esac
+done
+n=$(printf '%s\n' "$@" | grep -c -- '-only-testing:' || true)
+echo "inv:filters=$n" >> "$INVOCATION_LOG"
+cat > "$FAKE_CANNED" <<'DOC'
+{"testNodes": [{"nodeType": "Test Plan", "name": "Conduit", "result": "Passed",
+  "children": [{"nodeType": "Unit test bundle", "name": "ConduitTests", "result": "Passed",
+    "children": [{"nodeType": "Test Suite", "name": "VoiceTests", "result": "Passed",
+      "children": [{"nodeType": "Test Case", "name": "testC()", "result": "Passed",
+        "durationInSeconds": 0.1}]}]}]}]}
+DOC
+i=0
+while [ "$i" -lt 200 ]; do
+  echo "2026-09-14 00:00:00.000 Conduit[9:9] [aurioc]            AURemoteIO.cpp:1135  failed: -10851 (enable 1)"
+  i=$((i + 1))
+done
+echo "simulator crashed once (stub)"
+[ "$(cat "$COUNT_FILE" 2>/dev/null || echo 0)" -ge 1 ] && exit 0
+n_inv=$(grep -c '^inv:filters=' "$INVOCATION_LOG" 2>/dev/null || echo 0)
+echo "$n_inv" > "$COUNT_FILE"
+exit 70
+STUB
+chmod +x "$STUBS/xcodebuild"
+export INVOCATION_LOG="$WORK/w8-invocations.log"; : > "$INVOCATION_LOG"
+export COUNT_FILE="$WORK/w8-count"
+: > "$COUNT_FILE"
+write_canned "$WORK/canned-w8.json" "VoiceTests" "Passed"
+export FAKE_CANNED="$WORK/canned-w8.json"
+run_lane "VoiceTests" 300 infra-once 1
+assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "0"
+assert_eq "verdict" "$(lane_field "['status']")" "pass"
+assert_eq "attempts are the ordinary infra chain" "$(attempts_statuses)" "['infra-recovered', 'passed']"
+assert_eq "no audio-retry marker" "$(grep -c 'audio-retry' "$WORKCASE/lane-result.json" 2>/dev/null || echo 0)" "0"
 
 export AUDIO_INVENTORY=""
 

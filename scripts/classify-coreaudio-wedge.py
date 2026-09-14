@@ -53,6 +53,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 
 DEFAULT_INVENTORY = os.path.join(
@@ -73,6 +74,11 @@ HALC_OVERLOAD_MARK = "skipping cycle due to overload"
 # hosts vs 20 under the wedge - not discriminative enough to gate on.
 CHHAPTIC_MARK = "CHHapticEngine"
 
+# The exact observed record shape: AURemoteIO reporting the -10851 activation
+# failure. A plain two-substring match could inflate counts on a benign line
+# that merely mentions both tokens.
+AUREMOTEIO_RE = re.compile(r"AURemoteIO.*failed:\s*-10851")
+
 
 def count_signals(invocation_log: str) -> dict:
     """One pass over the invocation log counting the audio-host markers.
@@ -85,7 +91,7 @@ def count_signals(invocation_log: str) -> dict:
     chhaptic = 0
     with open(invocation_log, encoding="utf-8", errors="replace") as fh:
         for line in fh:
-            if AUREMOTEIO_MARK in line and AUREMOTEIO_CODE in line:
+            if AUREMOTEIO_RE.search(line):
                 auremoteio += 1
             if HALC_OVERLOAD_MARK in line:
                 halc_overload += 1
@@ -131,8 +137,8 @@ def classify(signals: dict, failed_classes: list, inventory: list,
     inventory_set = set(inventory)
     audio_failures = [c for c in failed_classes if c in inventory_set]
     outside = [c for c in failed_classes if c not in inventory_set]
-    signature = (signals["auremoteio_10851"] >= min_auremoteio
-                 and signals["halc_overload"] >= min_halc_overload)
+    signature = (signals.get("auremoteio_10851", 0) >= min_auremoteio
+                 and signals.get("halc_overload", 0) >= min_halc_overload)
     # BOTH conditions. No identified failures -> never a wedge; any failure
     # outside the inventory -> never a wedge (a real regression must not be
     # rescuable, and the wedge can starve ordinary classes' async assertions

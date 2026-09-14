@@ -416,6 +416,10 @@ def load_audio_sensitive_classes(path) -> tuple:
     if not isinstance(classes, list) or not all(isinstance(c, str) for c in classes):
         return [], ["audio-sensitive inventory has unexpected schema; "
                     "planning without a reserved unit-audio lane"]
+    if not classes:
+        return [], ["audio-sensitive inventory names no classes - planning "
+                    "without a reserved unit-audio lane (empty file or wrong "
+                    "key?)"]
     return sorted(set(classes)), []
 
 
@@ -600,14 +604,26 @@ def validate_plan(plan: dict, discovery: dict,
         errors.append("UI classes leaked into unit lanes")
 
     # Fewer classes than min_lanes legitimately yields fewer lanes; the count
-    # must merely stay within [min(min_lanes, n_classes), max_lanes].
+    # must merely stay within [min(min_lanes, n_classes), max_lanes]. The
+    # bound applies to the GENERAL lanes only - the reserved unit-audio lane
+    # is additive (it exists exactly once iff the inventory names a
+    # discovered class) and must never push a legitimate 8-general-lane plan
+    # over max_lanes.
     n_unit = len(unit_names)
     lo = min(plan["config"]["min_lanes"], n_unit)
     hi = plan["config"]["max_lanes"]
-    if plan["lane_count"] < lo or plan["lane_count"] > hi:
+    general_count = sum(1 for l in plan["unit_lanes"] if l["lane"] != AUDIO_LANE_NAME)
+    if general_count < lo or general_count > hi:
         errors.append(
-            f"lane count {plan['lane_count']} outside configured bounds "
+            f"general lane count {general_count} outside configured bounds "
             f"[{lo}, {hi}]"
+        )
+    expected_total = general_count + (1 if any(
+        l["lane"] == AUDIO_LANE_NAME for l in plan["unit_lanes"]) else 0)
+    if plan["lane_count"] != expected_total:
+        errors.append(
+            f"lane_count {plan['lane_count']} != general lanes "
+            f"{general_count} + audio lane {expected_total - general_count}"
         )
     n_ui = len(ui_names)
     ui_lo = min(plan["config"]["ui_min_lanes"], n_ui)

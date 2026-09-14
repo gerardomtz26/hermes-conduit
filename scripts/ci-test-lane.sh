@@ -389,6 +389,9 @@ HUNG_CLASS=""
 # attempt bundles (the attempt-1 bundle is the only evidence of the wedge)
 # and the wedge metadata travels in lane-result.json.
 COREAUDIO_RECOVERY=0
+# The attempt-1 classification is the canonical incident record embedded in
+# lane-result.json; the retry classification (coreaudio-wedge-retry.json)
+# stays a log/artifact-level detail of the persistent-wedge verdict.
 COREAUDIO_WEDGE_JSON="$RESULT_DIR/coreaudio-wedge.json"
 
 # UI mode records the per-class attempt chain (mode|n|class|status lines) and
@@ -680,12 +683,15 @@ attempt_coreaudio_wedge_recovery() { # $1=attempt1 log $2=attempt1 detail
   local a1_log="$1" a1_detail="$2"
   local classifier="$SCRIPT_DIR/classify-coreaudio-wedge.py"
   local inventory="${AUDIO_INVENTORY:-$SCRIPT_DIR/audio-sensitive-tests.json}"
+  local verdict=0 verdictR=0 statusR=0 FAIL_COUNT_R="" WEDGE_FIELDS="" \
+    AFFECTED_CLASSES="" SIG_AURIOC=0 SIG_HALC=0 RETRY_SIG=""
   [ -f "$classifier" ] || return 1
-  local verdict=0
   python3 "$classifier" \
     --invocation-log "$a1_log" \
     --detail "$a1_detail" \
     --inventory "$inventory" \
+    --min-auremoteio "${COREAUDIO_WEDGE_MIN_AURIOC:-150}" \
+    --min-halc-overload "${COREAUDIO_WEDGE_MIN_HALC:-20}" \
     --out "$COREAUDIO_WEDGE_JSON" >"$LOG_DIR/coreaudio-wedge-attempt1.log" 2>&1 || verdict=$?
   if [ "$verdict" -eq 2 ]; then
     echo "::warning::CoreAudio wedge classifier could not run - treating the failure as a product failure (fail closed)"
@@ -698,34 +704,29 @@ attempt_coreaudio_wedge_recovery() { # $1=attempt1 log $2=attempt1 detail
     return 1
   fi
 
-  AFFECTED_CLASSES=$(python3 -c "
+  # One parse of the classification document; the classifier owns the schema
+  # and prints shell-assignable key=value lines (values are classifier-owned
+  # tokens, never user input).
+  local AFFECTED_CLASSES="" SIG_AURIOC=0 SIG_HALC=0
+  WEDGE_FIELDS=$(python3 -c "
 import json, sys
 with open(sys.argv[1], encoding='utf-8') as fh:
     doc = json.load(fh)
-print(' '.join(doc.get('audio_sensitive_failures', [])))
+print('affected=' + ' '.join(doc.get('audio_sensitive_failures', [])))
+print('aurioc=' + str(doc.get('signals', {}).get('auremoteio_10851', 0)))
+print('halc=' + str(doc.get('signals', {}).get('halc_overload', 0)))
 " "$COREAUDIO_WEDGE_JSON" 2>/dev/null || true)
-  SIG_AURIOC=$(python3 -c "
-import json, sys
-with open(sys.argv[1], encoding='utf-8') as fh:
-    doc = json.load(fh)
-print(doc.get('signals', {}).get('auremoteio_10851', 0))
-" "$COREAUDIO_WEDGE_JSON" 2>/dev/null || true)
-  SIG_HALC=$(python3 -c "
-import json, sys
-with open(sys.argv[1], encoding='utf-8') as fh:
-    doc = json.load(fh)
-print(doc.get('signals', {}).get('halc_overload', 0))
-" "$COREAUDIO_WEDGE_JSON" 2>/dev/null || true)
+  for wedge_field in $WEDGE_FIELDS; do
+    case "$wedge_field" in
+      affected=*) AFFECTED_CLASSES="${wedge_field#affected=}" ;;
+      aurioc=*) SIG_AURIOC="${wedge_field#aurioc=}" ;;
+      halc=*) SIG_HALC="${wedge_field#halc=}" ;;
+    esac
+  done
   if [ -z "$AFFECTED_CLASSES" ]; then
     return 1
   fi
   COREAUDIO_RECOVERY=1
-  # Infra-recovery bookkeeping: the affected classes ran twice and the retry
-  # rescued an environment wedge (not a test flake) - reported through the
-  # existing lane-result field, never as a clean pass.
-  for wedge_cls in $AFFECTED_CLASSES; do
-    echo "$wedge_cls" >> "$INFRA_RECOVERED_LINES"
-  done
   echo "::warning::CoreAudio infrastructure wedge detected in lane $LANE: AURemoteIO -10851 occurrences: ${SIG_AURIOC}, HALC overload skips: ${SIG_HALC}"
   echo "::warning::affected tests: $(printf '%s ' $AFFECTED_CLASSES)"
   echo "action: resetting simulator and retrying affected tests"
@@ -737,10 +738,23 @@ print(doc.get('signals', {}).get('halc_overload', 0))
   mv "$RESULT_DIR/observations.json" "$RESULT_DIR/parts/observations-lane-a1.json"
   mv "$RESULT_DIR/detail.json" "$RESULT_DIR/parts/detail-lane-a1.json"
 
+  # Fold the attempt parts into the lane-level observations/detail BEFORE any
+  # verdict: a red wedge lane must still carry its failures and class timings
+  # (attempt-1 data when the retry never ran, merged retry data otherwise).
+  merge_wedge_parts() {
+    python3 "$SCRIPT_DIR/extract-test-timings.py" merge-parts \
+      --parts-dir "$RESULT_DIR/parts" \
+      --observations-out "$RESULT_DIR/observations.json" \
+      --detail-out "$RESULT_DIR/detail.json" \
+      >>"$LOG_DIR/merge-parts.log" 2>&1 || \
+      echo "::warning::timing part merge failed safely for lane $LANE; timing history keeps previous values"
+  }
+
   RESET_USED=1
   ERASE_USED=1
   if ! reset_and_boot_simulator 1; then
     echo "::error::simulator recovery after the CoreAudio wedge failed - the environment cannot be trusted; stopping the lane"
+    merge_wedge_parts
     finish_lane "error" '[{"n": 1, "mode": "lane", "status": "audio-wedge"}, {"n": 2, "mode": "audio-retry", "status": "untrusted-recovery"}]' "" 1
   fi
 
@@ -760,12 +774,13 @@ print(doc.get('signals', {}).get('halc_overload', 0))
       "$RESULT_DIR/parts/observations-lane-a2.json" \
       "$RESULT_DIR/parts/detail-lane-a2.json" \
       "$LOG_DIR/extract-audio-retry.log"
-    python3 "$SCRIPT_DIR/extract-test-timings.py" merge-parts \
-      --parts-dir "$RESULT_DIR/parts" \
-      --observations-out "$RESULT_DIR/observations.json" \
-      --detail-out "$RESULT_DIR/detail.json" \
-      >>"$LOG_DIR/merge-parts.log" 2>&1 || \
-      echo "::warning::timing part merge failed safely for lane $LANE; timing history keeps previous values"
+    merge_wedge_parts
+    # Bookkeeping lives HERE, not at classification time: only a retry that
+    # actually passed was "recovered"; every red path below must leave
+    # infra_recovered_classes empty so a failed lane never claims recovery.
+    for wedge_cls in $AFFECTED_CLASSES; do
+      echo "$wedge_cls" >> "$INFRA_RECOVERED_LINES"
+    done
     echo "::warning::lane $LANE passed after the CoreAudio wedge recovery on a clean simulator - infrastructure recovery, not a test flake; affected classes: $(printf '%s' "$AFFECTED_CLASSES" | tr ' ' ',')"
     finish_lane "pass" '[{"n": 1, "mode": "lane", "status": "audio-wedge"}, {"n": 2, "mode": "audio-retry", "status": "passed"}]' "" 0
   fi
@@ -774,6 +789,7 @@ print(doc.get('signals', {}).get('halc_overload', 0))
     # The recovery itself hung: no second recovery, no isolation loop - the
     # affected classes were already running alone on a fresh simulator.
     echo "::error::CoreAudio wedge recovery for lane $LANE exceeded its "${TIMEOUT_S}"s watchdog - failing the lane; rerun the lane when the hosted fleet has recovered"
+    merge_wedge_parts
     finish_lane "timeout" '[{"n": 1, "mode": "lane", "status": "audio-wedge"}, {"n": 2, "mode": "audio-retry", "status": "timeout"}]' "" 1
   fi
 
@@ -782,6 +798,7 @@ print(doc.get('signals', {}).get('halc_overload', 0))
     "$RESULT_DIR/parts/detail-lane-a2.json" \
     "$LOG_DIR/extract-audio-retry.log"
   FAIL_COUNT_R=$(count_failures "$RESULT_DIR/parts/detail-lane-a2.json")
+  merge_wedge_parts
 
   if [ "$FAIL_COUNT_R" -gt 0 ]; then
     verdictR=0
@@ -789,6 +806,8 @@ print(doc.get('signals', {}).get('halc_overload', 0))
       --invocation-log "$LOG_DIR/attempt-2-audio-retry.log" \
       --detail "$RESULT_DIR/parts/detail-lane-a2.json" \
       --inventory "$inventory" \
+      --min-auremoteio "${COREAUDIO_WEDGE_MIN_AURIOC:-150}" \
+      --min-halc-overload "${COREAUDIO_WEDGE_MIN_HALC:-20}" \
       --out "$RESULT_DIR/coreaudio-wedge-retry.json" \
       >"$LOG_DIR/coreaudio-wedge-attempt2.log" 2>&1 || verdictR=$?
     if [ "$verdictR" -eq 0 ]; then
@@ -802,6 +821,13 @@ print('AURemoteIO -10851 occurrences: {0}, HALC overload skips: {1}'.format(
 " "$RESULT_DIR/coreaudio-wedge-retry.json" 2>/dev/null || echo 'signal counts unavailable')
       echo "::error::persistent CoreAudio runner failure in lane $LANE: the recovery retry carries the same wedge signature ($RETRY_SIG) - the hosted fleet is broken; this is NOT a product test failure"
       finish_lane "fail" '[{"n": 1, "mode": "lane", "status": "audio-wedge"}, {"n": 2, "mode": "audio-retry", "status": "persistent-coreaudio-wedge"}]' "" 1
+    fi
+    if [ "$verdictR" -eq 2 ]; then
+      # The classifier could not read the retry inputs: whether the clean
+      # host still carries the wedge signature is UNKNOWN, so the failures
+      # must not be labelled product failures (fail closed).
+      echo "::error::lane $LANE CoreAudio wedge retry classifier could not run - failing closed as unclassified instead of claiming product failures"
+      finish_lane "error" '[{"n": 1, "mode": "lane", "status": "audio-wedge"}, {"n": 2, "mode": "audio-retry", "status": "unclassified"}]' "" 1
     fi
     echo "lane $LANE: affected classes FAILED on the clean-host retry without the wedge signature - real product failures"
     finish_lane "fail" '[{"n": 1, "mode": "lane", "status": "audio-wedge"}, {"n": 2, "mode": "audio-retry", "status": "test-failures"}]' "" 1

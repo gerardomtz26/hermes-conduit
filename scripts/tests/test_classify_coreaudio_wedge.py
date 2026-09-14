@@ -200,6 +200,17 @@ class ClassifierUnitTests(unittest.TestCase):
                 classifier.load_failed_classes(detail),
                 [AUDIO_CLASS, PLAIN_CLASS])
 
+    def test_non_dict_failure_entries_are_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            detail = os.path.join(tmp, "detail.json")
+            with open(detail, "w", encoding="utf-8") as fh:
+                json.dump({"failures": ["not-a-dict", {"class": AUDIO_CLASS},
+                                        {"no_class_key": True},
+                                        {"class": PLAIN_CLASS}]}, fh)
+            self.assertEqual(
+                classifier.load_failed_classes(detail),
+                [AUDIO_CLASS, PLAIN_CLASS])
+
     def test_real_inventory_loads_and_is_authoritative(self):
         classes = classifier.load_inventory_classes(INVENTORY)
         self.assertIn(AUDIO_CLASS, classes)

@@ -367,6 +367,18 @@ class AudioLaneReservationTests(unittest.TestCase):
                               for i in range(1, len(legacy["unit_lanes"]) + 1)])
             self.assertEqual(legacy["audio_sensitive_classes"], [])
 
+    def test_empty_inventory_warns_and_plans_without_the_lane(self):
+        # An inventory file that exists but names no classes (wrong key,
+        # emptied list) must warn loudly instead of silently dropping the
+        # reserved lane.
+        with tempfile.TemporaryDirectory() as tmp:
+            inventory = Path(tmp) / "audio.json"
+            inventory.write_text(json.dumps({"classes": []}), encoding="utf-8")
+            classes, warns = planner.load_audio_sensitive_classes(
+                str(inventory))
+            self.assertEqual(classes, [])
+            self.assertTrue(warns and "names no classes" in warns[0], warns)
+
     def test_audio_lane_timeout_follows_the_planner_formula(self):
         estimates = {self.AUDIO[0]: 300.0, self.AUDIO[1]: 100.0}
         with tempfile.TemporaryDirectory() as tmp:

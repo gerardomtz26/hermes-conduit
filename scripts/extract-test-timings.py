@@ -648,10 +648,13 @@ def aggregate(args) -> int:
             signals = wedge.get("signals", {})
             chain = " -> ".join(
                 str(a.get("status", "?")) for a in res.get("attempts", []))
-            recovered = "recovered on a clean host" if res.get("status") == "pass" \
-                else f"lane status **{res.get('status')}** (persistent CoreAudio runner failure)" \
-                if "persistent-coreaudio-wedge" in chain else \
-                f"lane status **{res.get('status')}**"
+            if res.get("status") == "pass":
+                recovered = "recovered on a clean host"
+            elif "persistent-coreaudio-wedge" in chain:
+                recovered = (f"lane status **{res.get('status')}** "
+                             "(persistent CoreAudio runner failure)")
+            else:
+                recovered = f"lane status **{res.get('status')}**"
             lines.append(
                 f"- **CoreAudio infrastructure wedge detected** [{name}]: "
                 f"AURemoteIO -10851 x{signals.get('auremoteio_10851', '?')}, "
