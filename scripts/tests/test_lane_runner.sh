@@ -549,6 +549,194 @@ assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
 assert_eq "verdict" "$(lane_field "['status']")" "fail"
 assert_eq "isolation statuses" "$(isolation_statuses)" "['fail', 'fail']"
 
+# ===========================================================================
+# CoreAudio wedge recovery (unit lanes): a strong AURemoteIO -10851 / HALC
+# overload signature combined with failures ONLY inside the audio-sensitive
+# inventory authorizes exactly one clean-host retry of the affected classes.
+# The stub emits synthetic signature lines; AUDIO_INVENTORY points the
+# classifier at a temp inventory so the tests do not depend on real class
+# names.
+# ===========================================================================
+WEDGE_INVENTORY="$WORK/wedge-inventory.json"
+cat > "$WEDGE_INVENTORY" <<'JSON'
+{"classes": ["VoiceTests"]}
+JSON
+export AUDIO_INVENTORY="$WEDGE_INVENTORY"
+
+# Stub: attempt 1 (multiple -only-testing filters) fails VoiceTests while
+# HealthyTests passes; the wedge signature lines are emitted per
+# $FAKE_WEDGE_A1. The single-class recovery invocation is driven by
+# $FAKE_WEDGE_RETRY: pass / fail (no signature) / signature (fail again).
+# Every invocation lands in $INVOCATION_LOG as "inv:filters=N" or
+# "retry:<cls>".
+write_wedge_stub_xcodebuild() {
+  cat > "$STUBS/xcodebuild" <<'STUB'
+#!/bin/bash
+n=$(printf '%s\n' "$@" | grep -c -- '-only-testing:' || true)
+echo "inv:filters=$n" >> "$INVOCATION_LOG"
+emit_signature() {
+  i=0
+  while [ "$i" -lt 200 ]; do
+    echo "2026-09-14 00:00:00.000 Conduit[9:9] [aurioc]            AURemoteIO.cpp:1135  failed: -10851 (enable 1)"
+    i=$((i + 1))
+  done
+  i=0
+  while [ "$i" -lt 30 ]; do
+    echo "2026-09-14 00:00:00.000 Conduit[9:9] [AMCP]          HALC_ProxyIOContext.cpp:1623  HALC_ProxyIOContext::IOWorkLoop: skipping cycle due to overload"
+    i=$((i + 1))
+  done
+}
+write_doc() {
+  docfile="$1"; shift
+  nodes=""
+  sep=""
+  for pair in "$@"; do
+    c="${pair%%:*}"; r="${pair#*:}"
+    nodes="$nodes$sep{\"nodeType\": \"Test Suite\", \"name\": \"$c\", \"result\": \"$r\",
+      \"children\": [{\"nodeType\": \"Test Case\", \"name\": \"testC()\", \"result\": \"$r\",
+      \"durationInSeconds\": 0.1}]}"
+    sep=","
+  done
+  cat > "$FAKE_CANNED" <<DOC
+{"testNodes": [{"nodeType": "Test Plan", "name": "Conduit", "result": "Passed",
+  "children": [{"nodeType": "Unit test bundle", "name": "ConduitTests", "result": "Passed",
+    "children": [$nodes]}]}]}
+DOC
+}
+if [ "$n" -gt 1 ]; then
+  write_doc "$FAKE_CANNED" "VoiceTests:Failed" "HealthyTests:Passed"
+  [ "$FAKE_WEDGE_A1" = "signature" ] && emit_signature
+  echo "Test Case failed (stub)"
+  exit 65
+fi
+cls=$(printf '%s\n' "$@" | grep 'only-testing:' | head -1 | sed 's|.*/||')
+echo "retry:$cls" >> "$INVOCATION_LOG"
+case "$FAKE_WEDGE_RETRY" in
+  pass)
+    write_doc "$FAKE_CANNED" "$cls:Passed"
+    exit 0
+    ;;
+  signature)
+    write_doc "$FAKE_CANNED" "$cls:Failed"
+    emit_signature
+    echo "Test Case failed (stub)"
+    exit 65
+    ;;
+  *)
+    write_doc "$FAKE_CANNED" "$cls:Failed"
+    echo "Test Case failed (stub)"
+    exit 65
+    ;;
+esac
+STUB
+  chmod +x "$STUBS/xcodebuild"
+}
+
+coreaudio_wedge_field() { # $1 = python expression over the wedge metadata
+  python3 -c "
+import json, sys
+with open(sys.argv[1]) as fh:
+    d = json.load(fh)
+w = d.get('coreaudio_wedge') or {}
+print(eval('w' + sys.argv[2]))
+" "$WORKCASE/lane-result.json" "$1" 2>/dev/null || echo NONE
+}
+
+# --- wedge case A: classified wedge -> targeted recovery passes the lane ------
+end_case
+begin_case "coreaudio wedge recovers on clean host" "$WORK/w1"
+write_stub_xcrun
+write_wedge_stub_xcodebuild
+export FAKE_CANNED="$WORK/canned-wedge.json"
+export INVOCATION_LOG="$WORK/w1-invocations.log"; : > "$INVOCATION_LOG"
+export FAKE_WEDGE_A1="signature" FAKE_WEDGE_RETRY="pass"
+run_lane "VoiceTests,HealthyTests" 300 unused 3
+assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "0"
+assert_eq "verdict" "$(lane_field "['status']")" "pass"
+assert_eq "attempts" "$(attempts_statuses)" "['audio-wedge', 'passed']"
+assert_eq "recovery recorded, not a flake" "$(lane_field "['infra_recovered_classes']")" "['VoiceTests']"
+assert_eq "wedge metadata embedded" "$(coreaudio_wedge_field "['wedge']")" "True"
+assert_eq "signature counts in metadata" "$(coreaudio_wedge_field "['signals']['auremoteio_10851']")" "200"
+assert_eq "one full-lane invocation" "$(grep -c '^inv:filters=2$' "$INVOCATION_LOG")" "1"
+assert_eq "only the affected class re-ran" "$(grep -c '^retry:VoiceTests$' "$INVOCATION_LOG")" "1"
+assert_eq "healthy class never re-ran" "$(grep -c '^retry:HealthyTests$' "$INVOCATION_LOG")" "0"
+if grep -q "CoreAudio infrastructure wedge detected" "$WORKCASE/stdout.log" \
+   && grep -q "AURemoteIO -10851 occurrences: 200" "$WORKCASE/stdout.log" \
+   && grep -q "action: resetting simulator and retrying affected tests" "$WORKCASE/stdout.log"; then
+  ok "wedge diagnostics announced with signal counts"
+else
+  bad "wedge diagnostics must announce the signature counts and the action"
+fi
+if ls "$WORKCASE"/attempt-1.xcresult >/dev/null 2>&1 && ls "$WORKCASE"/attempt-2-audio-retry.xcresult >/dev/null 2>&1; then
+  ok "both wedge attempt bundles kept on a green lane"
+else
+  bad "wedge attempt bundles must be preserved for diagnosis"
+fi
+
+# --- wedge case B: retry fails WITHOUT the signature -> real product failure --
+end_case
+begin_case "wedge retry failure without signature is a product failure" "$WORK/w2"
+export INVOCATION_LOG="$WORK/w2-invocations.log"; : > "$INVOCATION_LOG"
+export FAKE_WEDGE_A1="signature" FAKE_WEDGE_RETRY="fail"
+run_lane "VoiceTests,HealthyTests" 300 unused 3
+assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
+assert_eq "verdict" "$(lane_field "['status']")" "fail"
+assert_eq "attempts" "$(attempts_statuses)" "['audio-wedge', 'test-failures']"
+assert_eq "no third invocation" "$(grep -c '^inv:filters=' "$INVOCATION_LOG")" "2"
+
+# --- wedge case C: retry carries the signature -> persistent, no loop ---------
+end_case
+begin_case "persistent coreaudio wedge fails bounded" "$WORK/w3"
+export INVOCATION_LOG="$WORK/w3-invocations.log"; : > "$INVOCATION_LOG"
+export FAKE_WEDGE_A1="signature" FAKE_WEDGE_RETRY="signature"
+run_lane "VoiceTests,HealthyTests" 300 unused 3
+assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
+assert_eq "verdict" "$(lane_field "['status']")" "fail"
+assert_eq "attempts" "$(attempts_statuses)" "['audio-wedge', 'persistent-coreaudio-wedge']"
+assert_eq "hard limit: exactly two invocations" "$(grep -c '^inv:filters=' "$INVOCATION_LOG")" "2"
+if grep -q "persistent CoreAudio runner failure" "$WORKCASE/stdout.log"; then
+  ok "persistent wedge reported as an environment verdict"
+else
+  bad "a persistent wedge must say so explicitly"
+fi
+
+# --- wedge case D: signature + failure outside the inventory -> NO recovery ---
+end_case
+begin_case "out-of-inventory failure voids the wedge path" "$WORK/w4"
+export INVOCATION_LOG="$WORK/w4-invocations.log"; : > "$INVOCATION_LOG"
+export FAKE_WEDGE_A1="signature" FAKE_WEDGE_RETRY="pass"
+run_lane "VoiceTests,OtherTests" 300 unused 3
+assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
+assert_eq "verdict" "$(lane_field "['status']")" "fail"
+assert_eq "attempts" "$(attempts_statuses)" "['test-failures']"
+assert_eq "no retry when any failure is outside the inventory" "$(grep -c '^retry:' "$INVOCATION_LOG")" "0"
+if grep -q "not classified as a CoreAudio wedge" "$WORKCASE/stdout.log"; then
+  ok "declined classification is visible"
+else
+  bad "a declined wedge classification must be visible"
+fi
+
+# --- wedge case E: weak signature + audio failure -> ordinary product failure -
+end_case
+begin_case "weak signature never authorizes recovery" "$WORK/w5"
+cat > "$STUBS/xcodebuild" <<'STUB'
+#!/bin/bash
+n=$(printf '%s\n' "$@" | grep -c -- '-only-testing:' || true)
+echo "inv:filters=$n" >> "$INVOCATION_LOG"
+echo "2026-09-14 00:00:00.000 Conduit[9:9] [aurioc]            AURemoteIO.cpp:1135  failed: -10851 (enable 1)"
+echo "Test Case failed (stub)"
+exit 65
+STUB
+chmod +x "$STUBS/xcodebuild"
+export INVOCATION_LOG="$WORK/w5-invocations.log"; : > "$INVOCATION_LOG"
+run_lane "VoiceTests" 300 unused 3
+assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
+assert_eq "verdict" "$(lane_field "['status']")" "fail"
+assert_eq "attempts" "$(attempts_statuses)" "['test-failures']"
+assert_eq "exactly one invocation" "$(grep -c '^inv:filters=' "$INVOCATION_LOG")" "1"
+
+export AUDIO_INVENTORY=""
+
 echo ""
 end_case
 echo "unit+isolation state machine: $pass_count passed, $fail_count failed so far"

@@ -291,6 +291,111 @@ class PlanningTests(unittest.TestCase):
             self.assertEqual(plan["estimates"]["AlphaTests"], 33.0)
 
 
+class AudioLaneReservationTests(unittest.TestCase):
+    """The audio-host-sensitive classes are reserved for one dedicated lane
+    (unit-audio): a CoreAudio wedge then invalidates a small, cheap lane
+    instead of a large general-purpose unit lane, and the wedge classifier's
+    recovery re-runs only that lane's affected classes."""
+
+    AUDIO = ["AppStateVoiceSuspensionTests", "CarPlayVoiceCoordinatorTests"]
+
+    def _plan_with_inventory(self, root, discovery, estimates=None, cfg=None):
+        discovery = discovery or planner.discover_test_classes(str(root))
+        plan = planner.build_plan(discovery, cfg or default_cfg(),
+                                  estimates or {}, self.AUDIO)
+        return plan, planner.validate_plan(plan, discovery, self.AUDIO)
+
+    def test_audio_classes_get_one_dedicated_lane(self):
+        names = ["C{0:02d}Tests".format(i) for i in range(20)] + self.AUDIO
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(make_repo(Path(tmp), names, []))
+            plan, errors = self._plan_with_inventory(root, None)
+            self.assertEqual(errors, [])
+            audio_lanes = [l for l in plan["unit_lanes"]
+                           if l["lane"] == planner.AUDIO_LANE_NAME]
+            self.assertEqual(len(audio_lanes), 1)
+            self.assertEqual(sorted(audio_lanes[0]["classes"]), self.AUDIO)
+            # The general lanes balance the REST exactly once.
+            general = [c for l in plan["unit_lanes"]
+                       if l["lane"] != planner.AUDIO_LANE_NAME
+                       for c in l["classes"]]
+            self.assertEqual(sorted(general),
+                             sorted(set(names) - set(self.AUDIO)))
+            self.assertEqual(plan["audio_sensitive_classes"], self.AUDIO)
+
+    def test_inventory_is_still_planned_exactly_once(self):
+        names = self.AUDIO + ["AlphaTests", "BetaTests"]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(make_repo(Path(tmp), names, []))
+            plan, errors = self._plan_with_inventory(root, None)
+            self.assertEqual(errors, [])
+            assigned = [c for lane in plan["unit_lanes"] for c in lane["classes"]]
+            self.assertEqual(sorted(assigned), sorted(names))
+            self.assertEqual(len(assigned), len(set(assigned)))
+
+    def test_stale_inventory_entry_fails_validation_loudly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(make_repo(Path(tmp), ["AlphaTests"], []))
+            discovery = planner.discover_test_classes(str(root))
+            plan = planner.build_plan(discovery, default_cfg(), {},
+                                      ["AlphaTests", "RenamedAwayTests"])
+            errors = planner.validate_plan(plan, discovery,
+                                           ["AlphaTests", "RenamedAwayTests"])
+            self.assertTrue(any("RenamedAwayTests" in e for e in errors),
+                            errors)
+
+    def test_audio_lane_must_hold_exactly_the_inventory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(make_repo(Path(tmp), ["AlphaTests", "BetaTests"], []))
+            discovery = planner.discover_test_classes(str(root))
+            # Deliberately inconsistent: reserved lane misses an inventory
+            # class. validate_plan must catch the divergence.
+            plan = planner.build_plan(discovery, default_cfg(), {},
+                                      ["AlphaTests"])
+            plan["unit_lanes"][-1]["classes"] = []
+            errors = planner.validate_plan(plan, discovery, ["AlphaTests"])
+            self.assertTrue(any("unit-audio" in e for e in errors), errors)
+
+    def test_planning_without_inventory_is_unchanged(self):
+        names = ["C{0:02d}Tests".format(i) for i in range(10)]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(make_repo(Path(tmp), names, []))
+            discovery = planner.discover_test_classes(str(root))
+            legacy = planner.build_plan(discovery, default_cfg(), {})
+            self.assertEqual([l["lane"] for l in legacy["unit_lanes"]],
+                             ["unit-{0}".format(i)
+                              for i in range(1, len(legacy["unit_lanes"]) + 1)])
+            self.assertEqual(legacy["audio_sensitive_classes"], [])
+
+    def test_audio_lane_timeout_follows_the_planner_formula(self):
+        estimates = {self.AUDIO[0]: 300.0, self.AUDIO[1]: 100.0}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(make_repo(Path(tmp), self.AUDIO, []))
+            discovery = planner.discover_test_classes(str(root))
+            plan = planner.build_plan(discovery, default_cfg(), estimates,
+                                      self.AUDIO)
+            audio_lane = plan["unit_lanes"][0]
+            self.assertEqual(audio_lane["lane"], planner.AUDIO_LANE_NAME)
+            self.assertEqual(audio_lane["predicted_s"], 400.0)
+            self.assertEqual(
+                audio_lane["timeout_s"],
+                planner.timeout_for(400.0, default_cfg()["lane_timeout_min_s"],
+                                    default_cfg()["timeout_multiplier"]))
+
+    def test_matrix_json_carries_the_audio_lane(self):
+        names = self.AUDIO + ["AlphaTests", "BetaTests"]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(make_repo(Path(tmp), names, []))
+            discovery = planner.discover_test_classes(str(root))
+            plan = planner.build_plan(discovery, default_cfg(), {}, self.AUDIO)
+            include = json.loads(planner.matrix_json(plan))["include"]
+            self.assertIn(planner.AUDIO_LANE_NAME, [i["lane"] for i in include])
+            audio_entry = [i for i in include
+                           if i["lane"] == planner.AUDIO_LANE_NAME][0]
+            self.assertEqual(audio_entry["classes"],
+                             ",".join(self.AUDIO))
+
+
 class UiShardingTests(unittest.TestCase):
     ESTIMATES = {
         "ConnectionSetupTestConnectionUITests": 333.0,

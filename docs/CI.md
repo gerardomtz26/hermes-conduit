@@ -211,6 +211,39 @@ the rest of CI v2.
    later classes are recorded as `not_diagnosed`. Recovery-to-green is
    only legitimate when the retried class completed successfully; any
    undiagnosed class fails the lane so unexecuted tests stay visible.
+5. **CoreAudio host wedge** (unit lanes) - a broken GitHub-hosted audio
+   host does not fail loudly: it floods the invocation log with
+   `AURemoteIO ... failed: -10851` lines and HAL
+   `skipping cycle due to overload` lines, and the starvation flips
+   timing-sensitive assertions in a known, narrow set of audio-sensitive
+   classes (`scripts/audio-sensitive-tests.json`; membership is
+   evidence-based, never name-based). When a unit invocation fails with
+   identified test failures, `scripts/classify-coreaudio-wedge.py` checks
+   BOTH a strong host signature (>= 150 AURemoteIO -10851 lines AND >= 20
+   HALC overload skips in that invocation - healthy lanes emit up to ~107
+   ambient AURemoteIO lines from AppState construction but only ~7 HALC
+   overload skips; the thresholds and the observed distributions live in
+   the classifier docstring and are overridable via flags for
+   recalibration) AND that every failed class belongs to the inventory.
+   Anything less is a real product failure - classification fails closed,
+   and one failure outside the inventory voids the wedge path. When
+   authorized, the simulator is erased and ONLY the affected classes
+   re-run once on the clean host: a retry pass is recorded as an
+   infrastructure recovery (`coreaudio_wedge` metadata in
+   lane-result.json, rendered in the CI Test Report), a retry that fails
+   without the signature is a real failure, and a retry carrying the
+   signature again is reported as a **persistent CoreAudio runner
+   failure** - explicitly an environment verdict, not a deterministic
+   product failure. There is no second recovery: the escalation path for a
+   persistent fleet wedge is re-running the lane when the fleet has
+   recovered. Planner support: the audio-sensitive classes are reserved
+   for one dedicated `unit-audio` lane, so a wedge invalidates a small,
+   cheap lane with a targeted recovery instead of a large general-purpose
+   unit lane. No preflight probe exists before the classes run: a
+   deterministic check of the simulator audio host would itself need to
+   open a CoreAudio IO unit inside the simulator (minutes of runtime on
+   every lane and a new flake source), so classification happens after a
+   failure, on lanes that already paid for the invocation.
 
 ### Destination readiness gate
 
@@ -344,7 +377,12 @@ classes left `not_diagnosed` after a confirmed hang.
 
 Just add it. The planner discovers it on the next run, gives it the default
 estimate (or its real history entry after the first main run), and balances
-it into a lane. No lane-assignment files to maintain. To check locally:
+it into a lane. No lane-assignment files to maintain - with ONE exception:
+`scripts/audio-sensitive-tests.json` must stay in sync with the test tree.
+A listed class that is renamed or deleted fails `plan-tests.py validate`
+loudly (update the inventory in the same PR); a new class is never added to
+the inventory automatically, and membership requires the evidence bar
+documented in the inventory file. To check locally:
 
 ```
 python3 scripts/plan-tests.py validate
