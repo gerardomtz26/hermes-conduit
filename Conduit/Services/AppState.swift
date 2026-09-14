@@ -106,8 +106,10 @@ struct ChatResumeLifecycleOperations {
     var findBotChat: (@MainActor (HermesClient, String) async throws -> [BotChatLookupRow])?
     /// Bot Mode canonical chat creation (`session.create`, hidden).
     var createBotChat: (@MainActor (HermesClient, String) async throws -> (sessionId: String, storedSessionId: String?))?
-    /// Bot Mode canonical title write (`session.title`); carries the bot
-    /// profile so tests can pin the addressing.
+    /// Bot Mode canonical title write (`session.title`). The fourth
+    /// argument is the BOT profile being addressed — it exists so tests can
+    /// pin the addressing, and must never be forwarded to the 3-argument
+    /// `setSessionTitle` seam used by ordinary (dashboard-profile) renames.
     var titleBotChat: (@MainActor (HermesClient, String, String, String) async throws -> Void)?
 
     init(
@@ -6970,7 +6972,6 @@ final class AppState: ObservableObject {
         reconciliationToken token: UUID,
         automaticWorkToken: ChatResumeAutomaticWorkToken?
     ) async {
-        let profile = activeProfile
         let bridge = dashboardTicketBridge
         let localFrontier = durablePersistedRowIDs
         let localMessageIDs = Set(messages.map { $0.id })
@@ -6978,6 +6979,9 @@ final class AppState: ObservableObject {
         let locallyOwnedTurn = locallyOwnedFreshnessTurnEvidence(
             forRequested: requestedSessionID
         )
+        // A bot chat's persisted tail lives in the BOT's store; the scope
+        // must follow the active conversation, not the dashboard default.
+        let profile = botConversationProfile(for: requestedSessionID) ?? activeProfile
         let outcome = await foregroundPersistedTailOutcome(
             sessionId: requestedSessionID,
             profile: profile,
@@ -7669,7 +7673,6 @@ final class AppState: ObservableObject {
         guard !isRefreshingBotRoster else { return }
         let epoch = botRosterEpoch
         let dashboardID = activeDashboardID
-        let profile = activeProfile
         guard let client, isConnected else {
             if botRoster.isEmpty, botModePhase != .gatewayUnsupported {
                 botModePhase = .failed(
@@ -7690,18 +7693,15 @@ final class AppState: ObservableObject {
             } else {
                 snapshot = try await client.botRoster()
             }
-            guard botModeStateIsCurrent(
-                epoch: epoch, dashboardID: dashboardID, profile: profile
-            ) else { return }
+            guard botModeStateIsCurrent(epoch: epoch, dashboardID: dashboardID) else { return }
             // The FULL roster is kept: sessions-list hygiene must know every
             // bot's canonical registry (including meta-hidden bots), while
             // the roster VIEW hides meta-hidden rows for display only.
             botRoster = BotProfile.displayOrder(snapshot.bots)
             botModePhase = .available
         } catch {
-            guard botModeStateIsCurrent(
-                epoch: epoch, dashboardID: dashboardID, profile: profile
-            ), !Task.isCancelled else { return }
+            guard botModeStateIsCurrent(epoch: epoch, dashboardID: dashboardID),
+                  !Task.isCancelled else { return }
             if HermesClient.isMissingRPCMethod(error) {
                 botModePhase = .gatewayUnsupported
             } else if botRoster.isEmpty {
@@ -7720,12 +7720,12 @@ final class AppState: ObservableObject {
 
     private func botModeStateIsCurrent(
         epoch: Int,
-        dashboardID: UUID?,
-        profile: String
+        dashboardID: UUID?
     ) -> Bool {
-        epoch == botRosterEpoch
-            && dashboardID == activeDashboardID
-            && profile == activeProfile
+        // The roster is gateway-wide: the epoch (server identity) and the
+        // dashboard fence it; the dashboard's own profile selection is
+        // irrelevant to a profiles.list answer.
+        epoch == botRosterEpoch && dashboardID == activeDashboardID
     }
 
     /// Opens a bot's canonical Bot Chat: consult the name-identity registry,
@@ -7740,7 +7740,8 @@ final class AppState: ObservableObject {
             errorMessage = AppLocalization.string("Connect to Hermes to chat with bots.")
             return false
         }
-        if let flight = botChatOpenFlights[bot.name] {
+        let flightKey = bot.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let flight = botChatOpenFlights[flightKey] {
             return await flight.task?.value ?? false
         }
         let flight = BotChatOpenFlight()
@@ -7750,14 +7751,14 @@ final class AppState: ObservableObject {
             // (map cleared, then a newer flight for the same bot) must never
             // evict that newer flight's entry.
             defer {
-                if self.botChatOpenFlights[bot.name] === flight {
-                    self.botChatOpenFlights.removeValue(forKey: bot.name)
+                if self.botChatOpenFlights[flightKey] === flight {
+                    self.botChatOpenFlights.removeValue(forKey: flightKey)
                 }
             }
             return await self.resolveAndOpenBotChat(bot, client: client)
         }
         flight.task = task
-        botChatOpenFlights[bot.name] = flight
+        botChatOpenFlights[flightKey] = flight
         return await task.value
     }
 
@@ -7781,6 +7782,7 @@ final class AppState: ObservableObject {
                 rows = try await client.findBotChatSession(profile: bot.name)
             }
         } catch {
+            guard botOpenFenceIsCurrent(epoch: epoch, client: client) else { return false }
             return failBotChatOpen(bot, error: error, stage: .lookup)
         }
         guard botOpenFenceIsCurrent(epoch: epoch, client: client) else { return false }
@@ -7794,7 +7796,9 @@ final class AppState: ObservableObject {
             return await openCanonicalBotChat(
                 bot,
                 registryID: registryID,
-                resumeID: resumeID
+                resumeID: resumeID,
+                epoch: epoch,
+                client: client
             )
         case .success(.create):
             return await createAndOpenBotChat(bot, client: client, epoch: epoch)
@@ -7808,7 +7812,9 @@ final class AppState: ObservableObject {
     private func openCanonicalBotChat(
         _ bot: BotProfile,
         registryID: String,
-        resumeID: String
+        resumeID: String,
+        epoch: Int,
+        client: HermesClient
     ) async -> Bool {
         noteBotChatSession(resumeID, profile: bot.name)
         noteBotChatSession(registryID, profile: bot.name)
@@ -7817,7 +7823,9 @@ final class AppState: ObservableObject {
             conversationProfile: bot.name,
             preferredTitle: bot.displayLabel
         )
-        if !opened, !Task.isCancelled, errorMessage == nil {
+        if !opened, !Task.isCancelled,
+           botOpenFenceIsCurrent(epoch: epoch, client: client),
+           errorMessage == nil {
             errorMessage = AppLocalization.string(
                 "Could not open \(bot.displayLabel)'s Bot Chat."
             )
@@ -7875,7 +7883,9 @@ final class AppState: ObservableObject {
         return await openCanonicalBotChat(
             bot,
             registryID: created.storedSessionId ?? created.sessionId,
-            resumeID: created.sessionId
+            resumeID: created.sessionId,
+            epoch: epoch,
+            client: client
         )
     }
 
@@ -7885,20 +7895,32 @@ final class AppState: ObservableObject {
     /// it. If the winner cannot be confirmed, fail closed — never open our
     /// untitled stray, never mint again.
     private func adoptWinningBotChat(_ bot: BotProfile, client: HermesClient, epoch: Int) async -> Bool {
+        let rows: [BotChatLookupRow]
         do {
-            let rows: [BotChatLookupRow]
             if let findBotChat = chatResumeLifecycleOperations.findBotChat {
                 rows = try await findBotChat(client, bot.name)
             } else {
                 rows = try await client.findBotChatSession(profile: bot.name)
             }
-            if case .success(.openExisting(let registryID, let resumeID)) =
-                BotChatResolver.resolve(rows: rows, rosterCanonicalID: bot.canonicalSessionID),
-                botOpenFenceIsCurrent(epoch: epoch, client: client) {
-                return await openCanonicalBotChat(bot, registryID: registryID, resumeID: resumeID)
-            }
         } catch {
-            // Classified below as a lookup refusal.
+            // A cancelled or server-switched flight abandons silently, like
+            // every other stage; only a current flight speaks.
+            guard botOpenFenceIsCurrent(epoch: epoch, client: client) else { return false }
+            errorMessage = AppLocalization.string(
+                "Could not confirm \(bot.displayLabel)'s Bot Chat — not starting a new chat."
+            )
+            return false
+        }
+        guard botOpenFenceIsCurrent(epoch: epoch, client: client) else { return false }
+        if case .success(.openExisting(let registryID, let resumeID)) =
+            BotChatResolver.resolve(rows: rows, rosterCanonicalID: bot.canonicalSessionID) {
+            return await openCanonicalBotChat(
+                bot,
+                registryID: registryID,
+                resumeID: resumeID,
+                epoch: epoch,
+                client: client
+            )
         }
         errorMessage = AppLocalization.string(
             "Could not confirm \(bot.displayLabel)'s Bot Chat — not starting a new chat."
@@ -8957,7 +8979,9 @@ final class AppState: ObservableObject {
             // no-client outcome.
             return .proceed
         }
-        let profile = activeProfile
+        // A bot chat's persisted tail lives in the BOT's store (see the
+        // cross-surface freshness path); scope to the active conversation.
+        let profile = botConversationProfile(for: sessionId) ?? activeProfile
         let bridge = dashboardTicketBridge
         let localFrontier = durablePersistedRowIDs
         let localMessageIDs = Set(messages.map { $0.id })
@@ -10754,6 +10778,13 @@ final class AppState: ObservableObject {
                 id: recoveredSessionID,
                 recordsResumeSelection: recoveryProfile == nil
             )
+            // Re-register the recovered runtime: every later scope
+            // resolution (reconnect reconcile, backfill ownership,
+            // post-compress rehydration) resolves through this registry.
+            if let recoveryProfile {
+                noteBotChatSession(recoveredSessionID, profile: recoveryProfile)
+                noteBotChatSession(storedSessionID, profile: recoveryProfile)
+            }
             onRecover(recoveredSessionID)
             // Re-base the submission onto the recovered runtime: the old
             // context describes the dead runtime and would fail every

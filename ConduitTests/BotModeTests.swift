@@ -728,6 +728,10 @@ final class BotModeTests: XCTestCase {
         let result = await opened
 
         XCTAssertFalse(result, "a server switch must abandon the in-flight bot open")
+        XCTAssertNil(
+            harness.appState.errorMessage,
+            "an abandoned flight stays silent: the refusal text describes the outgoing server"
+        )
         XCTAssertEqual(
             harness.appState.activeSessionId, nil,
             "the stale flight must not navigate the UI against the outgoing server"
@@ -794,6 +798,36 @@ final class BotModeTests: XCTestCase {
             harness.appState.canLoadEarlierMessagesForActiveConversation,
             "the ownership gate must accept the bot-scoped window while the chat is active"
         )
+    }
+
+    func testCreateStageGenericFailureFailsClosedWithoutOpening() async {
+        var openCalls = 0
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            openSessionWithProfile: { _, _, _, _ in
+                openCalls += 1
+                return SessionResumeResult(
+                    sessionId: "runtime-stray",
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            findBotChat: { _, _ in [] },
+            createBotChat: { _, _ in
+                throw RpcError(code: 5000, message: "profile backend unavailable")
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+
+        let opened = await harness.appState.openBotChat(for: makeBot(name: "atlas"))
+
+        XCTAssertFalse(opened)
+        XCTAssertEqual(openCalls, 0, "a failed create never opens the lazy runtime")
+        XCTAssertNotNil(harness.appState.errorMessage)
+        XCTAssertEqual(harness.appState.botModePhase, BotModePhase.idle)
     }
 
     // MARK: - harness

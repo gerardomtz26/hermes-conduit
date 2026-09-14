@@ -76,16 +76,29 @@ struct BotRosterView: View {
                 }
             }
         case .failed(let message):
-            ContentUnavailableView {
-                Label(
-                    AppLocalization.string("Could not load bots."),
-                    systemImage: "exclamationmark.triangle"
-                )
-            } description: {
-                Text(message)
-            } actions: {
-                Button(AppLocalization.string("Retry")) {
-                    Task { await appState.refreshBotRoster() }
+            if appState.botRoster.isEmpty {
+                ContentUnavailableView {
+                    Label(
+                        AppLocalization.string("Could not load bots."),
+                        systemImage: "exclamationmark.triangle"
+                    )
+                } description: {
+                    Text(message)
+                } actions: {
+                    Button(AppLocalization.string("Retry")) {
+                        Task { await appState.refreshBotRoster() }
+                    }
+                }
+            } else {
+                // Everything loaded earlier is meta-hidden: nothing to
+                // show, and no retry that would change that.
+                ContentUnavailableView {
+                    Label(
+                        AppLocalization.string("No Bots Yet"),
+                        systemImage: "person.2"
+                    )
+                } description: {
+                    Text(AppLocalization.string("Bots you create with Hermes appear here."))
                 }
             }
         case .available:

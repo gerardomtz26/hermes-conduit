@@ -226,7 +226,24 @@ enum BotChatResolver {
         rows: [BotChatLookupRow],
         rosterCanonicalID: String?
     ) -> Result<BotChatResolution, BotChatRefusal> {
-        if let match = rows.first(where: { $0.isCanonicalTitle() }) {
+        let canonicalRows = rows.filter { $0.isCanonicalTitle() }
+        if !canonicalRows.isEmpty {
+            // Legacy forks can leave more than one canonical-titled row;
+            // the roster's server-resolved registry breaks the tie when it
+            // names one of them, so the open attaches to the SAME chat the
+            // roster previewed.
+            if let confirmed = rosterCanonicalID?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                !confirmed.isEmpty,
+                let pinned = canonicalRows.first(where: {
+                    $0.id == confirmed || $0.resolvedID == confirmed
+                }) {
+                return .success(.openExisting(
+                    registryID: pinned.id,
+                    resumeID: pinned.resumeTargetID ?? pinned.id
+                ))
+            }
+            let match = canonicalRows[0]
             return .success(.openExisting(
                 registryID: match.id,
                 resumeID: match.resumeTargetID ?? match.id
