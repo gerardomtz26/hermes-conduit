@@ -60,8 +60,28 @@ enum NativeOAuthError: LocalizedError, Equatable {
         case .stateMismatch: return AppLocalization.string("The sign-in response failed its security check.")
         case .tokenResponseMalformed: return AppLocalization.string("The dashboard returned invalid authentication tokens.")
         case .timedOut: return AppLocalization.string("Sign-in timed out. Please try again.")
-        case .requestFailed(let status): return AppLocalization.string("Dashboard sign-in failed (HTTP \(status)).")
+        case .requestFailed(let status): return AppLocalization.string("Dashboard sign-in failed (HTTP \(String(status))).")
         }
+    }
+}
+
+enum NativeOAuthHTTPReadError: Error, Equatable {
+    case incomplete
+    case tooLarge
+}
+
+struct NativeOAuthHTTPRequestAccumulator {
+    let maximumBytes: Int
+    private(set) var data = Data()
+
+    init(maximumBytes: Int = 64 * 1024) {
+        self.maximumBytes = maximumBytes
+    }
+
+    mutating func append(_ chunk: Data) throws -> Bool {
+        data.append(chunk)
+        guard data.count <= maximumBytes else { throw NativeOAuthHTTPReadError.tooLarge }
+        return data.range(of: Data("\r\n\r\n".utf8)) != nil
     }
 }
 
@@ -380,7 +400,6 @@ final class NativeOAuthSession {
 }
 
 final class NativeOAuthLoopbackServer: @unchecked Sendable {
-    private static let maximumRequestBytes = 64 * 1024
     private let queue = DispatchQueue(label: "com.milim.conduit.native-oauth-loopback")
     private let expectedState: String
     private var listener: NWListener?
@@ -397,6 +416,13 @@ final class NativeOAuthLoopbackServer: @unchecked Sendable {
     func start(timeout: TimeInterval = 5 * 60) async throws -> UInt16 {
         try await withCheckedThrowingContinuation { continuation in
             queue.async {
+                if let result = self.terminalResult {
+                    switch result {
+                    case .failure(let error): continuation.resume(throwing: error)
+                    case .success: continuation.resume(throwing: NativeOAuthError.listenerFailed)
+                    }
+                    return
+                }
                 do {
                     let parameters = NWParameters.tcp
                     parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
@@ -457,24 +483,40 @@ final class NativeOAuthLoopbackServer: @unchecked Sendable {
 
     private func handle(connection: NWConnection) {
         connection.start(queue: queue)
-        receiveRequest(on: connection, accumulated: Data())
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let request = try await self.readRequest(from: connection)
+                self.queue.async { self.processRequest(request, on: connection) }
+            } catch NativeOAuthHTTPReadError.tooLarge {
+                self.queue.async {
+                    self.sendResponse(on: connection, status: "431 Request Header Fields Too Large", message: "The sign-in response was too large.")
+                }
+            } catch {
+                self.queue.async {
+                    self.sendResponse(on: connection, status: "400 Bad Request", message: "The sign-in response was incomplete.")
+                }
+            }
+        }
     }
 
-    private func receiveRequest(on connection: NWConnection, accumulated: Data) {
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 4_096) { [weak self] data, _, isComplete, error in
-            guard let self else { return }
-            var request = accumulated
-            if let data { request.append(data) }
-            guard request.count <= Self.maximumRequestBytes else {
-                self.sendResponse(on: connection, status: "431 Request Header Fields Too Large", message: "The sign-in response was too large.")
-                return
-            }
-            if request.range(of: Data("\r\n\r\n".utf8)) != nil {
-                self.processRequest(request, on: connection)
-            } else if isComplete || error != nil {
-                self.sendResponse(on: connection, status: "400 Bad Request", message: "The sign-in response was incomplete.")
-            } else {
-                self.receiveRequest(on: connection, accumulated: request)
+    private func readRequest(from connection: NWConnection) async throws -> Data {
+        var accumulator = NativeOAuthHTTPRequestAccumulator()
+        while true {
+            let (chunk, isComplete) = try await receiveChunk(from: connection)
+            if let chunk, try accumulator.append(chunk) { return accumulator.data }
+            if isComplete { throw NativeOAuthHTTPReadError.incomplete }
+        }
+    }
+
+    private func receiveChunk(from connection: NWConnection) async throws -> (Data?, Bool) {
+        try await withCheckedThrowingContinuation { continuation in
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 4_096) { data, _, isComplete, error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: (data, isComplete))
+                }
             }
         }
     }

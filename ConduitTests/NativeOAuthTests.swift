@@ -69,13 +69,15 @@ final class NativeOAuthTests: XCTestCase {
             provider: "google"
         )
         let components = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false))
-        let values = Dictionary(uniqueKeysWithValues: try XCTUnwrap(components.queryItems).map { ($0.name, $0.value) })
+        let values = Dictionary(uniqueKeysWithValues: try XCTUnwrap(components.queryItems).compactMap { item in
+            item.value.map { (item.name, $0) }
+        })
         XCTAssertEqual(components.path, "/team/hermes/auth/native/authorize")
-        XCTAssertEqual(values["code_challenge"]!, "challenge-value")
-        XCTAssertEqual(values["code_challenge_method"]!, "S256")
-        XCTAssertEqual(values["redirect_uri"]!, "http://127.0.0.1:49152/callback")
-        XCTAssertEqual(values["state"]!, "state-value")
-        XCTAssertEqual(values["provider"]!, "google")
+        XCTAssertEqual(try XCTUnwrap(values["code_challenge"]), "challenge-value")
+        XCTAssertEqual(try XCTUnwrap(values["code_challenge_method"]), "S256")
+        XCTAssertEqual(try XCTUnwrap(values["redirect_uri"]), "http://127.0.0.1:49152/callback")
+        XCTAssertEqual(try XCTUnwrap(values["state"]), "state-value")
+        XCTAssertEqual(try XCTUnwrap(values["provider"]), "google")
     }
 
     func testAuthorizeURLOmitsProviderForServerChooser() throws {
@@ -174,6 +176,42 @@ final class NativeOAuthTests: XCTestCase {
         let google: [String: Any] = ["name": "google", "supports_password": false]
         XCTAssertTrue(HermesProviderCheck.hasNativeOAuthProvider([google]))
         XCTAssertEqual(HermesProviderCheck.nativeOAuthProvider([google]), "google")
+    }
+
+    func testProviderClassificationRequiresExplicitNonPasswordSignal() {
+        let ambiguous: [String: Any] = ["name": "legacy"]
+        let disabled: [String: Any] = ["name": "disabled", "supports_session": false]
+        XCTAssertFalse(HermesProviderCheck.hasNativeOAuthProvider([ambiguous, disabled]))
+        XCTAssertNil(HermesProviderCheck.nativeOAuthProvider([ambiguous, disabled]))
+    }
+
+    func testHTTPRequestAccumulatorHandlesSplitHeadersAndEnforcesBound() throws {
+        var accumulator = NativeOAuthHTTPRequestAccumulator(maximumBytes: 128)
+        XCTAssertFalse(try accumulator.append(Data("GET /callback?code=abc".utf8)))
+        XCTAssertFalse(try accumulator.append(Data("&state=expected HTTP/1.1\r\nHost:".utf8)))
+        XCTAssertTrue(try accumulator.append(Data(" 127.0.0.1\r\n\r\n".utf8)))
+        XCTAssertTrue(String(data: accumulator.data, encoding: .utf8)?.contains("code=abc") == true)
+
+        var oversized = NativeOAuthHTTPRequestAccumulator(maximumBytes: 3)
+        XCTAssertThrowsError(try oversized.append(Data("four".utf8))) {
+            XCTAssertEqual($0 as? NativeOAuthHTTPReadError, .tooLarge)
+        }
+    }
+
+    func testCancellationDuringListenerStartupPreservesCancellation() async {
+        let server = NativeOAuthLoopbackServer(expectedState: "expected")
+        // Both operations serialize on the server queue, making this a
+        // deterministic cancellation-before-readiness test rather than a
+        // race against Network.framework's listener startup.
+        server.stop()
+        do {
+            _ = try await server.start(timeout: 5)
+            XCTFail("Cancellation before readiness must not look like success")
+        } catch is CancellationError {
+            // Expected.
+        } catch {
+            XCTFail("Expected CancellationError, got \(error)")
+        }
     }
 
     func testMultipleOAuthProvidersDelegateChoiceToHermes() {

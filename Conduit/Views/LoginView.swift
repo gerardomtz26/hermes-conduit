@@ -213,6 +213,7 @@ struct LoginView: View {
                         // password credential that Conduit can safely reuse.
                         if let dashboardID = appState.resolveDashboardID(forURL: baseUrl, registerIfMissing: true) {
                             KeychainHelper.clearCredentials(dashboardID: dashboardID)
+                            KeychainHelper.clearNativeOAuthTokens(dashboardID: dashboardID)
                         }
                         appState.rememberDashboardURL(baseUrl)
                         await appState.connect(with: HermesConnection(baseUrl: baseUrl, ticket: ticket))
@@ -605,6 +606,10 @@ struct LoginView: View {
             let authenticatedConnection = try await client.connect(username: username, password: password)
             let dashboardID = appState.resolveDashboardID(forURL: serverUrl, registerIfMissing: true)
             if let dashboardID {
+                // The just-validated password session is authoritative. A
+                // durable native token from an older sign-in must not shadow
+                // its cookie-backed transport in DashboardTicketBridge.
+                KeychainHelper.clearNativeOAuthTokens(dashboardID: dashboardID)
                 if saveCredentials {
                     KeychainHelper.saveCredentials(DashboardCredentials(
                         baseURL: serverUrl,

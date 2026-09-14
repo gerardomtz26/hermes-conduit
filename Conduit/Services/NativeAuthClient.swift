@@ -143,14 +143,14 @@ enum HermesProviderCheck {
         // `/api/auth/providers` is built from Hermes' list_session_providers(),
         // so membership is the explicit session-capability signal. Current
         // Hermes payloads intentionally omit a `supports_session` field.
-        providers.contains { $0["supports_password"] as? Bool != true }
+        providers.contains { $0["supports_password"] as? Bool == false }
     }
 
     /// Pin the provider only when discovery found exactly one OAuth-capable
     /// session provider. With several, omit it so Hermes renders its chooser.
     static func nativeOAuthProvider(_ providers: [[String: Any]]) -> String? {
         let names = providers.compactMap { provider -> String? in
-            guard provider["supports_password"] as? Bool != true else { return nil }
+            guard provider["supports_password"] as? Bool == false else { return nil }
             return provider["name"] as? String
         }
         return names.count == 1 ? names[0] : nil
@@ -161,7 +161,7 @@ enum HermesProviderCheck {
 /// cookie handling is disabled: each login transaction captures its own
 /// response cookies, scopes them to the exact ticket URL, and returns them for
 /// explicit commit only after a valid ticket has been received.
-struct NativeAuthClient {
+final class NativeAuthClient {
     let baseURL: String
     let cloudflareAccess: CloudflareAccessCredentials?
     private let session: URLSession
@@ -191,6 +191,10 @@ struct NativeAuthClient {
         )
         self.redirectDelegate = redirectDelegate
         self.session = URLSession(configuration: configuration, delegate: redirectDelegate, delegateQueue: nil)
+    }
+
+    deinit {
+        session.invalidateAndCancel()
     }
 
     func authProviderDiscovery() async throws -> AuthProviderDiscoveryResult {
