@@ -2158,6 +2158,7 @@ final class AppState: ObservableObject {
         recoverySequence.cancel()
         chatResumeRestorationRequest = nil
         invalidateReconciliation()
+        invalidateServerCompactionState()
         sessionCatalogCache.removeAll()
         sessions = []
         cronSessions = []
@@ -2896,6 +2897,7 @@ final class AppState: ObservableObject {
         recoverySequence.cancel()
         chatResumeRestorationRequest = nil
         invalidateReconciliation()
+        invalidateServerCompactionState()
         cancelScenePhaseAttempt()
         lastConnectionFailure = nil
         client?.disconnect()
@@ -5041,6 +5043,19 @@ final class AppState: ObservableObject {
 
     // MARK: - Reconnect and scene lifecycle
 
+    /// Server-side compaction claims and their scheduled expiry tasks are
+    /// gateway-owned lifecycle state: deliberate teardown boundaries
+    /// (sign-out, server replacement, socket loss) invalidate them together —
+    /// a `compacted` edge may never arrive across them. Local RPC claims
+    /// (`compressingSessionIDs`) are untouched: they are bounded by their own
+    /// request timeout.
+    private func invalidateServerCompactionState() {
+        serverCompactingSessionIDs.removeAll()
+        serverCompactionClaimExpiryTasks.values.forEach { $0.cancel() }
+        serverCompactionClaimExpiryTasks.removeAll()
+        serverCompactionClaims.removeAll()
+    }
+
     private func handleDisconnect() {
         let wasRunning = isBusy
         isConnected = false
@@ -5049,12 +5064,7 @@ final class AppState: ObservableObject {
         // down, and a `compacted` edge may never arrive): never keep a
         // spinner alive on state we can no longer trust. Local RPC claims
         // survive — they are bounded by their own request timeout.
-        serverCompactingSessionIDs.removeAll()
-        // The backing claims and their scheduled expiry tasks are unverifiable
-        // gateway state too — a `compacted` edge may never arrive.
-        serverCompactionClaimExpiryTasks.values.forEach { $0.cancel() }
-        serverCompactionClaimExpiryTasks.removeAll()
-        serverCompactionClaims.removeAll()
+        invalidateServerCompactionState()
         guard connection != nil else { return }
         turnState = .reconnecting
 
