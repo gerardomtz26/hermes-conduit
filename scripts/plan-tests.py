@@ -12,9 +12,6 @@ Replaces the static unit-a..unit-d shard system:
     consolidating lanes whose split would not buy more than a wall-clock
     tolerance once the fixed per-invocation Xcode/simulator startup cost is
     modeled (predicted lane cost = invocation overhead + predicted execution);
-    the audio-host-sensitive classes (scripts/audio-sensitive-tests.json)
-    are reserved for one dedicated unit-audio lane so a CoreAudio wedge
-    cannot invalidate a large general-purpose lane;
   * balances UI classes into their own parallel lanes the same way, and
     derives a PER-CLASS watchdog for every UI class (the lane runs its
     classes as one batched invocation priced at the sum of those budgets,
@@ -93,16 +90,6 @@ UI_EXTRACT_BOUND_S = 300
 JOB_TIMEOUT_MARGIN_S = 1200        # reset/erase overhead + setup/download slack
 UNIT_TARGET = "ConduitTests"
 UI_TARGET = "ConduitUITests"
-# Audio-host-sensitive classes are reserved for ONE dedicated unit lane
-# (unit-audio). These are the classes whose assertions the GitHub-hosted
-# CoreAudio wedge (AURemoteIO -10851 / HALC overload starvation) demonstrably
-# flips; confining them means a wedge invalidates a small, cheap lane with a
-# targeted recovery instead of a large general-purpose unit lane. The
-# inventory lives in scripts/audio-sensitive-tests.json (one authoritative
-# location, shared with scripts/classify-coreaudio-wedge.py) and is
-# evidence-based, not name-based - see the file for inclusion criteria.
-AUDIO_SENSITIVE_INVENTORY = os.path.join("scripts", "audio-sensitive-tests.json")
-AUDIO_LANE_NAME = "unit-audio"
 
 # A class declaration line: attributes, optional access level, optional final,
 # then "class Name: InheritanceClause". Single-line inheritance is the repo
@@ -397,52 +384,15 @@ def imbalance_pct(values: list) -> float:
     return (max(values) - min(values)) / avg * 100.0
 
 
-def load_audio_sensitive_classes(path) -> tuple:
-    """Load the audio-sensitive inventory. Returns (classes, warnings).
-    Never raises: corrupt/missing -> empty + warning (planning proceeds
-    without a reserved lane; the classifier's own read fails closed)."""
-    if not path:
-        return [], []
-    if not os.path.exists(path):
-        return [], [f"audio-sensitive inventory not found: {path} "
-                    "(planning without a reserved unit-audio lane)"]
-    try:
-        with open(path, encoding="utf-8") as fh:
-            doc = json.load(fh)
-    except (OSError, json.JSONDecodeError) as exc:
-        return [], [f"audio-sensitive inventory unreadable ({exc}); "
-                    "planning without a reserved unit-audio lane"]
-    if not isinstance(doc, dict):
-        return [], ["audio-sensitive inventory has unexpected schema; "
-                    "planning without a reserved unit-audio lane"]
-    classes = doc.get("classes")
-    if not isinstance(classes, list) or not all(isinstance(c, str) for c in classes):
-        return [], ["audio-sensitive inventory has unexpected schema; "
-                    "planning without a reserved unit-audio lane"]
-    if not classes:
-        return [], ["audio-sensitive inventory names no classes - planning "
-                    "without a reserved unit-audio lane (empty file or wrong "
-                    "key?)"]
-    return sorted(set(classes)), []
-
-
-def build_plan(discovery: dict, cfg: dict, estimates: dict,
-               audio_classes: list = None) -> dict:
+def build_plan(discovery: dict, cfg: dict, estimates: dict) -> dict:
     unit_names = [e["name"] for e in discovery["unit"]]
     ui_names = [e["name"] for e in discovery["ui"]]
 
     unit_est = {n: estimates.get(n, cfg["default_estimate_s"]) for n in unit_names}
     ui_est = {n: estimates.get(n, cfg["default_estimate_s"]) for n in ui_names}
 
-    # Reserve the audio-sensitive classes for one dedicated lane; the rest
-    # balance exactly as before over the remaining items.
-    audio_set = set(audio_classes or ())
-    audio_names = sorted(n for n in unit_names if n in audio_set)
-    general_names = [n for n in unit_names if n not in audio_set]
-
-    items = sorted(((n, unit_est[n]) for n in general_names),
-                   key=lambda kv: (-kv[1], kv[0]))
-    total = sum(s for _n, s in items) + sum(unit_est[n] for n in audio_names)
+    items = sorted(unit_est.items(), key=lambda kv: (-kv[1], kv[0]))
+    total = sum(s for _n, s in items)
     n_lanes = lane_count_for(items, cfg)
     lanes = longest_processing_time_first(items, n_lanes)
 
@@ -457,23 +407,6 @@ def build_plan(discovery: dict, cfg: dict, estimates: dict,
             "classes": classes,
             "predicted_s": round(predicted, 1),
             "modeled_wall_s": round(modeled_wall, 1),
-            "timeout_s": timeout,
-            "job_timeout_min": job_timeout_min(timeout, cfg),
-        })
-
-    if audio_names:
-        # One reserved lane for the audio-host-sensitive classes. Same
-        # timing-derived watchdog formula as the general lanes; predicted
-        # includes only these classes so the lane's watchdog is not
-        # inflated by general-lane load.
-        predicted = sum(unit_est[c] for c in audio_names)
-        timeout = timeout_for(predicted, cfg["lane_timeout_min_s"], cfg["timeout_multiplier"])
-        unit_lanes.append({
-            "lane": AUDIO_LANE_NAME,
-            "target": UNIT_TARGET,
-            "classes": audio_names,
-            "predicted_s": round(predicted, 1),
-            "modeled_wall_s": round(cfg["invocation_overhead_s"] + predicted, 1),
             "timeout_s": timeout,
             "job_timeout_min": job_timeout_min(timeout, cfg),
         })
@@ -529,9 +462,8 @@ def build_plan(discovery: dict, cfg: dict, estimates: dict,
             imbalance_pct([l["predicted_s"] for l in ui_lanes]), 1),
         "total_predicted_s": round(total, 1),
         "ui_predicted_s": round(sum(ui_est.values()), 1),
-        "lane_count": len(unit_lanes),
+        "lane_count": n_lanes,
         "ui_lane_count": len(ui_lanes),
-        "audio_sensitive_classes": audio_names,
     }
     return plan
 
@@ -540,39 +472,11 @@ def build_plan(discovery: dict, cfg: dict, estimates: dict,
 # validation
 # ---------------------------------------------------------------------------
 
-def validate_plan(plan: dict, discovery: dict,
-                  audio_inventory: list = None) -> list:
+def validate_plan(plan: dict, discovery: dict) -> list:
     """Structural invariants beyond discovery errors. Returns error strings."""
     errors = list(discovery["errors"])
     unit_names = [e["name"] for e in discovery["unit"]]
     ui_names = [e["name"] for e in discovery["ui"]]
-
-    # The audio-sensitive inventory must stay in sync with the test tree: a
-    # stale entry (class renamed/deleted) fails planning loudly instead of
-    # silently shrinking the reserved lane - and a general lane must never
-    # carry a class the inventory claims.
-    audio_inventory = sorted(set(audio_inventory or []))
-    discovered_unit = set(unit_names)
-    for cls in audio_inventory:
-        if cls not in discovered_unit:
-            errors.append(
-                f"audio-sensitive inventory class {cls!r} is not a discovered "
-                f"{UNIT_TARGET} class - update scripts/audio-sensitive-tests.json")
-    if audio_inventory:
-        audio_lanes = [l for l in plan["unit_lanes"]
-                       if l["lane"] == AUDIO_LANE_NAME]
-        if len(audio_lanes) != 1:
-            errors.append(
-                f"expected exactly one {AUDIO_LANE_NAME} lane for the "
-                f"audio-sensitive inventory, found {len(audio_lanes)}")
-        else:
-            lane_classes = sorted(audio_lanes[0]["classes"])
-            expected = sorted(set(audio_inventory) & discovered_unit)
-            if lane_classes != expected:
-                errors.append(
-                    f"{AUDIO_LANE_NAME} lane must contain exactly the "
-                    f"discovered audio-sensitive classes {expected}, "
-                    f"found {lane_classes}")
 
     assigned = []
     for lane in plan["unit_lanes"]:
@@ -607,28 +511,14 @@ def validate_plan(plan: dict, discovery: dict,
         errors.append("UI classes leaked into unit lanes")
 
     # Fewer classes than min_lanes legitimately yields fewer lanes; the count
-    # must merely stay within [min(min_lanes, n_classes), max_lanes]. The
-    # bound applies to the GENERAL lanes only - the reserved unit-audio lane
-    # is additive (it exists exactly once iff the inventory names a
-    # discovered class) and must never push a legitimate 8-general-lane plan
-    # over max_lanes.
-    general_names_count = len([
-        c for c in unit_names
-        if c not in set(plan.get("audio_sensitive_classes", []))])
-    lo = min(plan["config"]["min_lanes"], general_names_count)
+    # must merely stay within [min(min_lanes, n_classes), max_lanes].
+    n_unit = len(unit_names)
+    lo = min(plan["config"]["min_lanes"], n_unit)
     hi = plan["config"]["max_lanes"]
-    general_count = sum(1 for l in plan["unit_lanes"] if l["lane"] != AUDIO_LANE_NAME)
-    if general_count < lo or general_count > hi:
+    if plan["lane_count"] < lo or plan["lane_count"] > hi:
         errors.append(
-            f"general lane count {general_count} outside configured bounds "
+            f"lane count {plan['lane_count']} outside configured bounds "
             f"[{lo}, {hi}]"
-        )
-    expected_total = general_count + (1 if any(
-        l["lane"] == AUDIO_LANE_NAME for l in plan["unit_lanes"]) else 0)
-    if plan["lane_count"] != expected_total:
-        errors.append(
-            f"lane_count {plan['lane_count']} != general lanes "
-            f"{general_count} + audio lane {expected_total - general_count}"
         )
     n_ui = len(ui_names)
     ui_lo = min(plan["config"]["ui_min_lanes"], n_ui)
@@ -701,9 +591,7 @@ def plan_summary_md(plan: dict, discovery: dict, source: str) -> str:
     lines.append("<details><summary>Lane membership</summary>")
     lines.append("")
     for lane in plan["unit_lanes"]:
-        marker = " (audio-host-sensitive; CoreAudio wedge recovery)" \
-            if lane["lane"] == AUDIO_LANE_NAME else ""
-        lines.append(f"- **{lane['lane']}**{marker}: {', '.join(lane['classes'])}")
+        lines.append(f"- **{lane['lane']}**: {', '.join(lane['classes'])}")
     for lane in plan["ui_lanes"]:
         timeouts = dict(p.split("=", 1) for p in lane["class_timeouts"].split(",") if p)
         members = ", ".join(
@@ -907,9 +795,6 @@ def main(argv=None) -> int:
         p.add_argument("--repo-root", default=".")
         p.add_argument("--baseline", default=os.path.join("scripts", "test-timings.json"))
         p.add_argument("--history", default="")
-        p.add_argument("--audio-inventory", default=AUDIO_SENSITIVE_INVENTORY,
-                       help="audio-sensitive class inventory JSON (reserved "
-                            "for the dedicated unit-audio lane)")
         p.add_argument("--default-estimate-s", type=float, default=DEFAULT_ESTIMATE_S)
         p.add_argument("--min-lanes", type=int, default=MIN_LANES)
         p.add_argument("--max-lanes", type=int, default=MAX_LANES)
@@ -958,23 +843,14 @@ def main(argv=None) -> int:
     discovery = discover_test_classes(a.repo_root)
     for w in discovery["warnings"]:
         warn(w)
-    audio_path = a.audio_inventory
-    if audio_path and not os.path.isabs(audio_path):
-        # Relative inventory paths resolve against --repo-root ONLY (never
-        # the CWD): a synthetic tree without the inventory simply plans
-        # without the reserved lane, warning.
-        audio_path = os.path.join(a.repo_root, audio_path)
-    audio_classes, awarns = load_audio_sensitive_classes(audio_path)
-    for w in awarns:
-        warn(w)
     cfg = _cfg_from_args(a)
     estimates, ewarns, source = _load_history_or_baseline(a, discovery)
     for w in ewarns:
         warn(w)
     # Unknown timing entries are ignored: build_plan only looks up discovered
     # class names, and the history update script prunes stale entries.
-    plan = build_plan(discovery, cfg, estimates, audio_classes)
-    errors = validate_plan(plan, discovery, audio_classes)
+    plan = build_plan(discovery, cfg, estimates)
+    errors = validate_plan(plan, discovery)
 
     report = _human_report(plan, discovery, source)
     print(report)

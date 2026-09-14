@@ -550,25 +550,22 @@ assert_eq "verdict" "$(lane_field "['status']")" "fail"
 assert_eq "isolation statuses" "$(isolation_statuses)" "['fail', 'fail']"
 
 # ===========================================================================
-# CoreAudio wedge recovery (unit lanes): a strong AURemoteIO -10851 / HALC
-# overload signature combined with failures ONLY inside the audio-sensitive
-# inventory authorizes exactly one clean-host retry of the affected classes.
-# The stub emits synthetic signature lines; AUDIO_INVENTORY points the
-# classifier at a temp inventory so the tests do not depend on real class
-# names.
+# CoreAudio HOST wedge recovery (unit lanes): the strong AURemoteIO -10851 /
+# HALC overload signature identifies a poisoned RUNNER ENVIRONMENT - any
+# lane can be hit and there is deliberately NO test-class inventory. On the
+# failure path the retry scope is EVERY identified failed class; on the
+# timeout path the scope is the whole lane (no per-test attribution exists).
+# The stub emits synthetic signature lines and discriminates invocations by
+# BUNDLE NAME (attempt-1 / attempt-2-audio-retry / attempt-2-host-retry).
 # ===========================================================================
-WEDGE_INVENTORY="$WORK/wedge-inventory.json"
-cat > "$WEDGE_INVENTORY" <<'JSON'
-{"classes": ["VoiceTests", "AudioTwoTests"]}
-JSON
-export AUDIO_INVENTORY="$WEDGE_INVENTORY"
+# (the old AUDIO_INVENTORY export is gone: classification is inventory-free)
 
-# Stub: attempt 1 (multiple -only-testing filters) fails VoiceTests while
-# HealthyTests passes; the wedge signature lines are emitted per
-# $FAKE_WEDGE_A1. The single-class recovery invocation is driven by
-# $FAKE_WEDGE_RETRY: pass / fail (no signature) / signature (fail again).
-# Every invocation lands in $INVOCATION_LOG as "inv:filters=N" or
-# "retry:<cls>".
+# Stub: attempt 1 (full lane) fails the classes named in
+# $FAKE_WEDGE_FAIL_CLASSES while the rest pass, and emits the signature per
+# $FAKE_WEDGE_A1 (signature | weak | "" ; hang hangs instead). The recovery
+# invocations are driven by $FAKE_WEDGE_RETRY (targeted) /
+# $FAKE_WEDGE_HOST_RETRY (whole-lane): pass | fail | signature. Every
+# invocation lands in $INVOCATION_LOG.
 write_wedge_stub_xcodebuild() {
   cat > "$STUBS/xcodebuild" <<'STUB'
 #!/bin/bash
@@ -579,8 +576,6 @@ for a in "$@"; do
     ;;
   esac
 done
-n=$(printf '%s\n' "$@" | grep -c -- '-only-testing:' || true)
-echo "inv:filters=$n" >> "$INVOCATION_LOG"
 emit_signature() {
   i=0
   while [ "$i" -lt 200 ]; do
@@ -592,6 +587,9 @@ emit_signature() {
     echo "2026-09-14 00:00:00.000 Conduit[9:9] [AMCP]          HALC_ProxyIOContext.cpp:1623  HALC_ProxyIOContext::IOWorkLoop: skipping cycle due to overload"
     i=$((i + 1))
   done
+}
+emit_weak() {
+  echo "2026-09-14 00:00:00.000 Conduit[9:9] [aurioc]            AURemoteIO.cpp:1135  failed: -10851 (enable 1)"
 }
 write_doc() {
   docfile="$1"; shift
@@ -610,13 +608,14 @@ write_doc() {
     "children": [$nodes]}]}]}
 DOC
 }
+mode=full
 case "$bundle" in
-  *attempt-2-audio-retry.xcresult) is_retry=1 ;;
-  *) is_retry=0 ;;
+  *attempt-2-audio-retry.xcresult) mode=audio-retry ;;
+  *attempt-2-host-retry.xcresult) mode=host-retry ;;
 esac
-if [ "$is_retry" -eq 0 ]; then
-  # Attempt 1 covers the whole lane: every class named in $FAKE_WEDGE_FAIL_CLASSES
-  # (default: the first filter) fails, the rest pass.
+
+if [ "$mode" = "full" ]; then
+  # Attempt 1: the classes in $FAKE_WEDGE_FAIL_CLASSES fail, the rest pass.
   pairs=""
   for a in "$@"; do
     case "$a" in
@@ -628,34 +627,57 @@ if [ "$is_retry" -eq 0 ]; then
         ;;
     esac
   done
-  if [ -z "$FAKE_WEDGE_FAIL_CLASSES" ]; then
-    first=$(printf '%s\n' "$@" | grep 'only-testing:' | head -1 | sed 's|.*/||')
-    pairs="$first:Failed $pairs"
-    pairs=$(printf '%s\n' "$pairs" | sed "s/ $first:Passed//")
-  fi
   write_doc "$FAKE_CANNED" $pairs
-  [ "$FAKE_WEDGE_A1" = "signature" ] && emit_signature
-  echo "Test Case failed (stub)"
-  exit 65
+  case "$FAKE_WEDGE_A1" in
+    signature) emit_signature ;;
+    weak) emit_weak ;;
+  esac
+  case "$FAKE_WEDGE_A1" in
+    hang | hang-signature | hang-weak)
+      [ "$FAKE_WEDGE_A1" = "hang-signature" ] && emit_signature
+      [ "$FAKE_WEDGE_A1" = "hang-weak" ] && emit_weak
+      sleep 300
+      ;;
+    *)
+      echo "Test Case failed (stub)"
+      exit 65
+      ;;
+  esac
+  exit 0
 fi
+
+# Recovery invocations: EVERY filtered class, one doc, per-class logging.
 pairs=""
 for a in "$@"; do
   case "$a" in
     -only-testing:*)
       c="${a#-only-testing:*/}"
       echo "retry:$c" >> "$INVOCATION_LOG"
-      case "$FAKE_WEDGE_RETRY" in
-        pass) pairs="$pairs $c:Passed" ;;
+      case "$mode|$FAKE_WEDGE_RETRY|$FAKE_WEDGE_HOST_RETRY" in
+        audio-retry|*pass*|pass) pairs="$pairs $c:Passed" ;;
         *) pairs="$pairs $c:Failed" ;;
       esac
       ;;
   esac
 done
 write_doc "$FAKE_CANNED" $pairs
-case "$FAKE_WEDGE_RETRY" in
-  pass)
-    exit 0
-    ;;
+if [ "$mode" = "audio-retry" ]; then
+  case "$FAKE_WEDGE_RETRY" in
+    pass) exit 0 ;;
+    signature)
+      emit_signature
+      echo "Test Case failed (stub)"
+      exit 65
+      ;;
+    *)
+      echo "Test Case failed (stub)"
+      exit 65
+      ;;
+  esac
+fi
+# host-retry
+case "$FAKE_WEDGE_HOST_RETRY" in
+  pass) exit 0 ;;
   signature)
     emit_signature
     echo "Test Case failed (stub)"
@@ -680,28 +702,27 @@ print(eval('w' + sys.argv[2]))
 " "$WORKCASE/lane-result.json" "$1" 2>/dev/null || echo NONE
 }
 
-# --- wedge case A: classified wedge -> targeted recovery passes the lane ------
+# --- host case 1+2+3: mixed failures, EVERY failed class retried once ---------
 end_case
-begin_case "coreaudio wedge recovers on clean host" "$WORK/w1"
+begin_case "coreaudio host wedge recovers: every failed class retried" "$WORK/w1"
 write_stub_xcrun
 write_wedge_stub_xcodebuild
 export FAKE_CANNED="$WORK/canned-wedge.json"
 export INVOCATION_LOG="$WORK/w1-invocations.log"; : > "$INVOCATION_LOG"
 export FAKE_WEDGE_A1="signature" FAKE_WEDGE_RETRY="pass"
-export FAKE_WEDGE_FAIL_CLASSES="VoiceTests AudioTwoTests"
-run_lane "VoiceTests,AudioTwoTests,HealthyTests" 300 unused 3
-export FAKE_WEDGE_FAIL_CLASSES=""
+export FAKE_WEDGE_FAIL_CLASSES="ChatResumeTests MarkdownTests"
+run_lane "ChatResumeTests,MarkdownTests,PickerTests" 300 unused 3
 assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "0"
 assert_eq "verdict" "$(lane_field "['status']")" "pass"
 assert_eq "attempts" "$(attempts_statuses)" "['audio-wedge', 'passed']"
-assert_eq "recovery recorded, not a flake" "$(lane_field "['infra_recovered_classes']")" "['VoiceTests', 'AudioTwoTests']"
+assert_eq "both recovered classes recorded" "$(lane_field "['infra_recovered_classes']")" "['ChatResumeTests', 'MarkdownTests']"
 assert_eq "wedge metadata embedded" "$(coreaudio_wedge_field "['wedge']")" "True"
 assert_eq "signature counts in metadata" "$(coreaudio_wedge_field "['signals']['auremoteio_10851']")" "200"
-assert_eq "one full-lane invocation" "$(grep -c '^inv:filters=2$' "$INVOCATION_LOG")" "1"
-assert_eq "first affected class re-ran" "$(grep -c '^retry:VoiceTests$' "$INVOCATION_LOG")" "1"
-assert_eq "second affected class re-ran" "$(grep -c '^retry:AudioTwoTests$' "$INVOCATION_LOG")" "1"
-assert_eq "healthy class never re-ran" "$(grep -c '^retry:HealthyTests$' "$INVOCATION_LOG")" "0"
-if grep -q "CoreAudio infrastructure wedge detected" "$WORKCASE/stdout.log" \
+assert_eq "one full-lane invocation" "$(grep -c '^inv:filters=' "$INVOCATION_LOG" | head -1)" "3"
+assert_eq "first failed class re-ran" "$(grep -c '^retry:ChatResumeTests$' "$INVOCATION_LOG")" "1"
+assert_eq "second (non-audio) failed class re-ran" "$(grep -c '^retry:MarkdownTests$' "$INVOCATION_LOG")" "1"
+assert_eq "healthy class never re-ran" "$(grep -c '^retry:PickerTests$' "$INVOCATION_LOG")" "0"
+if grep -q "CoreAudio host wedge detected" "$WORKCASE/stdout.log" \
    && grep -q "AURemoteIO -10851 occurrences: 200" "$WORKCASE/stdout.log" \
    && grep -q "action: resetting simulator and retrying affected tests" "$WORKCASE/stdout.log"; then
   ok "wedge diagnostics announced with signal counts"
@@ -714,25 +735,27 @@ else
   bad "wedge attempt bundles must be preserved for diagnosis"
 fi
 
-# --- wedge case B: retry fails WITHOUT the signature -> real product failure --
+# --- host case 4: retry fails WITHOUT the signature -> real product failure ---
 end_case
 begin_case "wedge retry failure without signature is a product failure" "$WORK/w2"
 export INVOCATION_LOG="$WORK/w2-invocations.log"; : > "$INVOCATION_LOG"
 export FAKE_WEDGE_A1="signature" FAKE_WEDGE_RETRY="fail"
-run_lane "VoiceTests,HealthyTests" 300 unused 3
+export FAKE_WEDGE_FAIL_CLASSES="ChatResumeTests"
+run_lane "ChatResumeTests,PickerTests" 300 unused 3
 assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
 assert_eq "verdict" "$(lane_field "['status']")" "fail"
 assert_eq "attempts" "$(attempts_statuses)" "['audio-wedge', 'test-failures']"
 assert_eq "no third invocation" "$(grep -c '^inv:filters=' "$INVOCATION_LOG")" "2"
-assert_eq "failed wedge lane reports the failures" "$(lane_field "['failures']" | grep -c VoiceTests)" "1"
+assert_eq "failed wedge lane reports the failures" "$(lane_field "['failures']" | grep -c ChatResumeTests)" "1"
 assert_eq "failed wedge lane claims no recovery" "$(lane_field "['infra_recovered_classes']")" "[]"
 
-# --- wedge case C: retry carries the signature -> persistent, no loop ---------
+# --- host case 8: retry carries the signature -> persistent, no loop ----------
 end_case
 begin_case "persistent coreaudio wedge fails bounded" "$WORK/w3"
 export INVOCATION_LOG="$WORK/w3-invocations.log"; : > "$INVOCATION_LOG"
 export FAKE_WEDGE_A1="signature" FAKE_WEDGE_RETRY="signature"
-run_lane "VoiceTests,HealthyTests" 300 unused 3
+export FAKE_WEDGE_FAIL_CLASSES="ChatResumeTests"
+run_lane "ChatResumeTests,PickerTests" 300 unused 3
 assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
 assert_eq "verdict" "$(lane_field "['status']")" "fail"
 assert_eq "attempts" "$(attempts_statuses)" "['audio-wedge', 'persistent-coreaudio-wedge']"
@@ -743,27 +766,9 @@ else
   bad "a persistent wedge must say so explicitly"
 fi
 
-# --- wedge case D: signature + failure outside the inventory -> NO recovery ---
+# --- host case 5: weak/ambient signature + failure -> no recovery -------------
 end_case
-begin_case "out-of-inventory failure voids the wedge path" "$WORK/w4"
-export INVOCATION_LOG="$WORK/w4-invocations.log"; : > "$INVOCATION_LOG"
-export FAKE_WEDGE_A1="signature" FAKE_WEDGE_RETRY="pass"
-export FAKE_WEDGE_FAIL_CLASSES="VoiceTests OtherTests"
-run_lane "VoiceTests,OtherTests" 300 unused 3
-export FAKE_WEDGE_FAIL_CLASSES=""
-assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
-assert_eq "verdict" "$(lane_field "['status']")" "fail"
-assert_eq "attempts" "$(attempts_statuses)" "['test-failures']"
-assert_eq "no retry when any failure is outside the inventory" "$(grep -c '^retry:' "$INVOCATION_LOG")" "0"
-if grep -q "not classified as a CoreAudio wedge" "$WORKCASE/stdout.log"; then
-  ok "declined classification is visible"
-else
-  bad "a declined wedge classification must be visible"
-fi
-
-# --- wedge case E: weak signature + audio failure -> ordinary product failure -
-end_case
-begin_case "weak signature never authorizes recovery" "$WORK/w5"
+begin_case "weak signature never authorizes recovery" "$WORK/w4"
 cat > "$STUBS/xcodebuild" <<'STUB'
 #!/bin/bash
 for a in "$@"; do
@@ -772,7 +777,7 @@ done
 cat > "$FAKE_CANNED" <<'DOC'
 {"testNodes": [{"nodeType": "Test Plan", "name": "Conduit", "result": "Passed",
   "children": [{"nodeType": "Unit test bundle", "name": "ConduitTests", "result": "Passed",
-    "children": [{"nodeType": "Test Suite", "name": "VoiceTests", "result": "Failed",
+    "children": [{"nodeType": "Test Suite", "name": "ChatResumeTests", "result": "Failed",
       "children": [{"nodeType": "Test Case", "name": "testC()", "result": "Failed",
         "durationInSeconds": 0.1}]}]}]}]}
 DOC
@@ -783,120 +788,64 @@ echo "Test Case failed (stub)"
 exit 65
 STUB
 chmod +x "$STUBS/xcodebuild"
-export INVOCATION_LOG="$WORK/w5-invocations.log"; : > "$INVOCATION_LOG"
-run_lane "VoiceTests" 300 unused 3
+export INVOCATION_LOG="$WORK/w4-invocations.log"; : > "$INVOCATION_LOG"
+run_lane "ChatResumeTests" 300 unused 3
 assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
 assert_eq "verdict" "$(lane_field "['status']")" "fail"
 assert_eq "attempts" "$(attempts_statuses)" "['test-failures']"
 assert_eq "exactly one invocation" "$(grep -c '^inv:filters=' "$INVOCATION_LOG")" "1"
 
-# --- wedge case F: unclassifiable retry classifier -> unclassified error ------
+# --- host case 6: strong signature + TIMEOUT -> one lane retry, no isolation --
 end_case
-begin_case "wedge retry classifier failure fails closed as unclassified" "$WORK/w6"
-cat > "$STUBS/xcodebuild" <<'STUB'
-#!/bin/bash
-for a in "$@"; do
-  case "$a" in *.xcresult)
-    mkdir -p "$a"
-    RESULT_DIR=$(dirname "$a")
-    ;;
-  esac
-done
-n=$(printf '%s\n' "$@" | grep -c -- '-only-testing:' || true)
-if [ "$n" -gt 1 ]; then
-  cat > "$FAKE_CANNED" <<'DOC'
-{"testNodes": [{"nodeType": "Test Plan", "name": "Conduit", "result": "Passed",
-  "children": [{"nodeType": "Unit test bundle", "name": "ConduitTests", "result": "Passed",
-    "children": [{"nodeType": "Test Suite", "name": "VoiceTests", "result": "Failed",
-      "children": [{"nodeType": "Test Case", "name": "testC()", "result": "Failed",
-        "durationInSeconds": 0.1}]}]}]}]}
-DOC
-  i=0
-  while [ "$i" -lt 200 ]; do
-    echo "2026-09-14 00:00:00.000 Conduit[9:9] [aurioc]            AURemoteIO.cpp:1135  failed: -10851 (enable 1)"
-    i=$((i + 1))
-  done
-  i=0
-  while [ "$i" -lt 30 ]; do
-    echo "2026-09-14 00:00:00.000 Conduit[9:9] [AMCP]          HALC_ProxyIOContext.cpp:1623  HALC_ProxyIOContext::IOWorkLoop: skipping cycle due to overload"
-    i=$((i + 1))
-  done
-  echo "Test Case failed (stub)"
-  exit 65
-fi
-# Recovery retry: pass, then destroy the invocation log so the retry
-# classifier cannot read its inputs.
-echo "retry:removed-log" >> "$INVOCATION_LOG"
-cat > "$FAKE_CANNED" <<'DOC'
-{"testNodes": [{"nodeType": "Test Plan", "name": "Conduit", "result": "Passed",
-  "children": [{"nodeType": "Unit test bundle", "name": "ConduitTests", "result": "Passed",
-    "children": [{"nodeType": "Test Suite", "name": "VoiceTests", "result": "Failed",
-      "children": [{"nodeType": "Test Case", "name": "testC()", "result": "Failed",
-        "durationInSeconds": 0.1}]}]}]}]}
-DOC
-rm -f "$RESULT_DIR/logs/attempt-2-audio-retry.log"
-echo "Test Case failed (stub)"
-exit 65
-STUB
-chmod +x "$STUBS/xcodebuild"
-export INVOCATION_LOG="$WORK/w6-invocations.log"; : > "$INVOCATION_LOG"
-export FAKE_WEDGE_A1="signature" FAKE_WEDGE_RETRY=""
-run_lane "VoiceTests,HealthyTests" 300 unused 3
-assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
-assert_eq "verdict" "$(lane_field "['status']")" "error"
-assert_eq "attempts" "$(attempts_statuses)" "['audio-wedge', 'unclassified']"
-if grep -q "failing closed as unclassified" "$WORKCASE/stdout.log"; then
-  ok "retry classifier failure is not claimed as a product failure"
+begin_case "timeout with strong host signature retries the lane once" "$WORK/w5"
+export INVOCATION_LOG="$WORK/w5-invocations.log"; : > "$INVOCATION_LOG"
+export FAKE_WEDGE_A1="hang-signature" FAKE_WEDGE_HOST_RETRY="pass"
+export FAKE_WEDGE_FAIL_CLASSES="ChatResumeTests"
+export ISOLATION_BUDGET_S=200 CLASS_TIMEOUT_MIN_S=1 CLASS_TIMEOUT_MULTIPLIER=0.1
+run_lane "ChatResumeTests,PickerTests" 3 unused 1
+assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "0"
+assert_eq "verdict" "$(lane_field "['status']")" "pass"
+assert_eq "attempts" "$(attempts_statuses)" "['host-wedge-timeout', 'passed']"
+assert_eq "no per-class recovery claims" "$(lane_field "['infra_recovered_classes']")" "[]"
+assert_eq "wedge metadata embedded" "$(coreaudio_wedge_field "['wedge']")" "True"
+assert_eq "exactly two full-lane invocations" "$(grep -c '^inv:filters=' "$INVOCATION_LOG")" "2"
+assert_eq "no isolation ran" "$(grep -c 'isolation:' "$WORKCASE/stdout.log")" "0"
+if grep -q "CoreAudio host wedge detected behind the watchdog" "$WORKCASE/stdout.log"; then
+  ok "timeout host wedge diagnosed from the invocation log"
 else
-  bad "an unclassifiable retry must fail closed as unclassified"
+  bad "the timeout host wedge must be diagnosed before isolation"
 fi
 
-# --- wedge case G: timeout + signature stays on the UNCHANGED timeout path ----
-# A watchdog kill is handled by isolation, never by the wedge recovery: the
-# recovery targets identified test failures only. Pins that domain 4 behavior
-# is untouched by the classifier.
+# --- host case 7: weak signature + timeout -> UNCHANGED isolation path --------
 end_case
-begin_case "timeout with wedge signature still goes to isolation" "$WORK/w7"
+begin_case "weak signature timeout keeps the isolation path" "$WORK/w6"
 cat > "$STUBS/xcodebuild" <<'STUB'
 #!/bin/bash
 n=$(printf '%s\n' "$@" | grep -c -- '-only-testing:' || true)
 if [ "$n" -gt 1 ]; then
-  i=0
-  while [ "$i" -lt 200 ]; do
-    echo "2026-09-14 00:00:00.000 Conduit[9:9] [aurioc]            AURemoteIO.cpp:1135  failed: -10851 (enable 1)"
-    i=$((i + 1))
-  done
-  i=0
-  while [ "$i" -lt 30 ]; do
-    echo "2026-09-14 00:00:00.000 Conduit[9:9] [AMCP]          HALC_ProxyIOContext.cpp:1623  HALC_ProxyIOContext::IOWorkLoop: skipping cycle due to overload"
-    i=$((i + 1))
-  done
+  echo "2026-09-14 00:00:00.000 Conduit[9:9] [aurioc]            AURemoteIO.cpp:1135  failed: -10851 (enable 1)"
   sleep 300
   exit 0
 fi
 exit 0
 STUB
 chmod +x "$STUBS/xcodebuild"
-export INVOCATION_LOG="$WORK/w7-invocations.log"; : > "$INVOCATION_LOG"
+export INVOCATION_LOG="$WORK/w6-invocations.log"; : > "$INVOCATION_LOG"
 export ISOLATION_BUDGET_S=200 CLASS_TIMEOUT_MIN_S=1 CLASS_TIMEOUT_MULTIPLIER=0.1
 run_lane "AlphaTests,BetaTests" 3 unused 1
-# Isolation diagnoses both classes clean, so the lane ends as the documented
-# isolation-recovery pass - NOT a wedge recovery.
 assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "0"
 assert_eq "verdict" "$(lane_field "['status']")" "pass"
-assert_eq "first attempt is a timeout" "$(attempts_statuses | grep -o 'timeout' | head -1)" "timeout"
-assert_eq "no audio-retry attempt" "$(grep -o 'audio-retry' "$WORKCASE/lane-result.json" 2>/dev/null | wc -l | tr -d ' ')" "0"
-if grep -q "CoreAudio infrastructure wedge detected" "$WORKCASE/stdout.log"; then
-  bad "the wedge recovery must not fire on a watchdog timeout"
+assert_eq "isolation ran" "$(isolation_statuses)" "['pass', 'pass']"
+assert_eq "no host-retry attempt" "$(grep -c 'host-retry' "$WORKCASE/lane-result.json" 2>/dev/null || true)" "0"
+if grep -q "CoreAudio host wedge detected" "$WORKCASE/stdout.log"; then
+  bad "a weak-signature timeout must not classify as a host wedge"
 else
-  ok "timeout path consulted no wedge recovery"
+  ok "weak-signature timeout never classified"
 fi
 
-# --- wedge case H: signature + zero failing tests -> ordinary infra retry ------
-# The zero-failing-test infrastructure domain (domain 3) keeps its full-lane
-# retry; the wedge classifier requires identified failures and never fires.
+# --- host case 10: signature + zero failing tests -> ordinary infra retry -----
 end_case
-begin_case "signature with zero failing tests takes the infra path" "$WORK/w8"
+begin_case "signature with zero failing tests takes the infra path" "$WORK/w7"
 cat > "$STUBS/xcodebuild" <<'STUB'
 #!/bin/bash
 for a in "$@"; do
@@ -907,7 +856,7 @@ echo "inv:filters=$n" >> "$INVOCATION_LOG"
 cat > "$FAKE_CANNED" <<'DOC'
 {"testNodes": [{"nodeType": "Test Plan", "name": "Conduit", "result": "Passed",
   "children": [{"nodeType": "Unit test bundle", "name": "ConduitTests", "result": "Passed",
-    "children": [{"nodeType": "Test Suite", "name": "VoiceTests", "result": "Passed",
+    "children": [{"nodeType": "Test Suite", "name": "ChatResumeTests", "result": "Passed",
       "children": [{"nodeType": "Test Case", "name": "testC()", "result": "Passed",
         "durationInSeconds": 0.1}]}]}]}]}
 DOC
@@ -917,24 +866,27 @@ while [ "$i" -lt 200 ]; do
   i=$((i + 1))
 done
 echo "simulator crashed once (stub)"
-[ "$(cat "$COUNT_FILE" 2>/dev/null || echo 0)" -ge 1 ] && exit 0
-n_inv=$(grep -c '^inv:filters=' "$INVOCATION_LOG" 2>/dev/null || echo 0)
-echo "$n_inv" > "$COUNT_FILE"
+if [ "$(grep -c '^inv:filters=' "$INVOCATION_LOG")" -ge 2 ]; then
+  exit 0
+fi
 exit 70
 STUB
 chmod +x "$STUBS/xcodebuild"
-export INVOCATION_LOG="$WORK/w8-invocations.log"; : > "$INVOCATION_LOG"
-export COUNT_FILE="$WORK/w8-count"
-: > "$COUNT_FILE"
-write_canned "$WORK/canned-w8.json" "VoiceTests" "Passed"
-export FAKE_CANNED="$WORK/canned-w8.json"
-run_lane "VoiceTests" 300 infra-once 1
+export INVOCATION_LOG="$WORK/w7-invocations.log"; : > "$INVOCATION_LOG"
+export COUNT_FILE="$WORK/w7-count"
+write_canned "$WORK/canned-w7.json" "ChatResumeTests" "Passed"
+export FAKE_CANNED="$WORK/canned-w7.json"
+run_lane "ChatResumeTests" 300 infra-once 1
 assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "0"
 assert_eq "verdict" "$(lane_field "['status']")" "pass"
 assert_eq "attempts are the ordinary infra chain" "$(attempts_statuses)" "['infra-recovered', 'passed']"
 assert_eq "no audio-retry marker" "$(grep -o 'audio-retry' "$WORKCASE/lane-result.json" 2>/dev/null | wc -l | tr -d ' ')" "0"
 
-export AUDIO_INVENTORY=""
+unset AUDIO_INVENTORY
+
+echo ""
+end_case
+echo "unit+isolation state machine: $pass_count passed, $fail_count failed so far"
 
 echo ""
 end_case

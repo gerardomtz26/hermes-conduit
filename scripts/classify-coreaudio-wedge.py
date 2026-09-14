@@ -1,50 +1,54 @@
 #!/usr/bin/env python3
-"""CoreAudio wedge classifier for Hermes Conduit CI (scripts/classify-coreaudio-wedge.py).
+"""CoreAudio host-wedge classifier for Hermes Conduit CI
+(scripts/classify-coreaudio-wedge.py).
 
-Decides whether a failed unit-lane invocation is the known GitHub-hosted
-macOS CoreAudio infrastructure wedge - in which case the lane runner may
-reset the simulator and retry ONLY the affected audio-sensitive classes -
-or an ordinary product test failure, which must fail the lane.
+Decides whether a unit-lane invocation ran on the known broken
+GitHub-hosted macOS CoreAudio HOST - in which case the lane runner may
+reset the simulator and retry the affected scope exactly once - or the
+failure belongs to the product.
 
-Why this exists (evidence, run 34822043959 retried 8x over 5.5h):
-  * A broken hosted audio host does not fail loudly. It floods the test
-    process with `AURemoteIO.cpp:1135 failed: -10851` lines and HAL
-    `skipping cycle due to overload` lines, and the starvation flips
-    timing-sensitive assertions in the audio-sensitive classes listed in
-    scripts/audio-sensitive-tests.json. The invocation exits 65 with
-    ordinary assertion records, so the previous policy classified it as a
-    product failure and a human re-ran the lane by hand.
+This is a HOST-HEALTH classifier, not a test-class classifier. The wedge
+is a property of the runner's audio server, not of any XCTest class: on a
+poisoned host, ANY lane can stall or its timing-sensitive assertions can
+flip. The old "failures must belong to an audio inventory" gate encoded
+the wrong failure domain and was removed; there is no allowlist to grow.
 
-The two-condition rule (BOTH required - fail closed):
+The wedge does not fail loudly. It floods the invocation log with
+`AURemoteIO.cpp:1135 failed: -10851` activation failures and HAL
+`skipping cycle due to overload` lines, and the starvation flips
+timing-sensitive assertions or hangs invocations outright.
 
-  1. Strong host signature in the invocation log:
-       - `AURemoteIO ... failed: -10851` occurrences >= min-auremoteio
-         (default 150), AND
-       - `skipping cycle due to overload` (HALC_ProxyIOContext) occurrences
-         >= min-halc-overload (default 20).
-     Observed distributions this is calibrated against (see docs/CI.md):
-       healthy unit-1      aurioc ~8    overload ~0-2
-       healthy unit-2      aurioc ~107  overload ~7     (ambient maximum)
-       slow-timeout unit-1 aurioc ~48   overload ~4     (NOT the audio wedge)
-       wedged unit-2       aurioc 184-186 (3 attempts)  overload 48
-     A single AURemoteIO line - even a handful - is NORMAL on healthy hosts
-     and must never classify an invocation as infrastructure.
+Classification rule (one condition, evidence-calibrated - the counts are
+per invocation log, i.e. per single xcodebuild invocation):
 
-  2. Every failed test class belongs to the audio-sensitive inventory
-     (scripts/audio-sensitive-tests.json). One failure outside the
-     inventory - or a wedge signature with NO identified failures - is a
-     real failure. The inventory is evidence-based and deliberately narrow;
-     the wedge starves async state machines host-wide, so a real regression
-     anywhere else must stay a product failure.
+    AURemoteIO -10851 occurrences >= min-auremoteio (default 150)
+        AND
+    `skipping cycle due to overload` occurrences >= min-halc-overload
+        (default 20)
+
+Observed distributions (docs/CI.md carries the full table):
+
+    healthy unit-1        aurioc ~8-22    overload ~0-2
+    healthy unit-2        aurioc ~93-116  overload ~4-7   (ambient maximum)
+    healthy unit-audio    aurioc 0        overload 0
+    wedged unit-2         aurioc 184-186  overload 48
+
+The joint AND with these margins fails closed: a single AURemoteIO line -
+or the full healthy ambient volume - never classifies an invocation as
+infrastructure. Thresholds are flag-overridable for recalibration; every
+verdict document records the raw counts so incidents can be tracked.
 
 Exit codes
 ----------
-  0  infrastructure wedge; recovery is authorized (JSON also on stdout)
-  1  not classified as a wedge: real product failure (fail closed)
-  2  usage/IO error: the runner MUST treat this as "not a wedge"
+  0  CoreAudio host wedge: a clean-environment retry is authorized
+  1  host healthy: the failure is the product's (fail closed)
+  2  usage/IO error: the caller MUST treat this as "not a wedge"
 
-The JSON document (also written to --out when given) always carries the raw
-signal counts so incidents can be recalibrated and tracked over time.
+The signature only ever AUTHORIZES one clean-host retry of the failed
+scope. It never turns a failing test green by itself, and a retry that
+carries the signature again is reported as a persistent CoreAudio runner
+failure - an environment verdict, not a product claim.
+
 Only Python 3 stdlib is used (runs on ubuntu and macOS runners).
 """
 
@@ -56,28 +60,20 @@ import os
 import re
 import sys
 
-DEFAULT_INVENTORY = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "audio-sensitive-tests.json")
-DEFAULT_MIN_AUREMOTEIO = 150
+DEFAULT_MIN_AURREMOTEIO = 150
 DEFAULT_MIN_HALC_OVERLOAD = 20
-
-# AURemoteIO activation failure with the exact error code observed under the
-# wedge (-10851). Healthy hosts log a limited amount of ambient noise from
-# AppState construction; the count gate, not the mere presence, is the signal.
-AUREMOTEIO_MARK = "AURemoteIO"
-AUREMOTEIO_CODE = "-10851"
-# HALC (CoreAudio HAL client proxy) reporting its IO work loop is overloaded:
-# the host-side "audio server is drowning" marker. Absent-to-rare on healthy
-# hosts (<=7 per lane observed), burst-scale under the wedge (48 observed).
-HALC_OVERLOAD_MARK = "skipping cycle due to overload"
-# Corroborating (reported, not gated): CHHapticEngine errors. 11 on healthy
-# hosts vs 20 under the wedge - not discriminative enough to gate on.
-CHHAPTIC_MARK = "CHHapticEngine"
 
 # The exact observed record shape: AURemoteIO reporting the -10851 activation
 # failure. A plain two-substring match could inflate counts on a benign line
 # that merely mentions both tokens.
 AUREMOTEIO_RE = re.compile(r"AURemoteIO.*failed:\s*-10851")
+# HALC (CoreAudio HAL client proxy) reporting its IO work loop is overloaded:
+# the host-side "audio server is drowning" marker. Rare on healthy hosts
+# (<=7 per lane observed), burst-scale under the wedge (48 observed).
+HALC_OVERLOAD_RE = re.compile(r"skipping cycle due to overload")
+# Corroborating (reported, not gated): CHHapticEngine errors. 11 on healthy
+# hosts vs 20 under the wedge - not discriminative enough to gate on.
+CHHAPTIC_MARK = "CHHapticEngine"
 
 
 def count_signals(invocation_log: str) -> dict:
@@ -93,7 +89,7 @@ def count_signals(invocation_log: str) -> dict:
         for line in fh:
             if AUREMOTEIO_RE.search(line):
                 auremoteio += 1
-            if HALC_OVERLOAD_MARK in line:
+            if HALC_OVERLOAD_RE.search(line):
                 halc_overload += 1
             if CHHAPTIC_MARK in line:
                 chhaptic += 1
@@ -104,97 +100,83 @@ def count_signals(invocation_log: str) -> dict:
     }
 
 
-def load_inventory_classes(path: str) -> list:
-    with open(path, encoding="utf-8") as fh:
-        doc = json.load(fh)
-    if not isinstance(doc, dict):
-        raise ValueError(f"inventory {path}: expected a JSON object")
-    classes = doc.get("classes")
-    if not isinstance(classes, list) or not all(isinstance(c, str) for c in classes):
-        raise ValueError(f"inventory {path}: 'classes' must be a list of strings")
-    return classes
-
-
-def load_failed_classes(detail_path: str) -> list:
-    """Distinct failed test classes from an extraction detail document, in a
-    deterministic order. An unreadable/empty document yields no failures,
-    which can never authorize recovery."""
-    with open(detail_path, encoding="utf-8") as fh:
-        doc = json.load(fh)
-    failed = doc.get("failures")
-    if not isinstance(failed, list):
-        raise ValueError(f"detail {detail_path}: 'failures' must be a list")
-    seen = set()
-    ordered = []
-    for failure in failed:
-        cls = failure.get("class") if isinstance(failure, dict) else None
-        if not cls or not isinstance(cls, str):
-            # A failure we cannot attribute must never be silently dropped:
-            # it could hide an out-of-inventory regression behind a wedge
-            # recovery that retries only the classified classes. Hard input
-            # error -> exit 2 -> the runner fails closed.
-            raise ValueError(
-                f"detail {detail_path}: failure record without a valid "
-                f"'class': {failure!r}")
-        if cls not in seen:
-            seen.add(cls)
-            ordered.append(cls)
-    return ordered
-
-
-def classify(signals: dict, failed_classes: list, inventory: list,
-             min_auremoteio: int, min_halc_overload: int) -> dict:
-    inventory_set = set(inventory)
-    audio_failures = [c for c in failed_classes if c in inventory_set]
-    outside = [c for c in failed_classes if c not in inventory_set]
+def classify(signals: dict, min_auremoteio: int, min_halc_overload: int) -> dict:
     signature = (signals.get("auremoteio_10851", 0) >= min_auremoteio
                  and signals.get("halc_overload", 0) >= min_halc_overload)
-    # BOTH conditions. No identified failures -> never a wedge; any failure
-    # outside the inventory -> never a wedge (a real regression must not be
-    # rescuable, and the wedge can starve ordinary classes' async assertions
-    # too - those stay honest product failures).
-    wedge = bool(audio_failures) and not outside and signature
     return {
-        "wedge": wedge,
+        "wedge": signature,
         "signals": signals,
         "thresholds": {
             "min_auremoteio_10851": min_auremoteio,
             "min_halc_overload": min_halc_overload,
         },
         "signature_strong": signature,
-        "failed_classes": failed_classes,
-        "audio_sensitive_failures": audio_failures,
-        "outside_inventory_failures": outside,
     }
+
+
+def failed_class_scope(detail_path: str) -> list:
+    """Distinct failed test classes from an extraction detail document.
+
+    The retry scope is EVERY identified failed class - the wedge poisons
+    timing-sensitive assertions anywhere, so the failure list itself is the
+    scope; there is no class allowlist. A record without a usable class
+    cannot be scoped and must never be silently omitted (it could hide a
+    real regression behind a subset retry): it is a hard input error, which
+    the caller must treat as fail-closed (exit 2)."""
+    with open(detail_path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    failed = doc.get("failures")
+    if not isinstance(failed, list):
+        raise ValueError(f"detail {detail_path}: 'failures' must be a list")
+    seen = []
+    for failure in failed:
+        cls = failure.get("class") if isinstance(failure, dict) else None
+        if not cls or not isinstance(cls, str):
+            raise ValueError(
+                f"detail {detail_path}: failure record without a valid "
+                f"'class': {failure!r}")
+        if cls not in seen:
+            seen.append(cls)
+    return seen
 
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--invocation-log", required=True,
-                        help="xcodebuild stdout log of the failed invocation")
-    parser.add_argument("--detail", required=True,
-                        help="extraction detail.json carrying failures[]")
-    parser.add_argument("--inventory", default=DEFAULT_INVENTORY,
-                        help="audio-sensitive class inventory JSON")
-    parser.add_argument("--min-auremoteio", type=int,
-                        default=DEFAULT_MIN_AUREMOTEIO)
-    parser.add_argument("--min-halc-overload", type=int,
-                        default=DEFAULT_MIN_HALC_OVERLOAD)
-    parser.add_argument("--out", default="",
-                        help="also write the classification JSON here")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    classify_p = sub.add_parser("classify", help="classify one invocation log")
+    classify_p.add_argument("--invocation-log", required=True,
+                            help="xcodebuild stdout log of the failed invocation")
+    classify_p.add_argument("--min-auremoteio", type=int,
+                            default=DEFAULT_MIN_AURREMOTEIO)
+    classify_p.add_argument("--min-halc-overload", type=int,
+                            default=DEFAULT_MIN_HALC_OVERLOAD)
+    classify_p.add_argument("--out", default="",
+                            help="also write the classification JSON here")
+
+    scope_p = sub.add_parser("scope", help="print the failed-class retry scope")
+    scope_p.add_argument("--detail", required=True,
+                         help="extraction detail.json carrying failures[]")
+
     args = parser.parse_args(argv)
+    if args.cmd == "scope":
+        try:
+            classes = failed_class_scope(args.detail)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"::warning::coreaudio-wedge scope could not be derived "
+                  f"({exc}) - failing closed")
+            return 2
+        print(" ".join(classes))
+        return 0
 
     try:
         signals = count_signals(args.invocation_log)
-        inventory = load_inventory_classes(args.inventory)
-        failed_classes = load_failed_classes(args.detail)
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
+    except OSError as exc:
         print(f"::warning::coreaudio-wedge classifier could not read its "
-              f"inputs ({exc}) - failing closed as a product failure")
+              f"input ({exc}) - failing closed as a product failure")
         return 2
 
-    verdict = classify(signals, failed_classes, inventory,
-                       args.min_auremoteio, args.min_halc_overload)
+    verdict = classify(signals, args.min_auremoteio, args.min_halc_overload)
     text = json.dumps(verdict, indent=2, sort_keys=True)
     if args.out:
         try:
