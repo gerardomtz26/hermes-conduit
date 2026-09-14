@@ -399,6 +399,46 @@ final class HermesClientTests: XCTestCase {
         client.disconnect()
     }
 
+    func testSetSessionTitleCarriesExplicitProfileWhenGiven() async throws {
+        let transport = FakeTransport()
+        let socket = FakeSocket()
+        transport.nextSocket = { socket }
+        let client = makeClient(transport: transport)
+        let connectTask = Task { try? await client.connect() }
+        transport.open(socket)
+        try await awaitCompletion(of: connectTask, "connect() to complete after the handshake")
+
+        let sent = Gate()
+        socket.onSend = { sent.signal() }
+        let titleTask = Task<Void, Error> {
+            try await client.setSessionTitle("runtime-new", title: "Bot Chat", profile: "atlas")
+        }
+        try await sent.wait("the canonical title write to be sent")
+
+        let request = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(try XCTUnwrap(socket.sentTexts.last).utf8)) as? [String: Any]
+        )
+        XCTAssertEqual(request["method"] as? String, "session.title")
+        let params = try XCTUnwrap(request["params"] as? [String: Any])
+        XCTAssertEqual(params["session_id"] as? String, "runtime-new")
+        XCTAssertEqual(params["title"] as? String, "Bot Chat")
+        XCTAssertEqual(
+            params["profile"] as? String, "atlas",
+            "the bot title write is self-describing about the profile it addresses"
+        )
+
+        let id = try XCTUnwrap(request["id"] as? Int)
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": ["title": "Bot Chat"]
+        ]
+        socket.deliver(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)!)
+
+        _ = try await titleTask.value
+        client.disconnect()
+    }
+
     func testProfileScopedResumeCarriesExplicitProfile() async throws {
         let transport = FakeTransport()
         let socket = FakeSocket()

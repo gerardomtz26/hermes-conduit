@@ -9,7 +9,7 @@ struct BotRosterView: View {
 
     var body: some View {
         Group {
-            if appState.botRoster.isEmpty {
+            if visibleBots.isEmpty {
                 emptyState
             } else {
                 rosterList
@@ -18,6 +18,12 @@ struct BotRosterView: View {
         .task(id: rosterRefreshKey) {
             await appState.refreshBotRoster()
         }
+    }
+
+    /// `botRoster` keeps EVERY bot (sessions-list hygiene reads the full
+    /// canonical registry); meta-hidden rows are hidden from THIS view only.
+    private var visibleBots: [BotProfile] {
+        appState.botRoster.filter { !$0.isHiddenByMeta }
     }
 
     private var rosterRefreshKey: String {
@@ -30,13 +36,12 @@ struct BotRosterView: View {
                 Section {
                     BotModeNoticeRow(
                         icon: "exclamationmark.triangle",
-                        title: AppLocalization.string("Could not refresh bots."),
-                        detail: message
+                        message: message
                     )
                 }
             }
             Section(AppLocalization.string("Bots")) {
-                ForEach(appState.botRoster) { bot in
+                ForEach(visibleBots) { bot in
                     BotRosterRow(bot: bot)
                 }
             }
@@ -185,7 +190,13 @@ struct BotMonogramView: View {
         if let name = bot.appearanceColor, let resolved = botColor(named: name) {
             return resolved
         }
-        return Color(hue: Double(abs(bot.name.hashValue % 360)) / 360.0,
+        // Deterministic across launches (Swift's hashValue is per-process
+        // salted, so a stable FNV-1a stands in for the name-derived hue).
+        var hash: UInt64 = 0xcbf29ce484222325
+        for byte in bot.name.utf8 {
+            hash = (hash ^ UInt64(byte)) &* 0x100000001b3
+        }
+        return Color(hue: Double(hash % 360) / 360.0,
                      saturation: 0.45,
                      brightness: 0.6)
     }
@@ -214,20 +225,15 @@ private func botColor(named name: String) -> Color? {
 /// failure while a previous roster is still displayed.
 private struct BotModeNoticeRow: View {
     let icon: String
-    let title: String
-    let detail: String
+    let message: String
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: icon)
                 .foregroundStyle(.yellow)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.footnote.weight(.medium))
-                Text(detail)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
+            Text(message)
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         }
         .padding(.vertical, 2)
     }

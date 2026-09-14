@@ -868,7 +868,12 @@ final class HermesClient: ObservableObject {
 
     // MARK: - RPC
 
-    private func rpc(_ method: String, params: [String: Any]? = nil, timeout: TimeInterval = requestTimeout) async throws -> AnyCodable {
+    private func rpc(
+        _ method: String,
+        params: [String: Any]? = nil,
+        timeout: TimeInterval = requestTimeout,
+        scoped: Bool = true
+    ) async throws -> AnyCodable {
         // Require both a live socket and a completed handshake. A receive
         // error leaves the socket installed with `closeCode == .invalid`, so
         // closeCode alone would let an RPC ride a dead socket to its timeout.
@@ -877,7 +882,7 @@ final class HermesClient: ObservableObject {
         }
 
         let id = incrementRequestId()
-        let scopedParams = scopeParams(params)
+        let scopedParams = scoped ? scopeParams(params) : (params?.isEmpty == false ? params : nil)
         let encodedParams = scopedParams?.mapValues { AnyCodable.from($0) }
 
         let request = JsonRpcRequest(id: id, method: method, params: encodedParams)
@@ -962,9 +967,11 @@ final class HermesClient: ObservableObject {
     /// THE Bot Mode capability call. A gateway old enough to lack the method
     /// has no Bot Mode; callers classify the thrown error with
     /// `isMissingRPCMethod`. Rows carry `canonical_session`, `last_session`,
-    /// `ui_meta['hermes-bots']`, and `has_avatar`.
+    /// `ui_meta['hermes-bots']`, and `has_avatar`. The listing is
+    /// gateway-wide (`list_profiles()`), so it is sent UNSCOPED: the
+    /// dashboard profile context must never shrink the roster.
     func botRoster() async throws -> BotRosterSnapshot {
-        let result = try await rpc("profiles.list", params: nil)
+        let result = try await rpc("profiles.list", params: nil, scoped: false)
         guard let snapshot = BotRosterDecoder.decode(result) else {
             throw HermesError.invalidResponse
         }
@@ -1198,18 +1205,30 @@ final class HermesClient: ObservableObject {
         )
     }
 
-    func setSessionTitle(_ sessionId: String, title: String) async throws {
-        _ = try await rpc("session.title", params: [
+    func setSessionTitle(_ sessionId: String, title: String, profile: String? = nil) async throws {
+        var params: [String: Any] = [
             "session_id": sessionId,
             "title": title
-        ])
+        ]
+        // The gateway's `session.title` is session-scoped (the db comes from
+        // the resolved session's own profile home), so this param is inert
+        // on the wire — it is carried to keep the bot chat's RPCs uniformly
+        // self-describing about the profile they address.
+        if let profile, !profile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            params["profile"] = profile
+        }
+        _ = try await rpc("session.title", params: params)
     }
 
     /// Reads the gateway's current title without guessing from the local
     /// catalog. This is particularly important for profile-scoped sessions,
     /// whose title can be updated asynchronously by Hermes.
-    func sessionTitle(_ sessionId: String) async throws -> String? {
-        let result = try await rpc("session.title", params: ["session_id": sessionId])
+    func sessionTitle(_ sessionId: String, profile: String? = nil) async throws -> String? {
+        var params: [String: Any] = ["session_id": sessionId]
+        if let profile, !profile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            params["profile"] = profile
+        }
+        let result = try await rpc("session.title", params: params)
         let title = result.objectValue?["title"]?.stringValue?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return (title?.isEmpty == false) ? title : nil

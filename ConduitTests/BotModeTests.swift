@@ -305,9 +305,11 @@ final class BotModeTests: XCTestCase {
     func testExistingCanonicalOpensResolvedTipThroughOrdinaryResume() async {
         var created = 0
         var resumedIDs: [String] = []
+        var resumeProfiles: [String?] = []
         let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
-            openSession: { _, id, _ in
+            openSessionWithProfile: { _, id, _, profile in
                 resumedIDs.append(id)
+                resumeProfiles.append(profile)
                 return SessionResumeResult(
                     sessionId: id,
                     storedSessionId: "stored-1",
@@ -334,6 +336,7 @@ final class BotModeTests: XCTestCase {
         XCTAssertTrue(opened)
         XCTAssertEqual(created, 0)
         XCTAssertEqual(resumedIDs, ["runtime-1"], "the open addresses the compression-lineage tip")
+        XCTAssertEqual(resumeProfiles, ["atlas"], "the resume rides the BOT profile, never the dashboard scope")
         XCTAssertEqual(harness.appState.activeSessionId, "runtime-1")
         XCTAssertEqual(harness.appState.activeSessionTitle, "atlas", "the bot's display label titles the chat")
         XCTAssertNil(harness.appState.errorMessage)
@@ -343,8 +346,8 @@ final class BotModeTests: XCTestCase {
         var order: [String] = []
         var resumedIDs: [String] = []
         let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
-            openSession: { _, id, _ in
-                order.append("open")
+            openSessionWithProfile: { _, id, _, profile in
+                order.append("open:\(profile ?? "nil")")
                 resumedIDs.append(id)
                 return SessionResumeResult(
                     sessionId: id,
@@ -362,8 +365,8 @@ final class BotModeTests: XCTestCase {
                 order.append("create:\(profile)")
                 return ("runtime-new", "stored-new")
             },
-            titleBotChat: { _, sessionID, title in
-                order.append("title:\(sessionID):\(title)")
+            titleBotChat: { _, sessionID, title, profile in
+                order.append("title:\(sessionID):\(title):\(profile)")
             }
         ))
         harness.appState.client = HermesClient(
@@ -380,13 +383,14 @@ final class BotModeTests: XCTestCase {
         )
         XCTAssertTrue(order.contains("create:atlas"))
         XCTAssertTrue(
-            order.contains("title:runtime-new:\(BotMode.canonicalChatTitle)"),
-            "the eager title materializes the lazy row before any open"
+            order.contains("title:runtime-new:\(BotMode.canonicalChatTitle):atlas"),
+            "the eager title names the bot profile it addresses"
         )
         XCTAssertTrue(
-            (order.firstIndex(of: "open") ?? order.endIndex) > (order.firstIndex { $0.hasPrefix("title:") } ?? 0),
+            (order.firstIndex { $0.hasPrefix("open:") } ?? order.endIndex) > (order.firstIndex { $0.hasPrefix("title:") } ?? 0),
             "the open only happens after the canonical title landed"
         )
+        XCTAssertEqual(order.last, "open:atlas", "the open resumes under the BOT's profile scope")
         XCTAssertEqual(resumedIDs, ["runtime-new"])
         XCTAssertEqual(harness.appState.activeSessionId, "runtime-new")
     }
@@ -418,7 +422,7 @@ final class BotModeTests: XCTestCase {
                 createCalls += 1
                 return ("runtime-stray", nil)
             },
-            titleBotChat: { _, _, _ in
+            titleBotChat: { _, _, _, _ in
                 throw RpcError(code: 4022, message: "Title 'Bot Chat' is already in use by session stored-winner")
             }
         ))
@@ -451,7 +455,7 @@ final class BotModeTests: XCTestCase {
             refreshContext: { _, _ in },
             findBotChat: { _, _ in [] },
             createBotChat: { _, _ in ("runtime-stray", nil) },
-            titleBotChat: { _, _, _ in
+            titleBotChat: { _, _, _, _ in
                 throw RpcError(code: 5000, message: "state.db is locked")
             }
         ))
@@ -569,6 +573,227 @@ final class BotModeTests: XCTestCase {
             "a roster answer captured under an older epoch must never describe the new server"
         )
         XCTAssertEqual(harness.appState.botModePhase, .idle)
+    }
+
+    // MARK: - review-hardening regressions
+
+    func testStrayCatalogRowDoesNotBlockCanonicalOpen() async {
+        // A visible stray row for the canonical chat (older server data) sits
+        // in the raw catalog under the BOT's profile. The ordinary workspace
+        // guard protects dashboard opens; a bot open carries its own profile
+        // and must proceed through the ordinary machinery anyway.
+        var resumedIDs: [String] = []
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            openSessionWithProfile: { _, id, _, profile in
+                resumedIDs.append(id)
+                _ = profile
+                return SessionResumeResult(
+                    sessionId: id,
+                    storedSessionId: "stored-1",
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            findBotChat: { _, _ in
+                [BotChatLookupRow(id: "stored-1", resolvedID: "runtime-1", title: "Bot Chat")]
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        harness.appState.sessions = [
+            makeSessionSummary(id: "runtime-1", title: "Bot Chat", storedID: "stored-1", profile: "atlas")
+        ]
+
+        let opened = await harness.appState.openBotChat(for: makeBot(name: "atlas"))
+
+        XCTAssertTrue(opened, "a stray cross-profile catalog row must not block the canonical open")
+        XCTAssertEqual(resumedIDs, ["runtime-1"])
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-1")
+        XCTAssertNil(harness.appState.errorMessage)
+    }
+
+    func testCreateCollisionAdoptsWinnerInsteadOfForking() async {
+        var createCalls = 0
+        var lookups = 0
+        var resumedIDs: [String] = []
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            openSessionWithProfile: { _, id, _, _ in
+                resumedIDs.append(id)
+                return SessionResumeResult(
+                    sessionId: id,
+                    storedSessionId: "stored-winner",
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            findBotChat: { _, _ in
+                lookups += 1
+                return lookups == 1
+                    ? []
+                    : [BotChatLookupRow(id: "stored-winner", resolvedID: "runtime-winner", title: "Bot Chat")]
+            },
+            // Some gateways enforce the canonical name at create time.
+            createBotChat: { _, _ in
+                createCalls += 1
+                throw RpcError(code: 4022, message: "Title 'Bot Chat' is already in use by session stored-winner")
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+
+        let opened = await harness.appState.openBotChat(for: makeBot(name: "atlas"))
+
+        XCTAssertTrue(opened)
+        XCTAssertEqual(createCalls, 1)
+        XCTAssertEqual(lookups, 2, "a create-time collision re-consults the registry")
+        XCTAssertEqual(resumedIDs, ["runtime-winner"])
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-winner")
+        XCTAssertNil(harness.appState.errorMessage)
+    }
+
+    func testRefreshFailureWithEstablishedRosterSurfacesNotice() async {
+        var calls = 0
+        let rosterBot = makeBot(name: "atlas")
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            botRoster: { _ in
+                calls += 1
+                if calls == 1 {
+                    return BotRosterSnapshot(bots: [rosterBot], supportsBotProtocol: true)
+                }
+                throw RpcError(code: 5000, message: "gateway restart in progress")
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        await harness.appState.refreshBotRoster()
+        XCTAssertEqual(harness.appState.botModePhase, .available)
+
+        await harness.appState.refreshBotRoster()
+
+        guard case .failed(let message) = harness.appState.botModePhase else {
+            return XCTFail("a failed refresh over an established roster must surface the notice phase")
+        }
+        XCTAssertFalse(message.isEmpty)
+        XCTAssertEqual(
+            harness.appState.botRoster.map(\.name), ["atlas"],
+            "the stale roster stays visible under the failure notice"
+        )
+    }
+
+    func testServerSwitchCancelsInFlightBotOpen() async {
+        let harness = makeBotHarness(
+            configureDefaults: { defaults in
+                defaults.set(
+                    "https://one.example",
+                    forKey: "conduit.chatResumeServerIdentity.v1"
+                )
+            },
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                openSessionWithProfile: { _, id, _, _ in
+                    // The flight is mid-resume when the server switches.
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    return SessionResumeResult(
+                        sessionId: id,
+                        storedSessionId: "stored-1",
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in },
+                findBotChat: { _, _ in
+                    [BotChatLookupRow(id: "stored-1", resolvedID: "runtime-1", title: "Bot Chat")]
+                }
+            )
+        )
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        let bot = makeBot(name: "atlas")
+
+        async let opened: Bool = harness.appState.openBotChat(for: bot)
+        try? await Task.sleep(nanoseconds: 60_000_000)
+        _ = harness.appState.prepareChatResumeForConnection(
+            to: "https://elsewhere.example",
+            dashboardID: UUID()
+        )
+        let result = await opened
+
+        XCTAssertFalse(result, "a server switch must abandon the in-flight bot open")
+        XCTAssertEqual(
+            harness.appState.activeSessionId, nil,
+            "the stale flight must not navigate the UI against the outgoing server"
+        )
+        XCTAssertTrue(harness.appState.botRoster.isEmpty)
+        XCTAssertEqual(harness.appState.botModePhase, BotModePhase.idle)
+    }
+
+    func testBackfillWindowCarriesBotProfileScope() async {
+        var hydrationProfiles: [String] = []
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            openSessionWithProfile: { _, id, _, _ in
+                SessionResumeResult(
+                    sessionId: id,
+                    storedSessionId: "stored-1",
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            persistedTranscript: { sessionId, profile, _ in
+                hydrationProfiles.append(profile)
+                // A full tail-anchored page (echoed order=latest, limit ==
+                // rawReturned) so the window stamp runs and the backfill
+                // affordance arms.
+                var rows: [[String: Any]] = []
+                for index in 0..<PersistedTranscriptPagination.pageSize {
+                    rows.append([
+                        "id": "row-\(index)",
+                        "role": "user",
+                        "content": "row \(index)",
+                        "timestamp": String(index)
+                    ])
+                }
+                return .payload([
+                    "session_id": sessionId,
+                    "messages": rows,
+                    "pagination": [
+                        "limit": PersistedTranscriptPagination.pageSize,
+                        "offset": 0,
+                        "order": "latest",
+                        "returned": PersistedTranscriptPagination.pageSize
+                    ]
+                ])
+            },
+            refreshContext: { _, _ in },
+            findBotChat: { _, _ in
+                [BotChatLookupRow(id: "stored-1", resolvedID: "runtime-1", title: "Bot Chat")]
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+
+        let opened = await harness.appState.openBotChat(for: makeBot(name: "atlas"))
+
+        XCTAssertTrue(opened)
+        XCTAssertEqual(hydrationProfiles, ["atlas"], "the persisted-history hydration addresses the bot profile")
+        XCTAssertEqual(
+            harness.appState.persistedTranscriptWindow?.profile, "atlas",
+            "the backfill window is stamped with the bot scope so older pages fetch from the bot's store"
+        )
+        XCTAssertTrue(
+            harness.appState.canLoadEarlierMessagesForActiveConversation,
+            "the ownership gate must accept the bot-scoped window while the chat is active"
+        )
     }
 
     // MARK: - harness

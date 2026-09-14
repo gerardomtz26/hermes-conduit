@@ -227,11 +227,10 @@ enum BotChatResolver {
         rosterCanonicalID: String?
     ) -> Result<BotChatResolution, BotChatRefusal> {
         if let match = rows.first(where: { $0.isCanonicalTitle() }) {
-            let registry = match.id
-            guard let resume = match.resumeTargetID, !resume.isEmpty else {
-                return .success(.openExisting(registryID: registry, resumeID: registry))
-            }
-            return .success(.openExisting(registryID: registry, resumeID: resume))
+            return .success(.openExisting(
+                registryID: match.id,
+                resumeID: match.resumeTargetID ?? match.id
+            ))
         }
         if let confirmed = rosterCanonicalID?
             .trimmingCharacters(in: .whitespacesAndNewlines), !confirmed.isEmpty {
