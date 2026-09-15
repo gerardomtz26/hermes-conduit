@@ -52,35 +52,6 @@ def load_plan(path) -> dict:
     return plan
 
 
-def lane_disagrees(entry: dict, doc: dict, record) -> list:
-    """Every way a lane result disagrees with the authoritative plan."""
-    mismatches = []
-    if doc.get("kind") != "unit":
-        mismatches.append(f"kind {doc.get('kind')!r} != 'unit'")
-    if doc.get("lane") != entry.get("lane"):
-        mismatches.append(f"lane name {doc.get('lane')!r} != planned {entry.get('lane')!r}")
-    if record.artifact_lane is not None and record.artifact_lane != entry.get("lane"):
-        mismatches.append(f"artifact name says lane {record.artifact_lane!r}")
-    if record.is_recovery_artifact:
-        mismatches.append("primary result uploaded under a recovery artifact name")
-    if sorted(map(str, doc.get("classes") or [])) != sorted(
-            map(str, entry.get("classes") or [])):
-        mismatches.append("lane membership differs from the plan")
-    if doc.get("target") != entry.get("target"):
-        mismatches.append(f"target {doc.get('target')!r} != planned {entry.get('target')!r}")
-    try:
-        if doc.get("timeout_s") is None or entry.get("timeout_s") is None \
-                or abs(float(doc["timeout_s"]) - float(entry["timeout_s"])) >= 0.01:
-            mismatches.append("watchdog budget differs from the plan")
-    except (TypeError, ValueError):
-        mismatches.append("watchdog budget unreadable")
-    if doc.get("schema_version") != 1:
-        mismatches.append(f"schema_version {doc.get('schema_version')!r} != 1")
-    if doc.get("fresh_runner_recovery"):
-        mismatches.append("a primary lane result must not carry the fresh-runner flag")
-    return mismatches
-
-
 def recovery_matrix_entry(plan: dict, lane: str) -> dict:
     """The COMPLETE original lane inputs for one lane, rebuilt from the
     plan (same shape as plan-tests.py matrix_json). A plan entry missing
@@ -154,7 +125,8 @@ def main(argv=None) -> int:
             fail(f"lane {lane}: no lane-result artifact found - failing closed")
             failed_closed = True
             continue
-        mismatches = lane_disagrees(entry, record.doc, record)
+        mismatches = ci_lane_recovery.plan_disagreements(
+            entry, record.doc, record, primary=True)
         if mismatches:
             fail(f"lane {lane}: lane result disagrees with the plan: "
                  + "; ".join(mismatches) + " - failing closed")

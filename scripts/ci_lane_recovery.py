@@ -360,6 +360,47 @@ def _numbers_match(a, b) -> bool:
         return False
 
 
+def plan_disagreements(lane_entry, doc, record=None, primary=True):
+    """Every way a lane result document disagrees with its authoritative
+    plan entry - the ONE fail-closed artifact/plan fence, shared by the
+    recovery planner (ci-recovery-plan.py) and the gate adjudication, so
+    both consumers accept or reject a document identically. With
+    primary=False (a fresh-runner recovery document) the primary-only
+    fences (fresh-runner flag, recovery artifact name) are skipped but the
+    coverage fields are still enforced."""
+    mismatches = []
+    if not isinstance(doc, dict):
+        return ["lane result is not an object"]
+    if doc.get("kind") != "unit":
+        mismatches.append(f"kind {doc.get('kind')!r} != 'unit'")
+    if doc.get("lane") != lane_entry.get("lane"):
+        mismatches.append(
+            f"lane name {doc.get('lane')!r} != planned {lane_entry.get('lane')!r}")
+    if record is not None:
+        if record.artifact_lane is not None \
+                and record.artifact_lane != lane_entry.get("lane"):
+            mismatches.append(
+                f"artifact name says lane {record.artifact_lane!r}")
+        if primary and record.is_recovery_artifact:
+            mismatches.append(
+                "primary result uploaded under a recovery artifact name")
+    if not _classes_match(lane_entry.get("classes", []), doc.get("classes")):
+        mismatches.append("lane membership differs from the plan")
+    if doc.get("target") != lane_entry.get("target"):
+        mismatches.append(
+            f"target {doc.get('target')!r} != planned {lane_entry.get('target')!r}")
+    if not _numbers_match(doc.get("timeout_s"), lane_entry.get("timeout_s")):
+        mismatches.append("watchdog budget differs from the plan")
+    if doc.get("schema_version") != _LANE_RESULT_SCHEMA_VERSION:
+        mismatches.append(
+            f"schema_version {doc.get('schema_version')!r} != "
+            f"{_LANE_RESULT_SCHEMA_VERSION}")
+    if primary and doc.get("fresh_runner_recovery"):
+        mismatches.append(
+            "a primary lane result must not carry the fresh-runner flag")
+    return mismatches
+
+
 def adjudicate_unit_lanes(plan_doc, unit_docs, recovery_docs):
     """Adjudicate every planned unit lane to exactly one final disposition.
 
@@ -378,16 +419,18 @@ def adjudicate_unit_lanes(plan_doc, unit_docs, recovery_docs):
         return adjudication
 
     planned_lanes = []
+    validated_entries = []
     for lane_entry in plan_doc["unit_lanes"]:
         lane = lane_entry.get("lane") if isinstance(lane_entry, dict) else None
         if not isinstance(lane, str) or not lane:
             adjudication.fail("plan contains a unit lane without a name")
             continue
         planned_lanes.append(lane)
+        validated_entries.append(lane_entry)
 
     recovery_lanes = set(recovery_docs or {})
 
-    for lane_entry in plan_doc["unit_lanes"]:
+    for lane_entry in validated_entries:
         lane = lane_entry.get("lane")
         record = unit_docs.get(lane)
         disposition = {
@@ -410,31 +453,7 @@ def adjudicate_unit_lanes(plan_doc, unit_docs, recovery_docs):
 
         doc = record.doc
         # --- artifact/plan agreement (fail closed) --------------------------
-        mismatches = []
-        if doc.get("kind") != "unit":
-            mismatches.append(f"kind {doc.get('kind')!r} != 'unit'")
-        if doc.get("lane") != lane:
-            mismatches.append(f"lane name {doc.get('lane')!r} != planned {lane!r}")
-        if record.artifact_lane is not None and record.artifact_lane != lane:
-            mismatches.append(
-                f"artifact name says lane {record.artifact_lane!r}")
-        if record.is_recovery_artifact:
-            mismatches.append("primary result uploaded under a recovery artifact name")
-        if not _classes_match(lane_entry.get("classes", []), doc.get("classes")):
-            mismatches.append("lane membership differs from the plan")
-        if doc.get("target") != lane_entry.get("target"):
-            mismatches.append(
-                f"target {doc.get('target')!r} != planned "
-                f"{lane_entry.get('target')!r}")
-        if not _numbers_match(doc.get("timeout_s"), lane_entry.get("timeout_s")):
-            mismatches.append("watchdog budget differs from the plan")
-        if doc.get("schema_version") != _LANE_RESULT_SCHEMA_VERSION:
-            mismatches.append(
-                f"schema_version {doc.get('schema_version')!r} != "
-                f"{_LANE_RESULT_SCHEMA_VERSION}")
-        if doc.get("fresh_runner_recovery"):
-            mismatches.append(
-                "a primary lane result must not carry the fresh-runner flag")
+        mismatches = plan_disagreements(lane_entry, doc, record, primary=True)
         if mismatches:
             reason = "lane result disagrees with the plan: " + "; ".join(mismatches)
             adjudication.lane_fail(lane, reason)
@@ -505,37 +524,15 @@ def adjudicate_unit_lanes(plan_doc, unit_docs, recovery_docs):
             bad_flags.append("result is not marked fresh_runner_recovery")
         if recovery_doc.get("lane") != lane:
             bad_flags.append(f"recovery lane name {recovery_doc.get('lane')!r}")
-        if recovery_record.artifact_lane is not None \
-                and recovery_record.artifact_lane != lane:
-            bad_flags.append(
-                f"recovery artifact name says lane "
-                f"{recovery_record.artifact_lane!r}")
         if not recovery_record.is_recovery_artifact:
             bad_flags.append("uploaded outside a lane-recovery-* artifact")
         # The recovery must ALSO agree with the plan: same target, same
         # membership, same watchdog, same schema. A recovery that executed
-        # anything else never satisfies the lane's coverage.
-        recovery_mismatches = []
-        if recovery_doc.get("kind") != "unit":
-            recovery_mismatches.append(
-                f"kind {recovery_doc.get('kind')!r} != 'unit'")
-        if not _classes_match(lane_entry.get("classes", []),
-                              recovery_doc.get("classes")):
-            recovery_mismatches.append("lane membership differs from the plan")
-        if recovery_doc.get("target") != lane_entry.get("target"):
-            recovery_mismatches.append(
-                f"target {recovery_doc.get('target')!r} != planned "
-                f"{lane_entry.get('target')!r}")
-        if not _numbers_match(recovery_doc.get("timeout_s"),
-                              lane_entry.get("timeout_s")):
-            recovery_mismatches.append("watchdog budget differs from the plan")
-        if recovery_doc.get("schema_version") != _LANE_RESULT_SCHEMA_VERSION:
-            recovery_mismatches.append(
-                f"schema_version {recovery_doc.get('schema_version')!r} != "
-                f"{_LANE_RESULT_SCHEMA_VERSION}")
-        if recovery_mismatches:
-            bad_flags.append("recovery result disagrees with the plan: "
-                             + "; ".join(recovery_mismatches))
+        # anything else never satisfies the lane's coverage. (The
+        # primary-only fences live in the primary branch above.)
+        bad_flags.extend(
+            plan_disagreements(lane_entry, recovery_doc, recovery_record,
+                               primary=False))
         if bad_flags:
             reason = "recovery result invalid: " + "; ".join(bad_flags)
             adjudication.lane_fail(lane, reason)
