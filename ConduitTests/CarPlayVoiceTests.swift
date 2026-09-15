@@ -162,7 +162,6 @@ final class CarPlayVoiceTemplateFactoryTests: XCTestCase {
     }
 
     func testActionButtonsAreMinimalAndStateAppropriate() throws {
-        #if compiler(>=6.3)
         guard #available(iOS 26.4, *) else {
             throw XCTSkip("CarPlay action buttons require iOS 26.4")
         }
@@ -179,9 +178,6 @@ final class CarPlayVoiceTemplateFactoryTests: XCTestCase {
         XCTAssertEqual(buttonsByID["processing"]?.count, 1)
         XCTAssertEqual(buttonsByID["responding"]?.count, 1)
         XCTAssertEqual(buttonsByID["error"]?.count, 1, "Error offers Listen to retry")
-        #else
-        throw XCTSkip("CarPlay action buttons require the Xcode 26.4 SDK or later")
-        #endif
     }
 }
 
