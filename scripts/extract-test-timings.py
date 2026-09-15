@@ -663,9 +663,9 @@ def aggregate(args) -> int:
                    for a in res.get("attempts", [])):
                 affected = "whole lane (timeout path - no per-test scope)"
             else:
-                affected = ", ".join(
-                    "`" + c + "`"
-                    for c in res.get("infra_recovered_classes", [])) or "none"
+                affected = (wedge.get("affected_classes")
+                            or res.get("infra_recovered_classes") or [])
+                affected = ", ".join("`" + c + "`" for c in affected) or "none"
             lines.append(
                 f"- **CoreAudio infrastructure wedge detected** [{name}]: "
                 f"AURemoteIO -10851 x{signals.get('auremoteio_10851', '?')}, "

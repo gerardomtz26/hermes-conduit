@@ -887,6 +887,19 @@ WEDGE_EOF
   echo "::warning::CoreAudio host wedge detected in lane $LANE: AURemoteIO -10851 occurrences: ${SIG_AURIOC}, HALC overload skips: ${SIG_HALC}"
   echo "::warning::affected tests: $(printf '%s ' $AFFECTED_CLASSES)"
   echo "action: resetting simulator and retrying affected tests"
+  # Stamp the retry scope into the incident record: a red wedge-retry lane
+  # must still name what the recovery attempted.
+  python3 -c "
+import json, sys
+path, scope = sys.argv[1], sys.argv[2]
+with open(path, encoding='utf-8') as fh:
+    doc = json.load(fh)
+doc['affected_classes'] = scope.split()
+with open(path, 'w', encoding='utf-8', newline='
+') as fh:
+    fh.write(json.dumps(doc, indent=2, sort_keys=True) + '
+')
+" "$COREAUDIO_WEDGE_JSON" "$AFFECTED_CLASSES" 2>/dev/null || true
 
   # The attempt-1 extraction already sits in observations.json/detail.json;
   # move it into parts/ so the post-retry merge-parts fold keeps attempt-1

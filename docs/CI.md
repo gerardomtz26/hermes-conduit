@@ -225,7 +225,7 @@ the rest of CI v2.
    margins fails closed, and thresholds are flag-overridable for
    recalibration, and the lane runner honors the
    `COREAUDIO_WEDGE_MIN_AURIOC` / `COREAUDIO_WEDGE_MIN_HALC` environment
-   variables (defaults 150 / 20) for the same purpose. There is deliberately NO test-class allowlist: any
+   variables (defaults 150 / 10) for the same purpose. There is deliberately NO test-class allowlist: any
    failed test may be poisoned by the host, and growing an allowlist per
    failing class would recreate the classification bug this domain
    exists to fix.
