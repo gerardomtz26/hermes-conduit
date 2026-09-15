@@ -35,9 +35,13 @@ enum CarPlayVoiceTemplateFactory {
             image: nil,
             repeats: false
         )
+        // Xcode 26.4 (Swift 6.3) introduced this SDK member. A runtime
+        // availability check alone cannot compile against older SDKs.
+        #if compiler(>=6.3)
         if #available(iOS 26.4, *) {
             voiceControlState.actionButtons = actionButtons(for: state, handlers: handlers)
         }
+        #endif
         return voiceControlState
     }
 

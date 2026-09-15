@@ -612,10 +612,19 @@ final class ConnectionRepairTests: XCTestCase {
         harness.appState.loadSavedConnection()
         await fulfillment(of: [connected], timeout: 2)
 
+        // The transport hook fires before connect() finishes restoring the
+        // session. Credential cleanup happens only after that work returns.
+        let cleanupDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while KeychainHelper.loadCredentials(dashboardID: dashboardID) != nil,
+              ContinuousClock.now < cleanupDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
+
         XCTAssertEqual(mintedBaseURL, ConnectionRepairTests.failedURL)
         XCTAssertTrue(harness.appState.isConnected)
         XCTAssertEqual(harness.appState.connection?.ticket, "native-ticket")
-        XCTAssertNil(KeychainHelper.loadCredentials(dashboardID: dashboardID))
+        XCTAssertTrue(KeychainHelper.loadCredentials(dashboardID: dashboardID) == nil,
+                      "Successful OAuth restoration must clear saved password credentials")
     }
 
     // MARK: - Race: explicit repair outranks late automatic recovery (spec 26)

@@ -9,6 +9,7 @@
 import CryptoKit
 import Foundation
 import Network
+import OSLog
 import SafariServices
 import Security
 import SwiftUI
@@ -671,6 +672,8 @@ final class NativeOAuthLoopbackServer: @unchecked Sendable {
     }
 }
 
+private let nativeOAuthLogger = Logger(subsystem: "com.milim.relay", category: "native-oauth")
+
 @MainActor
 final class NativeOAuthLoginModel: ObservableObject {
     @Published private(set) var authorizeURL: URL?
@@ -716,6 +719,7 @@ final class NativeOAuthLoginModel: ObservableObject {
             self.server = nil
         }
         let port = try await server.start()
+        nativeOAuthLogger.notice("OAuth stage: listener ready")
         let redirectURI = "http://127.0.0.1:\(port)/callback"
         authorizeURL = try NativeOAuthFlow.authorizeURL(
             baseURL: baseURL,
@@ -725,9 +729,11 @@ final class NativeOAuthLoginModel: ObservableObject {
             provider: provider
         )
         let code = try await server.waitForCallback()
+        nativeOAuthLogger.notice("OAuth stage: callback validated")
         let client = NativeOAuthAPIClient(baseURL: baseURL, cloudflareAccess: cloudflareAccess)
         let previousTokens = KeychainHelper.loadNativeOAuthTokens(dashboardID: dashboardID)
         let tokens = try await client.exchange(code: code, verifier: pkce.verifier)
+        nativeOAuthLogger.notice("OAuth stage: token exchange succeeded")
         KeychainHelper.saveNativeOAuthTokens(tokens, dashboardID: dashboardID)
         guard KeychainHelper.loadNativeOAuthTokens(dashboardID: dashboardID) == tokens else {
             if let previousTokens {
@@ -739,6 +745,7 @@ final class NativeOAuthLoginModel: ObservableObject {
         }
         let session = NativeOAuthSession(tokens: tokens, dashboardID: dashboardID, client: client)
         let ticket = try await session.mintTicket()
+        nativeOAuthLogger.notice("OAuth stage: ticket minted")
         let current = KeychainHelper.loadNativeOAuthTokens(dashboardID: dashboardID) ?? tokens
         return NativeOAuthLoginResult(tokens: current, ticket: ticket, previousTokens: previousTokens)
     }
@@ -759,55 +766,110 @@ struct NativeOAuthSignInSheet: View {
     @StateObject private var model = NativeOAuthLoginModel()
 
     var body: some View {
-        Group {
-            if let url = model.authorizeURL {
-                SafariAuthenticationView(url: url) {
-                    model.cancel()
-                    dismiss()
-                }
-                    .ignoresSafeArea()
-            } else {
-                ProgressView("Preparing secure sign-in…")
-            }
-        }
-        .task {
-            do {
-                let result = try await model.run(
+        // Keep one representable alive while authorizeURL changes and Safari
+        // covers this sheet. Visibility changes are not OAuth cancellation.
+        SafariAuthenticationView(
+            url: model.authorizeURL,
+            operation: {
+                try await model.run(
                     baseURL: baseURL,
                     cloudflareAccess: cloudflareAccess,
                     provider: provider,
                     dashboardID: dashboardID
                 )
+            },
+            onSuccess: { result in
                 onSuccess(result)
                 dismiss()
-            } catch is CancellationError {
-                dismiss()
-            } catch {
+            },
+            onError: { error in
                 onError(error)
                 dismiss()
-            }
-        }
-        .onDisappear { model.cancel() }
+            },
+            onCancel: { dismiss() }
+        )
+        .ignoresSafeArea()
     }
 }
 
-private struct SafariAuthenticationView: UIViewControllerRepresentable {
-    let url: URL
-    let onCancel: () -> Void
+/// Owns the operation until the representable is actually dismantled, not
+/// merely covered by Safari or its password UI.
+@MainActor
+final class NativeOAuthPresentationTask {
+    private var task: Task<Void, Never>?
+    private var started = false
+    private var cancelled = false
 
-    func makeUIViewController(context: Context) -> SafariPresenterViewController {
-        SafariPresenterViewController(url: url, onCancel: onCancel)
+    func start(
+        operation: @escaping @MainActor () async throws -> NativeOAuthLoginResult,
+        onSuccess: @escaping @MainActor (NativeOAuthLoginResult) -> Void,
+        onError: @escaping @MainActor (Error) -> Void
+    ) {
+        guard !started, !cancelled else { return }
+        started = true
+        task = Task { [weak self] in
+            do {
+                let result = try await operation()
+                guard !Task.isCancelled, self?.cancelled == false else { return }
+                onSuccess(result)
+            } catch is CancellationError {
+                nativeOAuthLogger.notice("OAuth stage: cancelled")
+            } catch {
+                guard !Task.isCancelled, self?.cancelled == false else { return }
+                onError(error)
+            }
+            self?.task = nil
+        }
     }
 
-    func updateUIViewController(_ uiViewController: SafariPresenterViewController, context: Context) {}
+    func cancel() {
+        cancelled = true
+        task?.cancel()
+        task = nil
+    }
+
+    deinit { task?.cancel() }
+}
+
+private struct SafariAuthenticationView: UIViewControllerRepresentable {
+    let url: URL?
+    let operation: @MainActor () async throws -> NativeOAuthLoginResult
+    let onSuccess: @MainActor (NativeOAuthLoginResult) -> Void
+    let onError: @MainActor (Error) -> Void
+    let onCancel: () -> Void
+
+    func makeCoordinator() -> NativeOAuthPresentationTask {
+        NativeOAuthPresentationTask()
+    }
+
+    func makeUIViewController(context: Context) -> SafariPresenterViewController {
+        let controller = SafariPresenterViewController(onCancel: {
+            nativeOAuthLogger.notice("OAuth stage: user cancelled browser")
+            context.coordinator.cancel()
+            onCancel()
+        })
+        context.coordinator.start(operation: operation, onSuccess: onSuccess, onError: onError)
+        return controller
+    }
+
+    func updateUIViewController(_ controller: SafariPresenterViewController, context: Context) {
+        controller.setAuthorizeURL(url)
+    }
+
+    static func dismantleUIViewController(
+        _ controller: SafariPresenterViewController,
+        coordinator: NativeOAuthPresentationTask
+    ) {
+        nativeOAuthLogger.notice("OAuth stage: sign-in view removed")
+        coordinator.cancel()
+    }
 
     final class SafariPresenterViewController: UIViewController, SFSafariViewControllerDelegate {
-        private let url: URL
+        private var url: URL?
         private let onCancel: () -> Void
         private var safariViewController: SFSafariViewController?
 
-        init(url: URL, onCancel: @escaping () -> Void) {
-            self.url = url
+        init(onCancel: @escaping () -> Void) {
             self.onCancel = onCancel
             super.init(nibName: nil, bundle: nil)
         }
@@ -817,9 +879,32 @@ private struct SafariAuthenticationView: UIViewControllerRepresentable {
             fatalError("init(coder:) has not been implemented")
         }
 
+        override func viewDidLoad() {
+            super.viewDidLoad()
+            view.backgroundColor = .systemBackground
+            let spinner = UIActivityIndicatorView(style: .large)
+            spinner.translatesAutoresizingMaskIntoConstraints = false
+            view.addSubview(spinner)
+            NSLayoutConstraint.activate([
+                spinner.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+                spinner.centerYAnchor.constraint(equalTo: view.centerYAnchor)
+            ])
+            spinner.startAnimating()
+        }
+
+        func setAuthorizeURL(_ url: URL?) {
+            self.url = url
+            presentSafariIfReady()
+        }
+
         override func viewDidAppear(_ animated: Bool) {
             super.viewDidAppear(animated)
-            guard safariViewController == nil else { return }
+            presentSafariIfReady()
+        }
+
+        private func presentSafariIfReady() {
+            guard let url, viewIfLoaded?.window != nil,
+                  safariViewController == nil, presentedViewController == nil else { return }
             let configuration = SFSafariViewController.Configuration()
             configuration.entersReaderIfAvailable = false
             configuration.barCollapsingEnabled = false
@@ -827,7 +912,9 @@ private struct SafariAuthenticationView: UIViewControllerRepresentable {
             safari.delegate = self
             safari.modalPresentationStyle = .fullScreen
             safariViewController = safari
-            present(safari, animated: true)
+            present(safari, animated: true) {
+                nativeOAuthLogger.notice("OAuth stage: Safari presented")
+            }
         }
 
         func safariViewControllerDidFinish(_ controller: SFSafariViewController) {

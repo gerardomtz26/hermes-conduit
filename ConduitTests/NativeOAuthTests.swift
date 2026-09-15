@@ -89,7 +89,7 @@ final class NativeOAuthTests: XCTestCase {
             redirectURI: "http://127.0.0.1:49152/callback",
             state: "state"
         )
-        XCTAssertFalse(try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false).queryItems)
+        XCTAssertFalse(try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
             .contains { $0.name == "provider" })
     }
 
@@ -459,5 +459,73 @@ final class NativeOAuthTests: XCTestCase {
         XCTAssertEqual(calls, 1)
         XCTAssertEqual(KeychainHelper.loadNativeOAuthTokens(dashboardID: dashboardID), initial)
         session.invalidate()
+    }
+}
+
+@MainActor
+final class NativeOAuthPresentationTaskTests: XCTestCase {
+    private func result() -> NativeOAuthLoginResult {
+        NativeOAuthLoginResult(
+            tokens: NativeOAuthTokenSet(accessToken: "test-access", refreshToken: "test-refresh",
+                                       expiresAt: 0, provider: "test", userID: "test"),
+            ticket: "test-ticket", previousTokens: nil
+        )
+    }
+
+    func testRepeatedPresentationUpdatesDoNotRestartSignIn() async {
+        let owner = NativeOAuthPresentationTask()
+        let completed = expectation(description: "one sign-in completed")
+        var starts = 0
+        for _ in 0..<3 {
+            owner.start(operation: {
+                starts += 1
+                await Task.yield()
+                return self.result()
+            }, onSuccess: { _ in completed.fulfill() }, onError: { _ in XCTFail("Unexpected failure") })
+        }
+        await fulfillment(of: [completed], timeout: 2)
+        XCTAssertEqual(starts, 1)
+    }
+
+    func testDismantlingCancelsTheWaitingLoopbackOperation() async {
+        let owner = NativeOAuthPresentationTask()
+        let server = NativeOAuthLoopbackServer(expectedState: "test-state")
+        let listening = expectation(description: "listener ready")
+        let cancelled = expectation(description: "listener wait cancelled")
+        owner.start(operation: {
+            _ = try await server.start()
+            listening.fulfill()
+            do {
+                _ = try await server.waitForCallback()
+                XCTFail("Unexpected callback")
+                return self.result()
+            } catch is CancellationError {
+                cancelled.fulfill()
+                throw CancellationError()
+            }
+        }, onSuccess: { _ in XCTFail("Cancelled flow must not succeed") },
+           onError: { _ in XCTFail("Cancellation must not display an error") })
+        await fulfillment(of: [listening], timeout: 2)
+        owner.cancel()
+        await fulfillment(of: [cancelled], timeout: 2)
+    }
+
+    func testCancellationSuppressesLateCompletion() async {
+        let owner = NativeOAuthPresentationTask()
+        let started = expectation(description: "operation started")
+        let returned = expectation(description: "operation returned after cancellation")
+        var continuation: CheckedContinuation<Void, Never>?
+        var delivered = false
+        owner.start(operation: {
+            await withCheckedContinuation { continuation = $0; started.fulfill() }
+            returned.fulfill()
+            return self.result()
+        }, onSuccess: { _ in delivered = true }, onError: { _ in delivered = true })
+        await fulfillment(of: [started], timeout: 2)
+        owner.cancel()
+        continuation?.resume()
+        await fulfillment(of: [returned], timeout: 2)
+        await Task.yield()
+        XCTAssertFalse(delivered)
     }
 }

@@ -408,7 +408,7 @@ final class NativeAuthClient {
         let holder = URLSessionTaskHolder()
         return try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
-                let task = session.dataTask(with: request) { data, response, error in
+                let task = session.dataTask(with: request) { [redirectDelegate] data, response, error in
                     let redirectCookies = redirectDelegate.takeCookies(
                         for: holder.taskIdentifier
                     )
