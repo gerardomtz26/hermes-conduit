@@ -2619,10 +2619,10 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func restoreNativeOAuthConnection(baseURL: String, dashboardID: UUID) async {
+    func restoreNativeOAuthConnection(baseURL: String, dashboardID: UUID) async {
         do {
             let ticket = try await mintChatResumeTicket(for: HermesConnection(baseUrl: baseURL, ticket: ""))
-            await connect(with: HermesConnection(baseUrl: baseURL, ticket: ticket))
+            await connect(with: HermesConnection(baseUrl: baseURL, ticket: ticket), profile: activeProfile)
             if isConnected {
                 KeychainHelper.clearCredentials(dashboardID: dashboardID)
                 KeychainHelper.clearDashboardCookies(dashboardID: dashboardID)
@@ -2630,6 +2630,10 @@ final class AppState: ObservableObject {
         } catch is CancellationError {
             isConnecting = false
         } catch {
+            // A rejected grant can clear storage while the bridge still owns
+            // its old in-memory session. Tear it down before presenting login.
+            dashboardTicketBridge?.invalidate()
+            dashboardTicketBridge = nil
             isConnecting = false
             isConnected = false
             showLogin = true
@@ -3514,16 +3518,16 @@ final class AppState: ObservableObject {
         return true
     }
 
-    private func prepareDashboardBridge(for baseUrl: String) {
+    func prepareDashboardBridge(for baseUrl: String) {
         let normalized = baseUrl.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let access = dashboardScopedCloudflareAccess(for: normalized)
         let dashboardID = resolveDashboardID(forURL: normalized, registerIfMissing: false)
-        let shouldUseNativeOAuth = dashboardID.flatMap {
+        let storedNativeOAuthTokens = dashboardID.flatMap {
             KeychainHelper.loadNativeOAuthTokens(dashboardID: $0)
-        } != nil
+        }
         if dashboardTicketBridge?.baseURL != normalized
             || dashboardTicketBridge?.cloudflareAccess != access
-            || dashboardTicketBridge?.usesNativeOAuth != shouldUseNativeOAuth {
+            || dashboardTicketBridge?.matchesNativeOAuthTokens(storedNativeOAuthTokens) != true {
             dashboardTicketBridge?.invalidate()
             dashboardTicketBridge = DashboardTicketBridge(
                 baseURL: normalized,

@@ -346,6 +346,11 @@ final class NativeOAuthSession {
         self.client = client
     }
 
+    /// Compares the live grant without exposing it to callers or diagnostics.
+    func matchesStoredTokens(_ storedTokens: NativeOAuthTokenSet) -> Bool {
+        !isInvalidated && tokens == storedTokens
+    }
+
     func invalidate() {
         isInvalidated = true
         refreshTask?.cancel()
@@ -427,9 +432,10 @@ final class NativeOAuthSession {
             return
         }
         if let refreshTask {
-            let refreshed = try await refreshTask.value
+            // Every waiter observes the same normalized result and persistence
+            // boundary, including rejected grants and invalidation.
+            _ = try await refreshTask.value
             guard !isInvalidated else { throw CancellationError() }
-            tokens = refreshed
             return
         }
         guard !tokens.refreshToken.isEmpty else {
@@ -437,22 +443,25 @@ final class NativeOAuthSession {
             throw DashboardTicketBridgeError.signInRequired
         }
         let current = tokens
-        let task = Task { try await client.refresh(current) }
-        refreshTask = task
-        defer { refreshTask = nil }
-        do {
-            let refreshed = try await task.value
-            guard !isInvalidated else { throw CancellationError() }
-            tokens = refreshed
-            KeychainHelper.saveNativeOAuthTokens(refreshed, dashboardID: dashboardID)
-        } catch NativeOAuthError.requestFailed(let status) where status == 400 || status == 401 {
-            if !isInvalidated {
-                KeychainHelper.clearNativeOAuthTokens(dashboardID: dashboardID)
+        let task = Task { @MainActor in
+            defer { self.refreshTask = nil }
+            do {
+                let refreshed = try await self.client.refresh(current)
+                guard !self.isInvalidated else { throw CancellationError() }
+                self.tokens = refreshed
+                KeychainHelper.saveNativeOAuthTokens(refreshed, dashboardID: self.dashboardID)
+                return refreshed
+            } catch NativeOAuthError.requestFailed(let status) where status == 400 || status == 401 {
+                guard !self.isInvalidated else { throw CancellationError() }
+                KeychainHelper.clearNativeOAuthTokens(dashboardID: self.dashboardID)
+                throw DashboardTicketBridgeError.signInRequired
+            } catch let error as URLError where error.code == .cancelled && self.isInvalidated {
+                throw CancellationError()
             }
-            throw DashboardTicketBridgeError.signInRequired
-        } catch let error as URLError where error.code == .cancelled && isInvalidated {
-            throw CancellationError()
         }
+        refreshTask = task
+        _ = try await task.value
+        guard !isInvalidated else { throw CancellationError() }
     }
 }
 

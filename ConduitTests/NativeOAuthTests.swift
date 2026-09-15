@@ -374,10 +374,54 @@ final class NativeOAuthTests: XCTestCase {
 
         let response = try await session.requestJSON(path: "/api/status")
 
+        XCTAssertTrue(session.matchesStoredTokens(try XCTUnwrap(KeychainHelper.loadNativeOAuthTokens(dashboardID: dashboardID))))
         XCTAssertEqual(response["ok"] as? Bool, true)
         XCTAssertEqual(apiCalls, 2)
         XCTAssertEqual(refreshCalls, 1)
         XCTAssertEqual(KeychainHelper.loadNativeOAuthTokens(dashboardID: dashboardID)?.accessToken, "new-access")
+        session.invalidate()
+    }
+
+    @MainActor
+    func testConcurrentRejectedRefreshCallersBothRequireSignIn() async {
+        let id = UUID()
+        let expired = tokens(expiresAt: 1)
+        KeychainHelper.saveNativeOAuthTokens(expired, dashboardID: id)
+        let refreshStarted = expectation(description: "refresh is in flight")
+        let releaseRefresh = DispatchSemaphore(value: 0)
+        NativeOAuthURLProtocolStub.handler = { _ in
+            refreshStarted.fulfill()
+            guard releaseRefresh.wait(timeout: .now() + 5) == .success else {
+                throw URLError(.timedOut)
+            }
+            return (401, ["detail": "rejected"])
+        }
+        let session = NativeOAuthSession(tokens: expired, dashboardID: id, client: makeClient())
+        func request() async -> Bool {
+            do {
+                _ = try await session.requestJSON(path: "/api/status")
+                return false
+            } catch DashboardTicketBridgeError.signInRequired {
+                return true
+            } catch {
+                return false
+            }
+        }
+        let first = Task { await request() }
+        await fulfillment(of: [refreshStarted], timeout: 2)
+        let waiterStarted = expectation(description: "second caller joined")
+        let second = Task { @MainActor in
+            waiterStarted.fulfill()
+            return await request()
+        }
+        // The main-actor waiter reaches its suspension before this test can
+        // resume and release the deliberately pending refresh response.
+        await fulfillment(of: [waiterStarted], timeout: 2)
+        releaseRefresh.signal()
+        let outcomes = await (first.value, second.value)
+        XCTAssertTrue(outcomes.0)
+        XCTAssertTrue(outcomes.1)
+        XCTAssertTrue(KeychainHelper.loadNativeOAuthTokens(dashboardID: id) == nil)
         session.invalidate()
     }
 

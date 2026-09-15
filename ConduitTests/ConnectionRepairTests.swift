@@ -609,6 +609,7 @@ final class ConnectionRepairTests: XCTestCase {
             requiresFaceID: false
         ), dashboardID: dashboardID)
 
+        harness.appState.setActiveProfileForTesting("work")
         harness.appState.loadSavedConnection()
         await fulfillment(of: [connected], timeout: 2)
 
@@ -620,11 +621,47 @@ final class ConnectionRepairTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(10))
         }
 
+        XCTAssertEqual(harness.appState.activeProfile, "work")
         XCTAssertEqual(mintedBaseURL, ConnectionRepairTests.failedURL)
         XCTAssertTrue(harness.appState.isConnected)
         XCTAssertEqual(harness.appState.connection?.ticket, "native-ticket")
         XCTAssertTrue(KeychainHelper.loadCredentials(dashboardID: dashboardID) == nil,
                       "Successful OAuth restoration must clear saved password credentials")
+    }
+
+    func testNativeOAuthBridgeRebuildsAfterSameModeGrantReplacement() throws {
+        let app = makeHarness().appState
+        let id = app.adoptDashboard(forNormalizedURL: Self.failedURL)
+        KeychainHelper.saveNativeOAuthTokens(oauthTokens("old"), dashboardID: id)
+        app.prepareDashboardBridge(for: Self.failedURL)
+        let oldBridge = try XCTUnwrap(app.dashboardTicketBridge)
+        app.prepareDashboardBridge(for: Self.failedURL)
+        XCTAssertTrue(app.dashboardTicketBridge === oldBridge, "Unchanged grants reuse the bridge")
+
+        let replacement = oauthTokens("replacement")
+        KeychainHelper.saveNativeOAuthTokens(replacement, dashboardID: id)
+        app.prepareDashboardBridge(for: Self.failedURL)
+        XCTAssertFalse(app.dashboardTicketBridge === oldBridge)
+        XCTAssertTrue(app.dashboardTicketBridge?.matchesNativeOAuthTokens(replacement) == true)
+        app.dashboardTicketBridge?.invalidate()
+    }
+
+    func testRejectedColdStartDiscardsTheStaleBearerBridge() async throws {
+        let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            mintTicket: { _ in throw DashboardTicketBridgeError.signInRequired }
+        ))
+        let app = harness.appState
+        let id = app.adoptDashboard(forNormalizedURL: Self.failedURL)
+        KeychainHelper.saveNativeOAuthTokens(oauthTokens("rejected"), dashboardID: id)
+        app.prepareDashboardBridge(for: Self.failedURL)
+        XCTAssertTrue(app.dashboardTicketBridge?.usesNativeOAuth == true)
+        // Model the rejected-refresh boundary: storage has been cleared but
+        // the live bridge still owns the previous in-memory session.
+        KeychainHelper.clearNativeOAuthTokens(dashboardID: id)
+        await app.restoreNativeOAuthConnection(baseURL: Self.failedURL, dashboardID: id)
+        XCTAssertNil(app.dashboardTicketBridge)
+        XCTAssertTrue(app.showLogin)
+        XCTAssertFalse(app.isConnected)
     }
 
     // MARK: - Race: explicit repair outranks late automatic recovery (spec 26)

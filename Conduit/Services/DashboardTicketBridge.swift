@@ -330,6 +330,14 @@ final class DashboardTicketBridge: NSObject {
     /// replace this bridge rather than retaining its in-memory session.
     var usesNativeOAuth: Bool { nativeOAuthSession != nil }
 
+    /// A same-mode bridge is reusable only while its live grant still matches
+    /// storage. Internal refresh updates the live grant as well as storage.
+    func matchesNativeOAuthTokens(_ tokens: NativeOAuthTokenSet?) -> Bool {
+        guard let tokens else { return nativeOAuthSession == nil }
+        return nativeOAuthSession?.matchesStoredTokens(tokens) == true
+    }
+
+
     private var isReady = false
     /// Whether the current dashboard page load has terminally failed (as
     /// opposed to still being in flight on a slow link). Retry logic only
