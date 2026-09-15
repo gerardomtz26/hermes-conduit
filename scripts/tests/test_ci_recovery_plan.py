@@ -147,8 +147,7 @@ class RecoveryPlanTests(unittest.TestCase):
             hung = lane_doc("unit-1", status="timeout",
                             attempts=[{"mode": "lane", "n": 1,
                                        "status": "timeout"},
-                                      {"mode": "isolation", "status": "hung"}],
-                            )
+                                      {"mode": "isolation", "status": "hung"}])
             hung["hung_class"] = "AlphaTests"
             proc, matrix = run_plan(tmp, lanes=[
                 embed(hung),

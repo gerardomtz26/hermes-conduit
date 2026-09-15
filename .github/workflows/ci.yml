@@ -348,7 +348,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: unit-recovery-matrix
+          name: unit-recovery-matrix-attempt-${{ github.run_attempt }}
           path: ci-recovery/unit-recovery-matrix.json
           retention-days: 7
           if-no-files-found: error
@@ -597,7 +597,9 @@ jobs:
           path: ci-gate/lanes
 
       - name: Download fresh-runner recovery results
-        if: needs.unit-recovery-plan.outputs.recovery-count != '0'
+        if: >-
+          needs.unit-recovery-plan.result == 'success' &&
+          needs.unit-recovery-plan.outputs.recovery-count != '0'
         continue-on-error: true
         uses: actions/download-artifact@v4
         with:

@@ -541,7 +541,7 @@ def _lane_recovery_rows(name, res, recovery_doc):
     if recovery_class == ci_lane_recovery.CLASS_PASS:
         lines.append("  - final: recovered infrastructure PASS")
     else:
-        lines.append(f"  - final: FAIL")
+        lines.append("  - final: FAIL")
     return lines
 
 

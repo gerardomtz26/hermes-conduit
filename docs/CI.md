@@ -259,11 +259,17 @@ the rest of CI v2.
      accepted; recoverable stall + exactly one fresh-runner pass ->
      accepted (reported as a recovered infrastructure PASS); recoverable
      with the recovery missing/failing/timing out -> FAIL; test failures,
-     unclassifiable, unplanned, duplicate, or malformed results -> FAIL.
-     The raw `needs.unit.result` is no longer the unit truth - a lane red
-     for infrastructure that passed on its one fresh-runner retry is a
+     unclassifiable, unplanned, or malformed results -> FAIL. The
+     recovery result must itself agree with the plan (same target,
+     membership, watchdog) and carry its own embedded classification -
+     both re-derived and cross-checked, failing closed on mismatch. The
+     raw `needs.unit.result` is no longer the unit truth - a lane red for
+     infrastructure that passed on its one fresh-runner retry is a
      recovered PASS, and every planned lane still needs exactly one
-     accepted disposition.
+     accepted disposition. Re-running a FAILED recovery leg follows the
+     repo's usual re-run policy: the newest attempt's artifact supersedes
+     the older one, and only genuinely ambiguous duplicates (same stamp,
+     differing documents) fail closed.
    * Timing history stays conservative: the main-only update runs behind
      the same per-lane adjudication, merges only lanes whose PRIMARY
      result is a clean pass, and excludes the stalled invocation's

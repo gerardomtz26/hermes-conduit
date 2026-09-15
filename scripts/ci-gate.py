@@ -34,13 +34,20 @@ plan (scripts/ci_lane_recovery.py):
   original unknown/unclassifiable or
     plan disagreement                    -> FAIL (fail closed)
   fresh-runner result for an unplanned
-    lane, or duplicates                  -> FAIL
+    lane, or ambiguous duplicates        -> FAIL
 
 Every planned lane must end with exactly one accepted disposition; missing
 lanes, unreadable/malformed artifacts, and recovery results outside the
 plan fail closed. A raw needs.unit.result == "failure" therefore does NOT
 by itself fail the gate: a lane red for infrastructure that passed on its
 one fresh-runner retry is a recovered PASS.
+
+Duplicates: within one attempt the workflow structurally produces at most
+one recovery result per lane. A sanctioned re-run of a FAILED recovery leg
+uploads a new attempt artifact, and the newest finished_at supersedes the
+older one - the same rule the primary lane results follow. Only genuinely
+ambiguous duplicates (identical finished_at, differing documents) fail
+closed.
 """
 
 from __future__ import annotations

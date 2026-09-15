@@ -349,6 +349,33 @@ class GateWorldTests(unittest.TestCase):
             self.assertNotEqual(proc.returncode, 0)
             self.assertIn("re-derived", proc.stdout)
 
+    def test_recovery_disagreeing_with_plan_fails_gate(self):
+        # A recovery that executed the wrong membership never satisfies the
+        # lane's coverage, even when it passed.
+        with tempfile.TemporaryDirectory() as tmp:
+            stalled = lane_doc("unit-2", cls="BetaTests", status="timeout",
+                               attempts=STALL_ATTEMPTS)
+            world = standard_world(tmp, embed(lane_doc("unit-1")),
+                                   embed(stalled))
+            wrong = lane_doc("unit-2", cls="GammaTests")
+            world.recovery(embed(wrong, fresh=True))
+            proc = run_gate(world, unit="failure", recovery="success")
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("differs from the plan", proc.stdout)
+
+    def test_recovery_without_embedded_metadata_fails_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stalled = lane_doc("unit-2", cls="BetaTests", status="timeout",
+                               attempts=STALL_ATTEMPTS)
+            world = standard_world(tmp, embed(lane_doc("unit-1")),
+                                   embed(stalled))
+            bare = lane_doc("unit-2", cls="BetaTests")
+            bare["fresh_runner_recovery"] = True  # flag but no recovery block
+            world.recovery(bare)
+            proc = run_gate(world, unit="failure", recovery="success")
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("no embedded classification", proc.stdout)
+
     # 12. a fresh-runner retry can never be recovery-eligible again
     def test_fresh_retry_stall_is_nonrecoverable(self):
         stalled = lane_doc("unit-1", status="timeout",

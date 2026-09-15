@@ -83,15 +83,27 @@ def lane_disagrees(entry: dict, doc: dict, record) -> list:
 
 def recovery_matrix_entry(plan: dict, lane: str) -> dict:
     """The COMPLETE original lane inputs for one lane, rebuilt from the
-    plan (same shape as plan-tests.py matrix_json)."""
-    entry = next(e for e in plan["unit_lanes"] if e.get("lane") == lane)
-    estimates = ",".join(
-        "{0}={1:.1f}".format(c, plan["estimates"][c]) for c in entry["classes"])
+    plan (same shape as plan-tests.py matrix_json). A plan entry missing
+    any required field fails closed with a precise message instead of a
+    traceback."""
+    entry = next((e for e in plan["unit_lanes"] if e.get("lane") == lane), None)
+    if entry is None:
+        raise ValueError(f"plan has no entry for lane {lane!r}")
+    estimates = plan.get("estimates")
+    missing = [c for c in entry.get("classes", [])
+               if not isinstance(estimates, dict) or c not in estimates]
+    if missing:
+        raise ValueError(
+            f"plan is missing estimates for classes: {', '.join(missing)}")
+    for field in ("target", "predicted_s", "timeout_s", "job_timeout_min"):
+        if entry.get(field) is None:
+            raise ValueError(f"plan entry for lane {lane!r} lacks {field!r}")
     return {
         "lane": entry["lane"],
         "target": entry["target"],
         "classes": ",".join(entry["classes"]),
-        "class_estimates": estimates,
+        "class_estimates": ",".join(
+            "{0}={1:.1f}".format(c, estimates[c]) for c in entry["classes"]),
         "predicted_s": entry["predicted_s"],
         "timeout_s": entry["timeout_s"],
         "job_timeout_min": entry["job_timeout_min"],
@@ -162,7 +174,12 @@ def main(argv=None) -> int:
             continue
         print(f"lane {lane}: {classification} ({reason})")
         if classification == ci_lane_recovery.CLASS_RECOVERABLE_TIMEOUT_ZERO_FAILURES:
-            include.append(recovery_matrix_entry(plan, lane))
+            try:
+                include.append(recovery_matrix_entry(plan, lane))
+            except ValueError as exc:
+                fail(str(exc) + " - failing closed")
+                failed_closed = True
+                continue
 
     if failed_closed:
         return EXIT_FAIL_CLOSED

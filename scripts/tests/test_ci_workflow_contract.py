@@ -80,6 +80,10 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn(
             "matrix: ${{ fromJSON(needs.unit-recovery-plan.outputs.matrix) }}",
             recovery)
+        # The per-entry watchdog budget comes from the planner; without this
+        # pin a dropped matrix field would fail as an invalid-bool job error.
+        self.assertIn("timeout-minutes: ${{ matrix.job_timeout_min }}",
+                      recovery)
         self.assertIn("fail-fast: false", recovery)
         # Same commit + shared products: checkout has no ref, and the job
         # downloads build-products instead of rebuilding.

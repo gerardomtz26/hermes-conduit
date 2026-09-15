@@ -385,7 +385,7 @@ def adjudicate_unit_lanes(plan_doc, unit_docs, recovery_docs):
             continue
         planned_lanes.append(lane)
 
-    recovery_lanes = set(recovery_docs) if recovery_docs else set()
+    recovery_lanes = set(recovery_docs or {})
 
     for lane_entry in plan_doc["unit_lanes"]:
         lane = lane_entry.get("lane")
@@ -512,6 +512,30 @@ def adjudicate_unit_lanes(plan_doc, unit_docs, recovery_docs):
                 f"{recovery_record.artifact_lane!r}")
         if not recovery_record.is_recovery_artifact:
             bad_flags.append("uploaded outside a lane-recovery-* artifact")
+        # The recovery must ALSO agree with the plan: same target, same
+        # membership, same watchdog, same schema. A recovery that executed
+        # anything else never satisfies the lane's coverage.
+        recovery_mismatches = []
+        if recovery_doc.get("kind") != "unit":
+            recovery_mismatches.append(
+                f"kind {recovery_doc.get('kind')!r} != 'unit'")
+        if not _classes_match(lane_entry.get("classes", []),
+                              recovery_doc.get("classes")):
+            recovery_mismatches.append("lane membership differs from the plan")
+        if recovery_doc.get("target") != lane_entry.get("target"):
+            recovery_mismatches.append(
+                f"target {recovery_doc.get('target')!r} != planned "
+                f"{lane_entry.get('target')!r}")
+        if not _numbers_match(recovery_doc.get("timeout_s"),
+                              lane_entry.get("timeout_s")):
+            recovery_mismatches.append("watchdog budget differs from the plan")
+        if recovery_doc.get("schema_version") != _LANE_RESULT_SCHEMA_VERSION:
+            recovery_mismatches.append(
+                f"schema_version {recovery_doc.get('schema_version')!r} != "
+                f"{_LANE_RESULT_SCHEMA_VERSION}")
+        if recovery_mismatches:
+            bad_flags.append("recovery result disagrees with the plan: "
+                             + "; ".join(recovery_mismatches))
         if bad_flags:
             reason = "recovery result invalid: " + "; ".join(bad_flags)
             adjudication.lane_fail(lane, reason)
@@ -522,7 +546,15 @@ def adjudicate_unit_lanes(plan_doc, unit_docs, recovery_docs):
 
         recovery_class, recovery_reason = classify_lane_result(recovery_doc)
         recovery_embedded = embedded_classification(recovery_doc)
-        if recovery_embedded not in (None, recovery_class):
+        if recovery_embedded is None:
+            reason = ("recovery result predates recovery metadata "
+                      "(no embedded classification; fail closed)")
+            adjudication.lane_fail(lane, reason)
+            disposition["recovery"] = "invalid"
+            disposition["recovery_detail"] = reason
+            adjudication.dispositions.append(disposition)
+            continue
+        if recovery_embedded != recovery_class:
             reason = (f"recovery result embedded classification "
                       f"{recovery_embedded!r} != re-derived "
                       f"{recovery_class!r} (fail closed)")
