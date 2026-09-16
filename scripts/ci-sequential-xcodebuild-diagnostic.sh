@@ -61,6 +61,11 @@ LOG_DIR="$RESULT_DIR/logs"
 mkdir -p "$LOG_DIR"
 RECORDS_JSONL="$RESULT_DIR/seq-records.jsonl"
 : > "$RECORDS_JSONL"
+SEQ_N=0
+SEQ_FAILED=0
+SEQ_RECORDS=""
+SEQ_COMPLETED=0
+STARTED_AT=""
 build_destination
 disable_pasteboard_sync
 
@@ -135,7 +140,7 @@ with open(sys.argv[7], 'a', encoding='utf-8', newline='\n') as fh:
 " "$1" "$status_name" "$4" "$5" "$3" "$2" "$RECORDS_JSONL" || \
     echo "::error::could not record invocation result for $1"
   if [ "$4" -ne 0 ]; then
-    SEQ_FAILED=$(( SEQ_FAILED + 1 ))
+    SEQ_FAILED=$(( ${SEQ_FAILED:-0} + 1 ))
   fi
 }
 
