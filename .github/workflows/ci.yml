@@ -92,7 +92,8 @@ jobs:
           # Cheap Linux guard: every discovered XCTestCase class must be
           # planned exactly once (replaces the static shard-coverage check).
           python3 scripts/plan-tests.py validate --repo-root . \
-            --baseline scripts/test-timings.json $HISTORY_ARG
+            --baseline scripts/test-timings.json $HISTORY_ARG \
+            --unit-lanes-override scripts/diagnostic-unit-split.json
           python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 
       - name: Localization catalog coverage
@@ -112,11 +113,16 @@ jobs:
           mkdir -p ci-artifacts
           python3 scripts/plan-tests.py plan --repo-root . \
             --baseline scripts/test-timings.json $HISTORY_ARG \
+            --unit-lanes-override scripts/diagnostic-unit-split.json \
             --out ci-artifacts/plan.json \
             --matrix-out ci-artifacts/unit-matrix.json \
             --ui-matrix-out ci-artifacts/ui-matrix.json \
             --summary-out ci-artifacts/plan-summary.md
-          echo "matrix=$(jq -c . ci-artifacts/unit-matrix.json)" >> "$GITHUB_OUTPUT"
+          # DIAGNOSTIC ONLY: strategy.exclude cannot remove include-only
+          # matrix entries (GitHub processes exclude before include), so the
+          # two bisect halves are filtered out of the MATRIX output here.
+          # plan.json (downloaded by unit-seq-diagnostic) keeps all 8 lanes.
+          echo "matrix=$(jq -c '.include |= map(select(.lane != "unit-5a1" and .lane != "unit-5a2"))' ci-artifacts/unit-matrix.json)" >> "$GITHUB_OUTPUT"
           echo "lane-count=$(jq -r '.lane_count' ci-artifacts/plan.json)" >> "$GITHUB_OUTPUT"
           echo "ui-matrix=$(jq -c . ci-artifacts/ui-matrix.json)" >> "$GITHUB_OUTPUT"
           echo "ui-classes=$(jq -r '[.ui_lanes[].classes[]] | join(",")' ci-artifacts/plan.json)" >> "$GITHUB_OUTPUT"
@@ -276,6 +282,75 @@ jobs:
         with:
           name: lane-${{ matrix.lane }}
           path: ci-lane/
+          retention-days: 7
+          if-no-files-found: error
+
+  unit-seq-diagnostic:
+    # DIAGNOSTIC ONLY (ci/sequential-xcodebuild-stall-diagnostic). One
+    # hosted macos-26 runner, ONE Simulator session, TWO sequential
+    # xcodebuild invocations (unit-5a1, then unit-5a2) with NO erase or
+    # reset between them. Isolates the fresh xcodebuild/testhost boundary
+    # from the fresh-runner boundary that PR #182's 7/7 matrix split
+    # introduced. This job is experiment instrumentation: it is not part
+    # of the CI Gate and its result must be read from seq-result.json.
+    name: "Unit - unit-5a1 + unit-5a2 sequential (one runner)"
+    needs: [plan, build]
+    runs-on: macos-26
+    # Headroom over two full watchdog budgets (each can grow past its 600s
+    # floor with timing history) plus finalize grace and download/boot —
+    # generous on purpose so GitHub is never the first layer to kill the
+    # experiment (the script's own traps own the evidence).
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Download plan
+        uses: actions/download-artifact@v4
+        with:
+          name: plan
+          path: ci-seq/plan
+
+      - name: Download shared build products
+        uses: actions/download-artifact@v4
+        with:
+          name: build-products
+          path: "${{ env.DERIVED_DATA_PATH }}/Build"
+
+      - name: Verify restored .xctestrun paths
+        run: |
+          set -euo pipefail
+          XCRUN_FILE=$(ls -t "$DERIVED_DATA_PATH"/Build/Products/*.xctestrun | head -n 1)
+          echo "XCRUN_FILE=$XCRUN_FILE" >> "$GITHUB_ENV"
+          python3 scripts/plan-tests.py audit-xctestrun \
+            --xctestrun "$XCRUN_FILE" --workspace-root "$GITHUB_WORKSPACE"
+
+      - name: Run unit-5a1 then unit-5a2 sequentially (fresh xcodebuild, same Simulator)
+        env:
+          CONDUIT_PERF_TRACE: "1"
+        run: |
+          bash scripts/ci-sequential-xcodebuild-diagnostic.sh \
+            --plan-json ci-seq/plan/plan.json \
+            --target ConduitTests \
+            --lane-a unit-5a1 \
+            --lane-b unit-5a2 \
+            --xctestrun "$XCRUN_FILE" \
+            --result-dir ci-seq/run
+
+      - name: Dump simulator state (failure diagnostics)
+        if: failure()
+        run: |
+          xcrun simctl list runtimes available || true
+          xcrun simctl list devices available
+
+      - name: Upload sequential diagnostic results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seq-diagnostic
+          path: ci-seq/run/
           retention-days: 7
           if-no-files-found: error
 

@@ -1,0 +1,177 @@
+{
+  "_comment": "DIAGNOSTIC EXPERIMENT ONLY (ci/sequential-xcodebuild-stall-diagnostic). Third-round experiment: distinguishes a fresh xcodebuild/XCTest/testhost boundary from a fresh hosted runner. unit-5a1 and unit-5a2 are the same 7-class groups PR #182 ran as separate matrix jobs (5a stalled 2/2 as one 14-class lane; 5b passed); on this branch the workflow EXCLUDES them from the unit matrix and runs both groups sequentially in ONE job on ONE hosted macos-26 runner with NO Simulator erase between invocations. The remaining lanes are pinned byte-identical to PR #181's table. The planner fails closed when discovery finds a class this table does not cover, so the branch must never merge while the freeze is active.",
+  "unit_lanes": [
+    {
+      "lane": "unit-1",
+      "classes": [
+        "MarkdownRichContentHostedTests"
+      ]
+    },
+    {
+      "lane": "unit-2",
+      "classes": [
+        "CarPlayVoiceCoordinatorTests",
+        "AppStateChatResumeTests",
+        "DashboardTicketBridgeTests",
+        "ConnectionRepairTests",
+        "VoiceConversationLifecycleSuspensionTests",
+        "AppStateReasoningStreamTests",
+        "MessageNormalizerTests",
+        "ChatReturnSurfaceTests",
+        "AVAudioCaptureServiceGenerationTests",
+        "CarPlayVoicePresentationGatingTests",
+        "HapticsVoiceIsolationTests",
+        "DashboardCookieClearingTests",
+        "ChatResumeCoordinatorTests",
+        "AskHermesPromptViewTests",
+        "HermesVoiceConfigurationServiceTests",
+        "PendingVoiceIntentLifecycleTests",
+        "KanbanV3CTests",
+        "SessionRenameTests",
+        "ResponseHapticStateTests",
+        "SessionCatalogCacheTests",
+        "ConnectionSetupDraftTests",
+        "VoiceSpeechDetectorTests",
+        "WakeLifecycleTests",
+        "InterfaceOrientationTests",
+        "CarPlayVoiceRoutePolicyTests",
+        "CarPlaySceneManifestTests"
+      ]
+    },
+    {
+      "lane": "unit-3",
+      "classes": [
+        "MarkdownLargeDocumentTests",
+        "SavedDashboardRegistryTests",
+        "LongContextScalingFixtureTests",
+        "AnyCodableTests",
+        "MarkdownSelectionCoordinatorTests",
+        "AppStateReadAloudTests",
+        "MarkdownTableLayoutTests",
+        "CarPlayVoiceLifecycleRegressionTests",
+        "SessionPresentationCacheTests",
+        "ClarifyBatchStateTests",
+        "ConnectionFailureTests",
+        "AppStateVoiceCapabilityTests",
+        "BufferedEventDeduplicationTests",
+        "NativeAuthClientTests",
+        "SessionIdentityContractTests",
+        "ConnectionSetupSettingsTests",
+        "ConversationIdentityIndexTests",
+        "ChatScrollStateTests",
+        "ComposerDraftStoreTests",
+        "YoloProfileSwitchBookkeepingTests",
+        "VoiceSpokenCommandMatchingTests",
+        "VoiceSpokenMultilingualCommandTests",
+        "CarPlayVoiceTemplateFactoryTests",
+        "WakeConfigurationStoreTests",
+        "CarPlayVoiceStateActivationTests"
+      ]
+    },
+    {
+      "lane": "unit-4",
+      "classes": [
+        "AppLanguageTests",
+        "NotificationDashboardOwnershipTests",
+        "CompactResumeTranscriptTests",
+        "ProfileDiscoveryTests",
+        "VoiceSpeakerSafeBargeInTests",
+        "ContinuousConversationPreferenceTests",
+        "ComposerPasteTextViewTests",
+        "ConnectionSetupTestTests",
+        "KanbanV3DTests",
+        "AppStateRuntimeRegistryTests",
+        "KanbanV3BTests",
+        "AppStateSessionCompressTests",
+        "AppStatePendingLoginFailureTests",
+        "KanbanV2CorrectnessTests",
+        "KanbanV2Tests",
+        "ChatMessageScrollTargetCacheIncrementalTests",
+        "CloudflareAccessTests",
+        "ComposerReturnKeyTests",
+        "MarkdownRichContentPolicyTests",
+        "SelectableTextViewPresentationCacheTests",
+        "LoginCloudflareHandoffTests",
+        "SidebarLayoutTests",
+        "HermesVoiceGatewayTimeoutTests",
+        "InteractionHapticsTests",
+        "TurnStateTests",
+        "HapticsEmissionTests"
+      ]
+    },
+    {
+      "lane": "unit-5a1",
+      "classes": [
+        "ChatViewFollowCorrectionTests",
+        "DashboardSessionIsolationTests",
+        "TranscriptPerformanceFixtureTests",
+        "ChatTypographyTests",
+        "CrossProfilePresentationCacheTests",
+        "SettledMessageIsolationTests",
+        "AppStateDecisionFenceTests"
+      ]
+    },
+    {
+      "lane": "unit-5a2",
+      "classes": [
+        "NativeAuthClientIntegrationTests",
+        "MessageReadAloudControllerTests",
+        "SessionYoloPersistenceTests",
+        "KanbanV3ATests",
+        "AppStateVoiceSpokenPhraseTests",
+        "ChatTextSelectionTests",
+        "AuthWebViewNavigationPolicyTests"
+      ]
+    },
+    {
+      "lane": "unit-5b",
+      "classes": [
+        "KanbanSelectionLayoutTests",
+        "ChatResumeStoreTests",
+        "ConnectionURLPolicyOriginTests",
+        "ChatResumePolicyTests",
+        "MarkdownFallbackTests",
+        "VoiceBargeInRoutePolicyTests",
+        "ChatTitleScrollTests",
+        "SessionYoloStoreTests",
+        "LoginFieldNavigationTests",
+        "ModelPickerTests",
+        "CarPlayVoiceStateMappingTests",
+        "ResponseHapticPolicyTests",
+        "TranscriptPerfLedgerContractTests"
+      ]
+    },
+    {
+      "lane": "unit-6",
+      "classes": [
+        "AppStateForegroundLifecycleTests",
+        "AppStateMultiDashboardTests",
+        "AppStateVoiceSuspensionTests",
+        "VoiceConversationControllerTests",
+        "AppStateServerReplacementSpeechTests",
+        "VoiceConversationSpokenEndCommandTests",
+        "ChatViewportControllerTests",
+        "CarPlayVoicePhoneAttachTests",
+        "TurnstileSubframeBoundaryTests",
+        "MarkdownReferenceLinkTests",
+        "CarPlayVoicePrepareOutcomeTests",
+        "HermesClientTests",
+        "AppStateContinuousConversationPreferenceTests",
+        "KanbanTests",
+        "StreamEventParserTests",
+        "VoiceAudioSessionCoordinatorTests",
+        "CarPlayVoiceSurfaceGateTests",
+        "ConnectionSetupFlowTests",
+        "ConversationIdentityTests",
+        "ConfigFieldLocalizationTests",
+        "HapticsTests",
+        "SecurityBoundaryTests",
+        "VoiceAudioSessionConfigurationTests",
+        "WakePhraseCompilerTests",
+        "VoiceLevelMeterMathTests",
+        "CarPlayDuplicateWindowDismissalTests",
+        "ConduitWindowClaimKeeperTests"
+      ]
+    }
+  ]
+}
