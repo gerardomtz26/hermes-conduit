@@ -486,6 +486,120 @@ class CliTests(unittest.TestCase):
                 self.assertTrue(all(v.isdigit() for v in timeout_map.values()))
 
 
+class LaneSizeCapTests(unittest.TestCase):
+    """MAX_UNIT_CLASSES_PER_LANE: a FLOOR on unit lane count derived from
+    class count. The timing model keeps assigning classes (LPT); the cap
+    only guarantees no lane is oversized, because 48-class lanes repeatedly
+    watchdog-stalled on hosted runners with zero XCTest failures (PR #178)
+    while their 14/34-class halves passed."""
+
+    def _plan(self, unit_classes, estimates=None, overrides=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_repo(Path(tmp), unit_classes)
+            discovery = planner.discover_test_classes(str(root))
+            cfg = default_cfg(**(overrides or {}))
+            plan = planner.build_plan(discovery, cfg, estimates or {})
+        return discovery, plan
+
+    def test_floor_lifts_lane_count_when_timing_wants_fewer(self):
+        names = [f"Gen{i:03d}Tests" for i in range(1, 133)]  # 132 classes
+        # Tiny estimates: the timing model alone would pick ~2 lanes.
+        est = {n: 1.0 for n in names}
+        discovery, plan = self._plan(names, estimates=est)
+        self.assertGreaterEqual(plan["lane_count"], 5)  # ceil(132 / 30)
+        self.assertEqual(planner.validate_plan(plan, discovery), [])
+
+    def test_timing_choice_above_the_floor_is_retained(self):
+        names = [f"Gen{i:03d}Tests" for i in range(1, 133)]
+        est = {n: 20.0 for n in names}
+        cfg = default_cfg()
+        timing_count = planner.lane_count_for(
+            sorted(est.items(), key=lambda kv: (-kv[1], kv[0])), cfg)
+        self.assertGreater(timing_count, 5,
+                           "fixture must select more lanes than the floor")
+        discovery, plan = self._plan(names, estimates=est)
+        self.assertEqual(plan["lane_count"], timing_count)
+
+    def test_every_lane_respects_the_cap_and_partitions_the_inventory(self):
+        names = [f"Gen{i:03d}Tests" for i in range(1, 133)]
+        discovery, plan = self._plan(names)
+        seen = []
+        for lane in plan["unit_lanes"]:
+            self.assertLessEqual(len(lane["classes"]), 30,
+                                 f"{lane['lane']} exceeds the cap")
+            seen.extend(lane["classes"])
+        self.assertEqual(sorted(seen), sorted(names))
+        self.assertEqual(planner.validate_plan(plan, discovery), [])
+
+    def test_small_inventory_does_not_gain_lanes(self):
+        discovery, plan = self._plan(["AlphaTests", "BetaTests", "GammaTests"])
+        self.assertEqual(plan["lane_count"], 1)
+
+    def test_cap_knob_is_overridable(self):
+        names = [f"Gen{i:03d}Tests" for i in range(1, 13)]  # 12 classes
+        discovery, plan = self._plan(names,
+                                     overrides={"max_unit_classes_per_lane": 4})
+        self.assertEqual(plan["lane_count"], 3)
+        self.assertTrue(all(len(l["classes"]) <= 4 for l in plan["unit_lanes"]))
+        self.assertEqual(planner.validate_plan(plan, discovery), [])
+
+    def test_validation_fails_closed_on_an_oversized_lane(self):
+        names = [f"Gen{i:03d}Tests" for i in range(1, 13)]
+        discovery, plan = self._plan(
+            names, overrides={"max_unit_classes_per_lane": 4})
+        # Simulate a planner regression: smuggle one more class into lane 1.
+        plan["unit_lanes"][0]["classes"].append(
+            plan["unit_lanes"][1]["classes"].pop())
+        errors = planner.validate_plan(plan, discovery)
+        self.assertTrue(any("4-class cap" in e for e in errors), errors)
+
+    def test_nudge_loop_splits_count_packed_lanes(self):
+        # The timing model consolidates into ONE lane (a 10000s outlier owns
+        # the wall clock) and ceil(46/30) = 2, but LPT parks all 45 tiny
+        # classes in the light lane: only the nudge to 3 lanes satisfies the
+        # cap. Guards the loop that actually enforces MAX_UNIT_CLASSES_PER_LANE.
+        names = ["HugeTests"] + [f"Tiny{i:03d}Tests" for i in range(45)]
+        est = {"HugeTests": 10000.0, **{n: 1.0 for n in names[1:]}}
+        discovery, plan = self._plan(names, estimates=est)
+        self.assertEqual(plan["lane_count"], 3)
+        self.assertEqual(
+            sorted(len(l["classes"]) for l in plan["unit_lanes"]), [1, 22, 23])
+        self.assertEqual(planner.validate_plan(plan, discovery), [])
+
+    def test_floor_beyond_max_lanes_still_plans_validly(self):
+        # >240 classes: the cap floor (10) legitimately exceeds max_lanes (8)
+        # and validate_plan must stretch its upper bound accordingly.
+        names = [f"Gen{i:03d}Tests" for i in range(1, 301)]  # 300 classes
+        discovery, plan = self._plan(names)
+        self.assertEqual(plan["lane_count"], 10)  # ceil(300 / 30)
+        self.assertTrue(all(len(l["classes"]) <= 30 for l in plan["unit_lanes"]))
+        self.assertEqual(planner.validate_plan(plan, discovery), [])
+
+    def test_invalid_cap_fails_closed(self):
+        names = [f"Gen{i:03d}Tests" for i in range(1, 13)]
+        for bad in (0, -3, True):
+            with self.assertRaises(ValueError):
+                self._plan(names, overrides={"max_unit_classes_per_lane": bad})
+
+    def test_ui_lane_planning_is_unaffected_by_the_unit_cap(self):
+        unit = [f"Gen{i:03d}Tests" for i in range(1, 133)]
+        ui = ["UiOneTests", "UiTwoTests", "UiThreeTests"]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_repo(Path(tmp), unit, ui)
+            discovery = planner.discover_test_classes(str(root))
+            uncapped = planner.build_plan(
+                discovery, dict(default_cfg(), max_unit_classes_per_lane=8), {})
+            capped = planner.build_plan(
+                discovery, dict(default_cfg(), max_unit_classes_per_lane=30), {})
+        self.assertNotEqual(capped["lane_count"], uncapped["lane_count"])
+        self.assertEqual(capped["ui_lane_count"], uncapped["ui_lane_count"])
+        self.assertEqual(
+            [l["classes"] for l in capped["ui_lanes"]],
+            [l["classes"] for l in uncapped["ui_lanes"]])
+        self.assertEqual(planner.validate_plan(uncapped, discovery), [])
+        self.assertEqual(planner.validate_plan(capped, discovery), [])
+
+
 class XctestrunAuditTests(unittest.TestCase):
     def _plist(self, tmp, strings):
         import plistlib

@@ -48,6 +48,7 @@ def default_cfg(**overrides):
         "default_estimate_s": 20.0,
         "min_lanes": 1,
         "max_lanes": 8,
+        "max_unit_classes_per_lane": 30,
         "invocation_overhead_s": 240.0,
         "lane_wall_tolerance_s": 120.0,
         "lane_timeout_min_s": 600,

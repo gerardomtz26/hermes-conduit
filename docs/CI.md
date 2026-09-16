@@ -81,9 +81,19 @@ for the fixed cost of an xcodebuild invocation:
 
 ```
 modeled wall(n) = invocation_overhead_s (240s) + heaviest LPT lane load
-lanes = smallest n in [1, 8] with modeled wall(n) within 120s of the best
-        achievable wall, capped by class count
+timing lanes = smallest n in [1, 8] with modeled wall(n) within 120s of the
+        best achievable wall, bounded by class count
+lanes = max(timing lanes, ceil(unit classes / MAX_UNIT_CLASSES_PER_LANE = 30)),
+        then nudged upward while the LPT assignment still packs any lane over
+        the cap (LPT balances time, not count)
 ```
+
+The class-count floor is the second independent lane-size lever (diagnostic
+evidence: PR #178 — 48-class unit lanes repeatedly watchdog-stalled on
+hosted runners with zero XCTest failures while their 14/34-class halves
+passed, and an unrelated 48-class lane stalled the same way). Timing
+estimates still own the balancing; the floor only guarantees no unit lane
+carries more than 30 classes.
 
 Every lane pays the fixed startup/finalization cost, but lanes run in
 parallel - so adding a lane only rebalances execution while multiplying paid

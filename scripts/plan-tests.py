@@ -49,6 +49,14 @@ SCHEMA_VERSION = 1
 DEFAULT_ESTIMATE_S = 20.0          # unseen/new classes: conservative, not sticky
 MIN_LANES = 1
 MAX_LANES = 8
+# Floor on unit lane count: ceil(unit classes / this). Diagnostic evidence
+# (PR #178): 48-class lanes repeatedly watchdog-stalled on hosted runners
+# with zero XCTest failures while the same classes passed in 14/34-class
+# halves; splitting one lane made both halves pass, then an unrelated
+# 48-class lane stalled the same way. Timing-aware balancing still assigns
+# the classes; this only keeps lanes small enough to dodge
+# batch-size-dependent stalls.
+MAX_UNIT_CLASSES_PER_LANE = 30
 LANE_TIMEOUT_MIN_S = 600           # healthy lanes never get less than 10 min
 LANE_TIMEOUT_MULTIPLIER = 2.5      # headroom over prediction
 # Modeled fixed cost of ONE xcodebuild invocation on a lane: process startup,
@@ -388,13 +396,34 @@ def build_plan(discovery: dict, cfg: dict, estimates: dict) -> dict:
     unit_names = [e["name"] for e in discovery["unit"]]
     ui_names = [e["name"] for e in discovery["ui"]]
 
+    cap = cfg.get("max_unit_classes_per_lane", MAX_UNIT_CLASSES_PER_LANE)
+    if not isinstance(cap, int) or isinstance(cap, bool) or cap < 1:
+        raise ValueError(
+            f"max_unit_classes_per_lane must be an int >= 1, got {cap!r}")
+
     unit_est = {n: estimates.get(n, cfg["default_estimate_s"]) for n in unit_names}
     ui_est = {n: estimates.get(n, cfg["default_estimate_s"]) for n in ui_names}
 
     items = sorted(unit_est.items(), key=lambda kv: (-kv[1], kv[0]))
     total = sum(s for _n, s in items)
-    n_lanes = lane_count_for(items, cfg)
+    # Class-count floor (MAX_UNIT_CLASSES_PER_LANE): never pack more than
+    # this many classes into one unit lane, whatever the timing model says.
+    # Purely a floor - the timing-based selection still owns everything else.
+    size_floor = (math.ceil(len(items) / cap)
+                  if items else 0)
+    n_lanes = max(lane_count_for(items, cfg), size_floor)
+    # LPT balances TIME, not count: with very uneven estimates it can pack
+    # many small classes into the light lane, and the max class count is NOT
+    # monotone in n (adding a lane can redistribute counts upward), so the
+    # real LPT assignment is re-checked at every increment and the first n
+    # that satisfies the cap wins. Do NOT binary-search this. The bound is
+    # reachable: at n == len(items) every lane holds one class.
     lanes = longest_processing_time_first(items, n_lanes)
+    n_bound = min(max(cfg["max_lanes"], size_floor), len(items)) if items else 0
+    while n_lanes < n_bound and any(
+            len(lane) > cap for lane in lanes):
+        n_lanes += 1
+        lanes = longest_processing_time_first(items, n_lanes)
 
     unit_lanes = []
     for i, classes in enumerate(lanes, start=1):
@@ -447,6 +476,7 @@ def build_plan(discovery: dict, cfg: dict, estimates: dict) -> dict:
         "schema_version": SCHEMA_VERSION,
         "config": {k: cfg[k] for k in (
             "default_estimate_s", "min_lanes", "max_lanes",
+            "max_unit_classes_per_lane",
             "invocation_overhead_s", "lane_wall_tolerance_s",
             "lane_timeout_min_s", "timeout_multiplier",
             "ui_min_lanes", "ui_max_lanes", "ui_class_timeout_min_s",
@@ -483,6 +513,17 @@ def validate_plan(plan: dict, discovery: dict) -> list:
         if not lane["classes"]:
             errors.append(f"empty lane generated: {lane['lane']}")
         assigned.extend(lane["classes"])
+    cap = plan.get("config", {}).get("max_unit_classes_per_lane")
+    if cap is not None:
+        if not isinstance(cap, int) or isinstance(cap, bool) or cap < 1:
+            errors.append(
+                f"invalid max_unit_classes_per_lane in plan config: {cap!r}")
+        else:
+            oversized = [lane["lane"] for lane in plan["unit_lanes"]
+                         if len(lane["classes"]) > cap]
+            if oversized:
+                errors.append(
+                    f"unit lanes exceed the {cap}-class cap: {oversized}")
     if sorted(assigned) != sorted(unit_names):
         missing = sorted(set(unit_names) - set(assigned))
         extra = sorted(set(assigned) - set(unit_names))
@@ -515,6 +556,12 @@ def validate_plan(plan: dict, discovery: dict) -> list:
     n_unit = len(unit_names)
     lo = min(plan["config"]["min_lanes"], n_unit)
     hi = plan["config"]["max_lanes"]
+    # The class-count floor legitimately lifts the lane count above
+    # max_lanes once the inventory grows past max_lanes * cap: the cap is
+    # the policy, max_lanes was a wall-clock economics bound.
+    cfg_cap = plan["config"].get("max_unit_classes_per_lane")
+    if isinstance(cfg_cap, int) and not isinstance(cfg_cap, bool) and cfg_cap >= 1:
+        hi = max(hi, math.ceil(len(unit_names) / cfg_cap))
     if plan["lane_count"] < lo or plan["lane_count"] > hi:
         errors.append(
             f"lane count {plan['lane_count']} outside configured bounds "
@@ -720,11 +767,22 @@ def audit_xctestrun(xctestrun_path: str, workspace_root: str) -> tuple:
 # CLI
 # ---------------------------------------------------------------------------
 
+def _positive_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: {value!r}")
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
 def _cfg_from_args(a) -> dict:
     return {
         "default_estimate_s": a.default_estimate_s,
         "min_lanes": a.min_lanes,
         "max_lanes": a.max_lanes,
+        "max_unit_classes_per_lane": a.max_unit_classes_per_lane,
         "invocation_overhead_s": a.invocation_overhead_s,
         "lane_wall_tolerance_s": a.lane_wall_tolerance_s,
         "lane_timeout_min_s": a.lane_timeout_min_s,
@@ -798,6 +856,8 @@ def main(argv=None) -> int:
         p.add_argument("--default-estimate-s", type=float, default=DEFAULT_ESTIMATE_S)
         p.add_argument("--min-lanes", type=int, default=MIN_LANES)
         p.add_argument("--max-lanes", type=int, default=MAX_LANES)
+        p.add_argument("--max-unit-classes-per-lane", type=_positive_int,
+                       default=MAX_UNIT_CLASSES_PER_LANE)
         p.add_argument("--invocation-overhead-s", type=float, default=INVOCATION_OVERHEAD_S)
         p.add_argument("--lane-wall-tolerance-s", type=float, default=LANE_WALL_TOLERANCE_S)
         p.add_argument("--lane-timeout-min-s", type=int, default=LANE_TIMEOUT_MIN_S)
