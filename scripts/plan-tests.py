@@ -419,7 +419,11 @@ def build_plan(discovery: dict, cfg: dict, estimates: dict) -> dict:
     # that satisfies the cap wins. Do NOT binary-search this. The bound is
     # reachable: at n == len(items) every lane holds one class.
     lanes = longest_processing_time_first(items, n_lanes)
-    n_bound = min(max(cfg["max_lanes"], size_floor), len(items)) if items else 0
+    # No max_lanes clamp: the cap must stay satisfiable for any inventory
+    # (skew can demand more lanes than ceil(N / cap), e.g. one huge class
+    # plus a long tail of tiny ones), and validate_plan's cap checks bound
+    # the result instead.
+    n_bound = len(items) if items else 0
     while n_lanes < n_bound and any(
             len(lane) > cap for lane in lanes):
         n_lanes += 1
@@ -556,13 +560,27 @@ def validate_plan(plan: dict, discovery: dict) -> list:
     n_unit = len(unit_names)
     lo = min(plan["config"]["min_lanes"], n_unit)
     hi = plan["config"]["max_lanes"]
-    # The class-count floor legitimately lifts the lane count above
-    # max_lanes once the inventory grows past max_lanes * cap: the cap is
-    # the policy, max_lanes was a wall-clock economics bound.
+    # With the size cap active, the per-lane cap + floor checks below
+    # REPLACE the numeric lane-count bound: the cap is the policy, and
+    # max_lanes was a wall-clock economics bound that a skewed inventory
+    # with a small cap can legitimately exceed (the planner nudges the
+    # count up until LPT's assignment satisfies the cap).
     cfg_cap = plan["config"].get("max_unit_classes_per_lane")
-    if isinstance(cfg_cap, int) and not isinstance(cfg_cap, bool) and cfg_cap >= 1:
-        hi = max(hi, math.ceil(len(unit_names) / cfg_cap))
-    if plan["lane_count"] < lo or plan["lane_count"] > hi:
+    cap_active = (isinstance(cfg_cap, int) and not isinstance(cfg_cap, bool)
+                  and cfg_cap >= 1)
+    if cap_active:
+        floor_n = math.ceil(n_unit / cfg_cap)
+        if plan["lane_count"] > len(unit_names):
+            errors.append(
+                f"lane count {plan['lane_count']} exceeds the class count "
+                f"{n_unit}"
+            )
+        elif plan["lane_count"] < floor_n:
+            errors.append(
+                f"lane count {plan['lane_count']} below the "
+                f"{cfg_cap}-class floor ({floor_n})"
+            )
+    elif plan["lane_count"] < lo or plan["lane_count"] > hi:
         errors.append(
             f"lane count {plan['lane_count']} outside configured bounds "
             f"[{lo}, {hi}]"

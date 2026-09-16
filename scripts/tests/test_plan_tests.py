@@ -575,6 +575,18 @@ class LaneSizeCapTests(unittest.TestCase):
         self.assertTrue(all(len(l["classes"]) <= 30 for l in plan["unit_lanes"]))
         self.assertEqual(planner.validate_plan(plan, discovery), [])
 
+    def test_nudge_can_exceed_max_lanes_when_the_cap_demands_it(self):
+        # CodeRabbit scenario: a huge outlier + many tiny classes. LPT at
+        # max_lanes (8) still packs 34-35 tiny classes per light lane, so
+        # the cap-driven nudge must be allowed past max_lanes (9) and the
+        # plan must validate under the cap-aware bounds.
+        names = ["HugeTests"] + [f"Tiny{i:03d}Tests" for i in range(239)]
+        est = {"HugeTests": 10000.0, **{n: 1.0 for n in names[1:]}}
+        discovery, plan = self._plan(names, estimates=est)
+        self.assertGreaterEqual(plan["lane_count"], 9)
+        self.assertTrue(all(len(l["classes"]) <= 30 for l in plan["unit_lanes"]))
+        self.assertEqual(planner.validate_plan(plan, discovery), [])
+
     def test_invalid_cap_fails_closed(self):
         names = [f"Gen{i:03d}Tests" for i in range(1, 13)]
         for bad in (0, -3, True):
