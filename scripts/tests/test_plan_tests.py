@@ -486,6 +486,296 @@ class CliTests(unittest.TestCase):
                 self.assertTrue(all(v.isdigit() for v in timeout_map.values()))
 
 
+class LaneOverrideTests(unittest.TestCase):
+    """The diagnostic --unit-lanes-override flag: frozen membership,
+    planner pricing unchanged, fail closed on coverage gaps."""
+
+    def _build(self, root, override):
+        discovery = planner.discover_test_classes(str(root))
+        plan = planner.build_plan(discovery, default_cfg(), {},
+                                  unit_lanes_override=override)
+        return discovery, plan
+
+    def test_override_pins_membership_and_keeps_planner_pricing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_repo(Path(tmp), ["AlphaTests", "BetaTests", "GammaTests"])
+            override = [
+                {"lane": "unit-1", "classes": ["AlphaTests"]},
+                {"lane": "unit-2-audio", "classes": ["BetaTests", "GammaTests"]},
+            ]
+            discovery, plan = self._build(root, override)
+            unit = plan["unit_lanes"]
+            self.assertEqual([l["lane"] for l in unit], ["unit-1", "unit-2-audio"])
+            self.assertEqual(unit[0]["classes"], ["AlphaTests"])
+            self.assertEqual(unit[1]["classes"], ["BetaTests", "GammaTests"])
+            self.assertEqual(plan["lane_count"], 2)
+            cfg = default_cfg()
+            expected = planner.timeout_for(
+                2 * cfg["default_estimate_s"], cfg["lane_timeout_min_s"],
+                cfg["timeout_multiplier"])
+            self.assertEqual(unit[1]["timeout_s"], expected)
+            self.assertEqual(unit[1]["job_timeout_min"],
+                             planner.job_timeout_min(expected, cfg))
+            self.assertEqual(planner.validate_plan(plan, discovery), [])
+
+    def test_uncovered_class_fails_validation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_repo(Path(tmp), ["AlphaTests", "BetaTests"])
+            override = [{"lane": "unit-1", "classes": ["AlphaTests"]}]
+            discovery, plan = self._build(root, override)
+            errors = planner.validate_plan(plan, discovery)
+            self.assertTrue(any("missing from plan" in e for e in errors), errors)
+
+    def test_unknown_class_in_override_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_repo(Path(tmp), ["AlphaTests"])
+            override = [{"lane": "unit-1",
+                         "classes": ["AlphaTests", "GhostTests"]}]
+            with self.assertRaises(ValueError):
+                self._build(root, override)
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.loader_tmp = self._tmp.name
+
+    def test_override_lane_names_must_be_unit_prefixed_and_unique(self):
+        def loader(doc):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "override.json"
+                path.write_text(json.dumps(doc), encoding="utf-8")
+                planner.load_lane_override(str(path))
+        with self.assertRaises(ValueError):
+            loader({"unit_lanes": [
+                {"lane": "lanes/evil", "classes": ["AlphaTests"]}]})
+        with self.assertRaises(ValueError):
+            loader({"unit_lanes": [
+                {"lane": "unit-1", "classes": ["AlphaTests"]},
+                {"lane": "unit-1", "classes": ["AlphaTests"]}]})
+        with self.assertRaises(ValueError):
+            loader({"unit_lanes": [
+                {"lane": "unit-1", "classes": ["AlphaTests"]},
+                {"lane": "unit-2", "classes": ["AlphaTests"]}]})
+        # intra-lane duplicates, empty/non-list classes, missing file
+        with self.assertRaises(ValueError):
+            loader({"unit_lanes": [
+                {"lane": "unit-1", "classes": ["AlphaTests", "AlphaTests"]}]})
+        with self.assertRaises(ValueError):
+            loader({"unit_lanes": [{"lane": "unit-1", "classes": []}]})
+        with self.assertRaises(ValueError):
+            loader({"unit_lanes": [{"lane": "unit-1", "classes": "AlphaTests"}]})
+        with self.assertRaises(OSError):
+            planner.load_lane_override(str(Path(self.loader_tmp) / "absent.json"))
+
+    def test_validate_cli_wires_the_override_flag_end_to_end(self):
+        # Pins the argparse wiring ci.yml depends on (both subcommands must
+        # keep accepting --unit-lanes-override).
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_repo(Path(tmp), ["AlphaTests"])
+            override = Path(tmp) / "override.json"
+            override.write_text(json.dumps({"unit_lanes": [
+                {"lane": "unit-1", "classes": ["AlphaTests"]}]}), encoding="utf-8")
+            for cmd in ("validate", "plan"):
+                args = [sys.executable, str(Path(SCRIPTS_DIR) / "plan-tests.py"),
+                        cmd, "--repo-root", str(root)]
+                if cmd == "plan":
+                    args += ["--out", str(Path(tmp) / "p.json")]
+                args += ["--unit-lanes-override", str(override)]
+                proc = subprocess.run(args, capture_output=True, text=True)
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                self.assertIn("override ACTIVE", proc.stdout)
+
+    def test_ui_lanes_are_unaffected_by_the_override(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_repo(Path(tmp), ["AlphaTests", "BetaTests"],
+                             ["UiOneTests", "UiTwoTests"])
+            override = [
+                {"lane": "unit-1", "classes": ["AlphaTests"]},
+                {"lane": "unit-2-audio", "classes": ["BetaTests"]},
+            ]
+            discovery, plan = self._build(root, override)
+            self.assertEqual([l["lane"] for l in plan["unit_lanes"]],
+                             ["unit-1", "unit-2-audio"])
+            self.assertEqual(len(plan["ui_lanes"]), 2)
+            self.assertEqual(planner.validate_plan(plan, discovery), [])
+
+
+class DiagnosticSplitArtifactTests(unittest.TestCase):
+    """Pins the frozen diagnostic table against the exact unit-2 membership
+    it split (latest successful main run 34774339191): disjoint halves,
+    exact union, unchanged siblings, and every listed class still exists."""
+
+    OLD_UNIT1 = [
+        "AVAudioCaptureServiceGenerationTests",
+        "AppStatePendingLoginFailureTests",
+        "AppStateReadAloudTests",
+        "AppStateRuntimeRegistryTests",
+        "AppStateVoiceCapabilityTests",
+        "CarPlaySceneManifestTests",
+        "CarPlayVoiceRoutePolicyTests",
+        "ChatMessageScrollTargetCacheIncrementalTests",
+        "ChatResumeCoordinatorTests",
+        "ChatResumePolicyTests",
+        "ChatTitleScrollTests",
+        "ChatViewportControllerTests",
+        "ClarifyBatchStateTests",
+        "ConfigFieldLocalizationTests",
+        "ContinuousConversationPreferenceTests",
+        "ConversationIdentityTests",
+        "CrossProfilePresentationCacheTests",
+        "HapticsVoiceIsolationTests",
+        "HermesClientTests",
+        "HermesVoiceConfigurationServiceTests",
+        "InteractionHapticsTests",
+        "KanbanV2CorrectnessTests",
+        "KanbanV2Tests",
+        "KanbanV3DTests",
+        "MarkdownRichContentHostedTests",
+        "MessageNormalizerTests",
+        "PendingVoiceIntentLifecycleTests",
+        "ResponseHapticPolicyTests",
+        "ResponseHapticStateTests",
+        "SecurityBoundaryTests",
+        "SelectableTextViewPresentationCacheTests",
+        "VoiceLevelMeterMathTests",
+        "VoiceSpokenCommandMatchingTests",
+        "VoiceSpokenMultilingualCommandTests",
+        "WakePhraseCompilerTests",
+        "YoloProfileSwitchBookkeepingTests",
+    ]
+    OLD_UNIT2 = [
+        "AppStateMultiDashboardTests",
+        "AppStateReasoningStreamTests",
+        "AppStateServerReplacementSpeechTests",
+        "AppStateSessionCompressTests",
+        "AppStateVoiceSuspensionTests",
+        "AskHermesPromptViewTests",
+        "AuthWebViewNavigationPolicyTests",
+        "BufferedEventDeduplicationTests",
+        "CarPlayVoiceCoordinatorTests",
+        "CarPlayVoicePhoneAttachTests",
+        "CarPlayVoicePrepareOutcomeTests",
+        "CarPlayVoicePresentationGatingTests",
+        "CarPlayVoiceStateActivationTests",
+        "CarPlayVoiceSurfaceGateTests",
+        "CarPlayVoiceTemplateFactoryTests",
+        "ChatResumeStoreTests",
+        "ChatReturnSurfaceTests",
+        "ChatScrollStateTests",
+        "ChatTextSelectionTests",
+        "ChatTypographyTests",
+        "ChatViewFollowCorrectionTests",
+        "CompactResumeTranscriptTests",
+        "ComposerDraftStoreTests",
+        "ComposerReturnKeyTests",
+        "ConduitWindowClaimKeeperTests",
+        "ConnectionSetupTestTests",
+        "ConnectionURLPolicyOriginTests",
+        "ConversationIdentityIndexTests",
+        "DashboardCookieClearingTests",
+        "DashboardTicketBridgeTests",
+        "InterfaceOrientationTests",
+        "KanbanTests",
+        "KanbanV3ATests",
+        "KanbanV3BTests",
+        "KanbanV3CTests",
+        "LoginCloudflareHandoffTests",
+        "LoginFieldNavigationTests",
+        "LongContextScalingFixtureTests",
+        "NativeAuthClientIntegrationTests",
+        "NotificationDashboardOwnershipTests",
+        "SessionYoloStoreTests",
+        "SidebarLayoutTests",
+        "TurnStateTests",
+        "VoiceBargeInRoutePolicyTests",
+        "VoiceConversationLifecycleSuspensionTests",
+        "VoiceSpeakerSafeBargeInTests",
+        "VoiceSpeechDetectorTests",
+        "WakeLifecycleTests",
+    ]
+    OLD_UNIT3 = [
+        "AnyCodableTests",
+        "AppLanguageTests",
+        "AppStateChatResumeTests",
+        "AppStateContinuousConversationPreferenceTests",
+        "AppStateDecisionFenceTests",
+        "AppStateForegroundLifecycleTests",
+        "AppStateVoiceSpokenPhraseTests",
+        "CarPlayDuplicateWindowDismissalTests",
+        "CarPlayVoiceLifecycleRegressionTests",
+        "CarPlayVoiceStateMappingTests",
+        "CloudflareAccessTests",
+        "ComposerPasteTextViewTests",
+        "ConnectionFailureTests",
+        "ConnectionRepairTests",
+        "ConnectionSetupDraftTests",
+        "ConnectionSetupFlowTests",
+        "ConnectionSetupSettingsTests",
+        "DashboardSessionIsolationTests",
+        "HapticsEmissionTests",
+        "HapticsTests",
+        "HermesVoiceGatewayTimeoutTests",
+        "KanbanSelectionLayoutTests",
+        "MarkdownFallbackTests",
+        "MarkdownLargeDocumentTests",
+        "MarkdownReferenceLinkTests",
+        "MarkdownRichContentPolicyTests",
+        "MarkdownSelectionCoordinatorTests",
+        "MarkdownTableLayoutTests",
+        "MessageReadAloudControllerTests",
+        "ModelPickerTests",
+        "NativeAuthClientTests",
+        "ProfileDiscoveryTests",
+        "SavedDashboardRegistryTests",
+        "SessionCatalogCacheTests",
+        "SessionIdentityContractTests",
+        "SessionPresentationCacheTests",
+        "SessionRenameTests",
+        "SessionYoloPersistenceTests",
+        "SettledMessageIsolationTests",
+        "StreamEventParserTests",
+        "TranscriptPerfLedgerContractTests",
+        "TranscriptPerformanceFixtureTests",
+        "TurnstileSubframeBoundaryTests",
+        "VoiceAudioSessionConfigurationTests",
+        "VoiceAudioSessionCoordinatorTests",
+        "VoiceConversationControllerTests",
+        "VoiceConversationSpokenEndCommandTests",
+        "WakeConfigurationStoreTests",
+    ]
+
+    def _lanes(self):
+        path = Path(SCRIPTS_DIR) / "diagnostic-unit-split.json"
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        return {e["lane"]: e["classes"] for e in doc["unit_lanes"]}
+
+    def test_audio_and_rest_partition_old_unit2_exactly(self):
+        lanes = self._lanes()
+        audio = set(lanes["unit-2-audio"])
+        rest = set(lanes["unit-2-rest"])
+        self.assertFalse(audio & rest, "the split halves overlap")
+        self.assertEqual(audio | rest, set(self.OLD_UNIT2),
+                         "the split union must equal the old unit-2 exactly")
+        self.assertEqual(len(audio) + len(rest), len(self.OLD_UNIT2))
+
+    def test_other_lanes_are_unchanged(self):
+        lanes = self._lanes()
+        self.assertEqual(sorted(lanes["unit-1"]), self.OLD_UNIT1)
+        self.assertEqual(sorted(lanes["unit-3"]), self.OLD_UNIT3)
+
+    def test_every_listed_class_is_discovered_by_the_planner(self):
+        # The table must track reality: when a class is renamed or removed,
+        # this fails loudly instead of the plan job failing closed mid-CI.
+        lanes = self._lanes()
+        repo_root = Path(SCRIPTS_DIR).parent
+        discovered = {e["name"] for e in
+                      planner.discover_test_classes(str(repo_root))["unit"]}
+        for lane, classes in lanes.items():
+            for cls in classes:
+                self.assertIn(cls, discovered,
+                              f"{lane} lists unknown class {cls}")
+
+
 class XctestrunAuditTests(unittest.TestCase):
     def _plist(self, tmp, strings):
         import plistlib

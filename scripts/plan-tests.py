@@ -384,25 +384,84 @@ def imbalance_pct(values: list) -> float:
     return (max(values) - min(values)) / avg * 100.0
 
 
-def build_plan(discovery: dict, cfg: dict, estimates: dict) -> dict:
+def load_lane_override(path: str) -> list:
+    """Load a frozen diagnostic unit-lane table: {"unit_lanes": [{"lane",
+    "classes": [...]}, ...]}. DIAGNOSTIC EXPERIMENTS ONLY - a non-empty
+    override replaces lane formation entirely, so membership is pinned and
+    no longer tracks new or renamed test classes (validate_plan fails
+    closed on any class the table does not cover)."""
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    if not isinstance(doc, dict) or not isinstance(doc.get("unit_lanes"), list) \
+            or not doc["unit_lanes"]:
+        raise ValueError(
+            "override must be an object with a non-empty 'unit_lanes' list")
+    lanes = []
+    seen_lanes = set()
+    seen_classes = set()
+    for entry in doc["unit_lanes"]:
+        lane = entry.get("lane") if isinstance(entry, dict) else None
+        classes = entry.get("classes") if isinstance(entry, dict) else None
+        if not isinstance(lane, str) or not re.fullmatch(r"unit-[a-z0-9-]+", lane):
+            raise ValueError(f"override lane name invalid: {lane!r}")
+        if lane in seen_lanes:
+            raise ValueError(f"override lane name duplicated: {lane!r}")
+        seen_lanes.add(lane)
+        if not isinstance(classes, list) or not classes \
+                or not all(isinstance(c, str) and c for c in classes):
+            raise ValueError(f"override lane {lane!r} needs a non-empty classes list")
+        dupes = sorted(seen_classes & set(classes))
+        if dupes:
+            raise ValueError(f"override assigns classes to multiple lanes: {dupes}")
+        if len(classes) != len(set(classes)):
+            raise ValueError(f"override lane {lane!r} lists a class twice")
+        seen_classes.update(classes)
+        lanes.append({"lane": lane, "classes": list(classes)})
+    return lanes
+
+
+def build_plan(discovery: dict, cfg: dict, estimates: dict,
+               unit_lanes_override: list = None) -> dict:
     unit_names = [e["name"] for e in discovery["unit"]]
     ui_names = [e["name"] for e in discovery["ui"]]
 
     unit_est = {n: estimates.get(n, cfg["default_estimate_s"]) for n in unit_names}
     ui_est = {n: estimates.get(n, cfg["default_estimate_s"]) for n in ui_names}
 
-    items = sorted(unit_est.items(), key=lambda kv: (-kv[1], kv[0]))
-    total = sum(s for _n, s in items)
-    n_lanes = lane_count_for(items, cfg)
-    lanes = longest_processing_time_first(items, n_lanes)
+    if unit_lanes_override:
+        # Diagnostic experiment: membership is pinned table-side; only the
+        # per-lane pricing (predicted load, watchdog, job ceiling) comes
+        # from the same formulas as the dynamic plan below. Coverage of
+        # every discovered class is enforced by validate_plan; unknown
+        # classes fail closed here so a stale table can never plan half a
+        # lane silently.
+        unknown = [c for lane in unit_lanes_override for c in lane["classes"]
+                   if c not in unit_est]
+        if unknown:
+            raise ValueError(
+                f"unit-lane override lists classes absent from discovery: "
+                f"{sorted(unknown)}")
+        total = sum(unit_est[c] for lane in unit_lanes_override
+                    for c in lane["classes"])
+        n_lanes = len(unit_lanes_override)
+        lanes = unit_lanes_override
+    else:
+        items = sorted(unit_est.items(), key=lambda kv: (-kv[1], kv[0]))
+        total = sum(s for _n, s in items)
+        n_lanes = lane_count_for(items, cfg)
+        lanes = longest_processing_time_first(items, n_lanes)
 
     unit_lanes = []
-    for i, classes in enumerate(lanes, start=1):
+    for i, entry in enumerate(lanes, start=1):
+        if isinstance(entry, dict):
+            lane_name, classes = entry["lane"], entry["classes"]
+        else:
+            lane_name, classes = f"unit-{i}", entry
         predicted = sum(unit_est[c] for c in classes)
         modeled_wall = cfg["invocation_overhead_s"] + predicted
         timeout = timeout_for(predicted, cfg["lane_timeout_min_s"], cfg["timeout_multiplier"])
         unit_lanes.append({
-            "lane": f"unit-{i}",
+            "lane": lane_name,
             "target": UNIT_TARGET,
             "classes": classes,
             "predicted_s": round(predicted, 1),
@@ -810,6 +869,11 @@ def main(argv=None) -> int:
         p.add_argument("--ui-reset-overhead-s", type=int, default=UI_RESET_OVERHEAD_S)
         p.add_argument("--ui-extract-bound-s", type=int, default=UI_EXTRACT_BOUND_S)
         p.add_argument("--job-timeout-margin-s", type=int, default=JOB_TIMEOUT_MARGIN_S)
+        p.add_argument("--unit-lanes-override", default="",
+                       help="DIAGNOSTIC ONLY: frozen unit-lane membership "
+                            "table (JSON with unit_lanes:[{lane,classes}]); "
+                            "replaces lane formation; validate_plan still "
+                            "enforces full inventory coverage")
         if cmd == "plan":
             p.add_argument("--out", default="plan.json")
             p.add_argument("--matrix-out", default="")
@@ -844,12 +908,31 @@ def main(argv=None) -> int:
     for w in discovery["warnings"]:
         warn(w)
     cfg = _cfg_from_args(a)
+    override = []
+    if a.unit_lanes_override:
+        override_path = a.unit_lanes_override
+        if not os.path.isabs(override_path):
+            candidate = os.path.join(a.repo_root, override_path)
+            if os.path.exists(candidate):
+                override_path = candidate
+        try:
+            override = load_lane_override(override_path)
+        except (OSError, ValueError) as exc:
+            print(f"::error::unit-lane override unreadable: {exc}")
+            return 2
+        print(f"unit-lane override ACTIVE (diagnostic): "
+              f"{', '.join(l['lane'] for l in override)}")
     estimates, ewarns, source = _load_history_or_baseline(a, discovery)
     for w in ewarns:
         warn(w)
     # Unknown timing entries are ignored: build_plan only looks up discovered
     # class names, and the history update script prunes stale entries.
-    plan = build_plan(discovery, cfg, estimates)
+    try:
+        plan = build_plan(discovery, cfg, estimates,
+                          unit_lanes_override=override or None)
+    except ValueError as exc:
+        print(f"::error::unit-lane override stale: {exc}")
+        return 2
     errors = validate_plan(plan, discovery)
 
     report = _human_report(plan, discovery, source)

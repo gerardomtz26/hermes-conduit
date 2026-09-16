@@ -92,7 +92,8 @@ jobs:
           # Cheap Linux guard: every discovered XCTestCase class must be
           # planned exactly once (replaces the static shard-coverage check).
           python3 scripts/plan-tests.py validate --repo-root . \
-            --baseline scripts/test-timings.json $HISTORY_ARG
+            --baseline scripts/test-timings.json $HISTORY_ARG \
+            --unit-lanes-override scripts/diagnostic-unit-split.json
           python3 -m unittest discover -s scripts/tests -p 'test_*.py'
 
       - name: Localization catalog coverage
@@ -112,6 +113,7 @@ jobs:
           mkdir -p ci-artifacts
           python3 scripts/plan-tests.py plan --repo-root . \
             --baseline scripts/test-timings.json $HISTORY_ARG \
+            --unit-lanes-override scripts/diagnostic-unit-split.json \
             --out ci-artifacts/plan.json \
             --matrix-out ci-artifacts/unit-matrix.json \
             --ui-matrix-out ci-artifacts/ui-matrix.json \
