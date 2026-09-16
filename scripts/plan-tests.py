@@ -912,9 +912,10 @@ def main(argv=None) -> int:
     if a.unit_lanes_override:
         override_path = a.unit_lanes_override
         if not os.path.isabs(override_path):
-            candidate = os.path.join(a.repo_root, override_path)
-            if os.path.exists(candidate):
-                override_path = candidate
+            # Relative paths are always repo-root relative - never a CWD
+            # fallback, so a misconfigured path fails loudly instead of
+            # silently reading a different file from the working directory.
+            override_path = os.path.join(a.repo_root, override_path)
         try:
             override = load_lane_override(override_path)
         except (OSError, ValueError) as exc:
