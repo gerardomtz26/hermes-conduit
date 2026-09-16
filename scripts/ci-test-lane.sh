@@ -130,8 +130,6 @@ case "$PREDICTED_S" in
   ''|*[!0-9.]*) echo "::error::--predicted must be a positive number, got '$PREDICTED_S'"; exit 2 ;;
 esac
 
-CLASS_TIMEOUT_MIN_S="${CLASS_TIMEOUT_MIN_S:-180}"
-CLASS_TIMEOUT_MULTIPLIER="${CLASS_TIMEOUT_MULTIPLIER:-4.0}"
 SIMULATOR_NAME="${SIMULATOR_NAME:-iPhone 17 Pro}"
 
 LOG_DIR="$RESULT_DIR/logs"
@@ -666,17 +664,22 @@ mark_later_batches_not_run() { # $1 = batch index the lane stopped on
 }
 
 # Unit finish: fail-closed completeness check first - a green verdict is only
-# reachable when EVERY planned batch recorded a passing attempt. Then the
-# shared finish_lane writes the lane result with the batch document attached.
+# reachable when EVERY planned batch index (1..N) owns a passing record.
+# Compared per batch index so a corrupted or truncated bookkeeping file can
+# never satisfy the count. Then the shared finish_lane writes the lane result
+# with the batch document attached.
 finish_unit_lane() { # $1=status $2=exit_code
   if [ "$1" = "pass" ]; then
-    local expected passed
-    expected=$(grep -c . "$UNIT_BATCH_LINES" 2>/dev/null || echo 0)
-    passed=$(awk -F'|' '$3 == "passed" {n++} END {print n+0}' "$BATCH_RESULT_LINES" 2>/dev/null || echo 0)
-    if [ "$passed" -ne "$expected" ]; then
-      echo "::error::unit lane $LANE cannot finish green: $passed of $expected batches hold a passing record - failing closed"
-      finish_lane "error" "$(serialize_attempts)" "$(serialize_unit_batches)" 1
-    fi
+    local expected i
+    expected=$(awk 'END {print NR}' "$UNIT_BATCH_LINES" 2>/dev/null || echo 0)
+    i=1
+    while [ "$i" -le "$expected" ]; do
+      if ! grep -q "^$i|[0-9]*|passed|" "$BATCH_RESULT_LINES" 2>/dev/null; then
+        echo "::error::unit lane $LANE cannot finish green: batch $i has no passing record in the lane bookkeeping - failing closed"
+        finish_lane "error" "$(serialize_attempts)" "$(serialize_unit_batches)" 1
+      fi
+      i=$(( i + 1 ))
+    done
   fi
   finish_lane "$1" "$(serialize_attempts)" "$(serialize_unit_batches)" "$2"
 }
@@ -750,10 +753,14 @@ while [ "$batch_idx" -le "$batch_total" ]; do
   fi
 
   fail_count=$(count_failures "$RESULT_DIR/parts/detail-batch-$batch_idx-a1.json")
-  if [ "$status" -eq 124 ]; then
-    a1_status="timeout"
-  elif [ "$fail_count" -gt 0 ]; then
+  # Real failures win over the stall classification: a batch whose xcresult
+  # records surviving test failures is a TEST failure no matter how the
+  # process exited - the native in-invocation retry already re-ran them, and
+  # a real failure is never eligible for the batch-level retry.
+  if [ "$fail_count" -gt 0 ]; then
     a1_status="test-failures"
+  elif [ "$status" -eq 124 ]; then
+    a1_status="timeout"
   elif [ "$fail_count" -eq -1 ]; then
     a1_status="unclassified"
   else
@@ -830,10 +837,10 @@ while [ "$batch_idx" -le "$batch_total" ]; do
   # lane, naming the batch.
   fail_count=$(count_failures "$RESULT_DIR/parts/detail-batch-$batch_idx-a2.json")
   local a2_status
-  if [ "$status" -eq 124 ]; then
-    a2_status="timeout"
-  elif [ "$fail_count" -gt 0 ]; then
+  if [ "$fail_count" -gt 0 ]; then
     a2_status="test-failures"
+  elif [ "$status" -eq 124 ]; then
+    a2_status="timeout"
   elif [ "$fail_count" -eq -1 ]; then
     a2_status="unclassified"
   else
@@ -843,7 +850,7 @@ while [ "$batch_idx" -le "$batch_total" ]; do
   record_attempt "batch-retry" "$batch_idx" "all" "$a2_status"
 
   if [ "$a2_status" = "timeout" ]; then
-    echo "::error::unit $LANE batch $batch_idx/$batch_total exceeded its "${budget}"s watchdog on BOTH attempts - persistent stall; failing the lane with this batch as the identified culprit"
+    echo "::error::unit $LANE batch $batch_idx/$batch_total failed after its one allowed batch retry (attempt 1: $a1_status, attempt 2: timeout) - persistent stall; failing the lane with this batch as the identified culprit"
     HUNG_BATCH="$batch_idx"
     mark_later_batches_not_run "$batch_idx"
     finish_unit_lane "timeout" 1
@@ -858,7 +865,7 @@ while [ "$batch_idx" -le "$batch_total" ]; do
     mark_later_batches_not_run "$batch_idx"
     finish_unit_lane "fail" 1
   fi
-  echo "::error::unit $LANE batch $batch_idx/$batch_total hit infrastructure failures on both attempts (zero failing tests) - persistent environment failure; failing the lane"
+  echo "::error::unit $LANE batch $batch_idx/$batch_total failed after its one allowed batch retry (attempt 1: $a1_status, attempt 2: infrastructure failure, zero failing tests) - persistent environment failure; failing the lane"
   mark_later_batches_not_run "$batch_idx"
   finish_unit_lane "error" 1
 done

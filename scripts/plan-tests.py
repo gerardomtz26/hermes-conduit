@@ -47,7 +47,8 @@ import plistlib
 import re
 import sys
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2: unit lanes carry sequential execution batches
+#                   (batches/batch_count; timeout_s = sum of batch budgets)
 
 # Planning configuration (overridable via flags for tests).
 DEFAULT_ESTIMATE_S = 20.0          # unseen/new classes: conservative, not sticky
@@ -105,6 +106,11 @@ UI_CLASS_TIMEOUT_MULTIPLIER = 3.0
 # erase 180 + boot 60 + bootstatus 200 + diagnostics ~45, rounded up) - the
 # job ceiling must cover one per failing class, not a flat allowance.
 UI_RESET_OVERHEAD_S = 600
+# Bounded recovery cost of ONE unit batch that needed its retry: the
+# infrastructure path pays shutdown+erase+boot+bootstatus+diagnostics
+# (~545s); the watchdog path only shutdown+diagnostics. Priced at the
+# infrastructure bound per batch, the job ceiling must cover one per batch.
+UNIT_BATCH_RECOVERY_OVERHEAD_S = 600
 # xcresulttool subprocess timeout in extract-test-timings.py. Extraction
 # runs outside the per-class budgets (after the invocation returns), up to
 # twice per class, so the ceiling reserves a bound for it as well.
@@ -418,13 +424,20 @@ def ui_job_timeout_min(lane_timeout_s: int, n_classes: int, cfg: dict) -> int:
 def unit_job_timeout_min(batches: list, cfg: dict) -> int:
     """Outer job ceiling for a batched unit lane. Worst in-script path: EVERY
     batch burns its budget twice (attempt 1 plus its single batch-level
-    retry - a watchdog stall retries the same batch once, an infrastructure
-    wedge ditto), plus bounded simulator shutdowns/recovery and setup/
-    download slack. The per-batch watchdogs inside the runner are the real
-    enforcement; this only guarantees the ceiling can never preempt
-    legitimate in-script recovery."""
+    retry), each retry may pay one bounded simulator recovery (erase-path
+    bound), and every attempt's timing extraction can wedge to the
+    xcresulttool subprocess bound (up to two per batch plus the lane's own
+    final fold) - plus setup/download slack. The per-batch watchdogs inside
+    the runner are the real enforcement; this only guarantees the ceiling
+    can never preempt legitimate in-script recovery (GitHub's own 6-hour
+    hosted-runner cap aside, which no ceiling can outrun)."""
+    n = len(batches)
     budgets = sum(b["timeout_s"] for b in batches)
-    total = 2 * budgets + cfg["job_timeout_margin_s"]
+    total = (2 * budgets
+             + n * cfg.get("unit_batch_recovery_overhead_s",
+                           UNIT_BATCH_RECOVERY_OVERHEAD_S)
+             + (2 * n + 1) * cfg.get("ui_extract_bound_s", UI_EXTRACT_BOUND_S)
+             + cfg["job_timeout_margin_s"])
     return int(math.ceil(total / 60.0))
 
 
@@ -509,7 +522,7 @@ def build_plan(discovery: dict, cfg: dict, estimates: dict) -> dict:
             "default_estimate_s", "min_lanes", "max_lanes",
             "invocation_overhead_s", "lane_wall_tolerance_s",
             "unit_batch_max_classes", "unit_batch_timeout_min_s",
-            "unit_batch_timeout_multiplier",
+            "unit_batch_timeout_multiplier", "unit_batch_recovery_overhead_s",
             "ui_min_lanes", "ui_max_lanes", "ui_class_timeout_min_s",
             "ui_class_timeout_multiplier", "job_timeout_margin_s")},
         "inventory": {"unit": unit_names, "ui": ui_names},
@@ -841,6 +854,7 @@ def _cfg_from_args(a) -> dict:
         "unit_batch_max_classes": a.unit_batch_max_classes,
         "unit_batch_timeout_min_s": a.unit_batch_timeout_min_s,
         "unit_batch_timeout_multiplier": a.unit_batch_timeout_multiplier,
+        "unit_batch_recovery_overhead_s": a.unit_batch_recovery_overhead_s,
         "ui_min_lanes": a.ui_min_lanes,
         "ui_max_lanes": a.ui_max_lanes,
         "ui_class_timeout_min_s": a.ui_class_timeout_min_s,
@@ -919,6 +933,8 @@ def main(argv=None) -> int:
         p.add_argument("--unit-batch-timeout-min-s", type=int, default=UNIT_BATCH_TIMEOUT_MIN_S)
         p.add_argument("--unit-batch-timeout-multiplier", type=float,
                        default=UNIT_BATCH_TIMEOUT_MULTIPLIER)
+        p.add_argument("--unit-batch-recovery-overhead-s", type=int,
+                       default=UNIT_BATCH_RECOVERY_OVERHEAD_S)
         p.add_argument("--ui-min-lanes", type=int, default=UI_MIN_LANES)
         p.add_argument("--ui-max-lanes", type=int, default=UI_MAX_LANES)
         p.add_argument("--ui-class-timeout-min-s", type=int, default=UI_CLASS_TIMEOUT_MIN_S)

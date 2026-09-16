@@ -108,6 +108,10 @@ write_doc() {
   nodes=""
   sep=""
   for c in $classes; do
+    # Classes listed in $FAKE_UNIT_OMIT get no Test Suite node at all: the
+    # canned document then models an invocation that exited 0 without ever
+    # running one of its assigned classes.
+    case " $FAKE_UNIT_OMIT " in *" $c "*) continue ;; esac
     nodes="$nodes$sep{\"nodeType\": \"Test Suite\", \"name\": \"$c\", \"result\": \"$result\",
       \"children\": [{\"nodeType\": \"Test Case\", \"name\": \"testC()\", \"result\": \"$result\",
       \"durationInSeconds\": 0.1}]}"
@@ -121,6 +125,7 @@ DOC
 }
 case "$mode" in
   hang) write_doc Passed; sleep 300; exit 0 ;;
+  hangfail) write_doc Failed; sleep 300; exit 0 ;;
   infra70) write_doc Passed; echo "simulator crashed (stub)"; exit 70 ;;
   fail65) write_doc Failed; echo "Test Case failed (stub)"; exit 65 ;;
   *) write_doc Passed; exit 0 ;;
@@ -131,7 +136,8 @@ EOF
 
 reset_unit_stub_vars() {
   unset FAKE_UNIT_B1_A1 FAKE_UNIT_B1_A2 FAKE_UNIT_B2_A1 FAKE_UNIT_B2_A2 \
-        FAKE_UNIT_B3_A1 FAKE_UNIT_B3_A2 FAKE_UNIT_NO_DOC 2>/dev/null || true
+        FAKE_UNIT_B3_A1 FAKE_UNIT_B3_A2 FAKE_UNIT_NO_DOC FAKE_UNIT_OMIT \
+        2>/dev/null || true
 }
 
 write_canned() { # $1=file $2=class $3=result
@@ -258,7 +264,7 @@ print(d.get('retried_classes'))
 
 run_ui_lane() { # $1=classes $2=lane-timeout(bookkeeping) $3=class-timeouts
   _classes="$1"; _timeout="$2"; _cto="$3"
-  CLASS_TIMEOUT_MIN_S="1" CLASS_TIMEOUT_MULTIPLIER="0.1"     bash "$SCRIPTS/ci-test-lane.sh"     --kind ui --lane ui-t --target ConduitUITests     --classes "$_classes"     --class-timeouts "$_cto"     --predicted 42 --timeout "$_timeout"     --xctestrun "$WORK/fake.xctestrun"     --result-dir "$WORKCASE" >"$WORKCASE/stdout.log" 2>&1
+  bash "$SCRIPTS/ci-test-lane.sh"     --kind ui --lane ui-t --target ConduitUITests     --classes "$_classes"     --class-timeouts "$_cto"     --predicted 42 --timeout "$_timeout"     --xctestrun "$WORK/fake.xctestrun"     --result-dir "$WORKCASE" >"$WORKCASE/stdout.log" 2>&1
   echo $? > "$WORKCASE/exit-code"
 }
 
@@ -604,6 +610,49 @@ if grep -q -- "--batches-json is required" "$WORKCASE/stdout.log"; then
   ok "missing batch table rejected loudly"
 else
   bad "missing --batches-json must be rejected loudly"
+fi
+
+# --- unit case 12: stall WITH known failures is a test failure, no retry ------
+# The batch retry is only for watchdog stalls with ZERO known failures: a
+# batch whose killed xcresult still records surviving test failures must fail
+# the lane exactly like an ordinary failure (real failures never convert into
+# infrastructure recovery).
+end_case
+begin_case "unit stall with known failures never retried" "$WORK/b12"
+: > "$INVOCATION_LOG"
+reset_unit_stub_vars
+FAKE_UNIT_B2_A1="hangfail" run_lane "AlphaTests,BetaTests,GammaTests" 3 1
+assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
+assert_eq "verdict" "$(lane_field "['status']")" "fail"
+assert_eq "attempts" "$(attempts_statuses)" "['passed', 'test-failures']"
+assert_eq "batch statuses" "$(batch_statuses)" "['pass', 'test-failures', 'not_run']"
+assert_eq "no batch retry for a failure-carrying stall" "$(batch_invocations "batch-2-a2")" "0"
+assert_eq "later batches never ran" "$(batch_invocations "batch-3-a1")" "0"
+assert_eq "failures attributed, not hidden" "$(lane_field "['failures'][0]['class']")" "BetaTests"
+
+# --- unit case 13: exit-0 batch without a class record fails the lane ---------
+# Defense in depth: an exit-0 batch whose parseable xcresult has no record of
+# an assigned class must not finish as a clean pass (an -only-testing filter
+# silently matching nothing), and there is no per-class diagnosis for units -
+# the lane fails closed. Beta and Gamma share batch 2 so the omit leaves a
+# VALID document that is merely missing one assigned class.
+end_case
+begin_case "unit pass with unrecorded class fails closed" "$WORK/b13"
+: > "$INVOCATION_LOG"
+reset_unit_stub_vars
+FAKE_UNIT_OMIT="BetaTests" \
+  run_lane_raw "AlphaTests,BetaTests,GammaTests" \
+  '[{"classes":["AlphaTests"],"timeout_s":300},{"classes":["BetaTests","GammaTests"],"timeout_s":300}]'
+assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
+assert_eq "verdict" "$(lane_field "['status']")" "fail"
+assert_eq "attempts" "$(attempts_statuses)" "['passed', 'incomplete']"
+assert_eq "batch statuses" "$(batch_statuses)" "['pass', 'incomplete']"
+assert_eq "no retry for an unaccountable batch" "$(batch_invocations "batch-2-a2")" "0"
+assert_eq "later batches never ran" "$(batch_invocations "batch-3-a1")" "0"
+if grep -q "exited 0 but the xcresult has no record" "$WORKCASE/stdout.log"; then
+  ok "exit-0 pass with a missing class record announced"
+else
+  bad "an exit-0 batch with an unrecorded class must not pass silently"
 fi
 
 # --- unit case 10: finished session survives its budget via finalize grace -----

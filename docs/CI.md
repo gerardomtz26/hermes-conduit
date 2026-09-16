@@ -296,11 +296,15 @@ unit_batch_timeout = max(600s, ceil((invocation_overhead 240s + predicted x 2.5)
 
 The lane watchdog reported in the plan is the SUM of its batch budgets (the
 total the lane may consume across invocations), and the outer GitHub job
-ceiling is `ceil((2 x sum(batch budgets) + 1200s) / 60)` minutes - every
-batch burning its budget twice (attempt 1 plus its single batch-level
-retry) plus bounded shutdowns/recovery and setup/download slack - so the
-ceiling can never preempt legitimate in-script recovery (the per-batch
-watchdogs inside the runner are the real enforcement).
+ceiling is
+`ceil((2 x sum(batch budgets) + n_batches x 600s recovery + (2 x n_batches
++ 1) x 300s extraction + 1200s) / 60)` minutes - every batch burning its
+budget twice (attempt 1 plus its single batch-level retry), each retry
+paying one bounded simulator recovery, every attempt's timing extraction
+wedging to the xcresulttool subprocess bound, plus setup/download slack -
+so the ceiling can never preempt legitimate in-script recovery (the
+per-batch watchdogs inside the runner are the real enforcement; GitHub's
+own 6-hour hosted-runner cap is the only thing above it).
 
 UI classes each get their **own** watchdog, planned per class from the same
 timing data that balances the lanes: the shard's batched invocation is

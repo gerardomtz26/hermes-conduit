@@ -236,14 +236,20 @@ class PlanningTests(unittest.TestCase):
 
     def test_job_ceiling_covers_worst_in_script_path(self):
         # Ceiling must fit the worst in-script path - EVERY batch burning its
-        # budget twice (attempt 1 plus its single batch-level retry) - plus
-        # the setup margin, and stay under GitHub's 6-hour hard limit for
-        # realistic batch budgets.
+        # budget twice (attempt 1 plus its single batch-level retry), each
+        # retry paying one bounded erase-path recovery, every attempt's
+        # extraction wedging to the xcresulttool bound - plus the setup
+        # margin, and stay under GitHub's 6-hour hard limit for realistic
+        # batch vectors.
         cfg = default_cfg()
-        for budgets in ([600], [800, 800], [1100, 2625, 900]):
+        for budgets in ([600], [800, 800], [1100, 2625, 900], [600] * 6):
             batches = [{"timeout_s": b} for b in budgets]
+            n = len(batches)
             ceiling_s = planner.unit_job_timeout_min(batches, cfg) * 60
-            worst_case = 2 * sum(budgets) + cfg["job_timeout_margin_s"]
+            worst_case = (2 * sum(budgets)
+                          + n * cfg["unit_batch_recovery_overhead_s"]
+                          + (2 * n + 1) * cfg["ui_extract_bound_s"]
+                          + cfg["job_timeout_margin_s"])
             self.assertGreaterEqual(ceiling_s, worst_case,
                                     f"ceiling too small for budgets={budgets}")
             self.assertLess(ceiling_s, 6 * 3600)

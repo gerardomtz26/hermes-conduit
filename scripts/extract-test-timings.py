@@ -298,12 +298,14 @@ def _part_sort_key(name: str) -> tuple:
     """Chronological fold order, returned as (is_batch, stem, attempt):
     batch-named parts fold before every class-named part regardless of
     ASCII order (the lowercase stem would otherwise sort after the class
-    names and win last-wins with stale killed-batch data). Within a group
-    the constant is_batch field collapses and (stem, attempt) orders
-    numeric attempts correctly (a2 after a10 - plain filename sort would
-    put a10 first)."""
+    names and win last-wins with stale killed-batch data; the batch group
+    covers both the UI shard's "batch" part and the unit lane runner's
+    numbered "batch-<n>" parts). Within a group the constant is_batch field
+    collapses and (stem, attempt) orders numeric attempts correctly (a2
+    after a10 - plain filename sort would put a10 first)."""
     stem = re.sub(r"-a\d+\.json$", "", name)
-    is_batch = 0 if _part_class(name) == "batch" else 1
+    cls = _part_class(name)
+    is_batch = 0 if (cls == "batch" or cls.startswith("batch-")) else 1
     return (is_batch, stem, _attempt_index(name))
 
 
