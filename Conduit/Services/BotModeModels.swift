@@ -330,4 +330,49 @@ enum BotChatHygiene {
         }
         return false
     }
+
+    /// The catalog an ordinary dashboard workspace may pick its automatic /
+    /// preserve-current RESUME TARGET from: the raw catalog minus canonical
+    /// Bot Chat presentation rows. Selection-only — the published catalog is
+    /// never mutated, and ordinary list presentation keeps exactly the
+    /// hygiene it had.
+    ///
+    /// Two independent signals, because they cover different moments:
+    ///
+    /// 1. `isCanonicalBotChatRow` — registry evidence, when a roster is
+    ///    loaded (a bot's canonical ids, or the reserved title stamped on
+    ///    that bot's profile).
+    /// 2. the reserved exact title ALONE, which is load-bearing rather than
+    ///    redundant: at cold launch `botRoster` is empty, so registry
+    ///    evidence cannot fire, and a stale/legacy visible row wearing the
+    ///    canonical title would otherwise be the newest candidate.
+    ///
+    /// Selecting a canonical row builds the dashboard workspace's active
+    /// conversation, cold-restore selection, and persisted title from a
+    /// session that belongs to a bot's forever chat — the row must therefore
+    /// be unselectable here regardless of client-side registry state.
+    static func ordinaryResumeCandidates(
+        _ rows: [SessionSummary],
+        roster: [BotProfile]
+    ) -> [SessionSummary] {
+        rows.filter { row in
+            !isCanonicalBotChatRow(row, roster: roster) && !isReservedCanonicalTitleRow(row)
+        }
+    }
+
+    /// The roster-independent half of the reservation: a row titled exactly
+    /// "Bot Chat" is canonical presentation state on wire data alone.
+    ///
+    /// It stays unconditional even when a roster IS loaded (rather than
+    /// deferring to `isCanonicalBotChatRow`) because the most likely stale
+    /// shape — a legacy/foreign listing whose `profile` stamp is missing or
+    /// names a profile this client does not have in its roster — cannot
+    /// satisfy that rule anyway, and a roster fetched seconds ago is not
+    /// evidence about a row the server is presenting right now.
+    /// Consequence, identical in spirit to `isCanonicalBotChatRow`'s: such a
+    /// session is never AUTOMATICALLY resumed. It stays listed and explicitly
+    /// openable when it is an ordinary conversation.
+    static func isReservedCanonicalTitleRow(_ row: SessionSummary) -> Bool {
+        row.title.trimmingCharacters(in: .whitespacesAndNewlines) == BotMode.canonicalChatTitle
+    }
 }

@@ -1208,6 +1208,260 @@ final class BotModeTests: XCTestCase {
         XCTAssertEqual(harness.appState.botRoster.map(\.name), ["atlas"])
     }
 
+    // MARK: - PR #170 triage: reserved-row resume boundary
+
+    /// Cold launch has neither a roster nor a bot-chat registry entry, so the
+    /// reserved exact title is the only signal that can keep a stale/legacy
+    /// visible canonical row out of the ordinary automatic resume selection.
+    /// The row must not become this workspace's active conversation (which is
+    /// what seeds the cold-restore selection and persists the wire title),
+    /// while the published catalog itself stays untouched.
+    func testAutomaticResumeNeverSelectsReservedBotChatRow() async {
+        let botChatRow = makeSessionSummary(
+            id: "runtime-bot",
+            title: BotMode.canonicalChatTitle,
+            storedID: "stored-bot"
+        )
+        let ordinaryRow = makeSessionSummary(id: "ordinary-1", title: "Design review")
+        var resumedIDs: [String] = []
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [botChatRow, ordinaryRow] },
+            openSession: { _, id, _ in
+                resumedIDs.append(id)
+                return SessionResumeResult(
+                    sessionId: id,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        XCTAssertTrue(harness.appState.botRoster.isEmpty, "a cold launch carries no roster")
+
+        await harness.appState.syncSession(
+            purpose: .automaticReturn,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(
+            Set(resumedIDs),
+            Set(["ordinary-1"]),
+            "the reserved canonical row is never a resume candidate"
+        )
+        XCTAssertEqual(harness.appState.activeSessionId, "ordinary-1")
+        XCTAssertEqual(
+            harness.store.lastSessionID(for: "default"),
+            "ordinary-1",
+            "the cold-restore selection belongs to the ordinary conversation, not the bot chat"
+        )
+        let persisted = lastHarnessDefaults?.dictionary(
+            forKey: "conduit.activeSessionTitlesByProfile.v1"
+        ) as? [String: String]
+        XCTAssertEqual(persisted?["default"], "Design review")
+        XCTAssertFalse(
+            persisted?.values.contains(BotMode.canonicalChatTitle) ?? false,
+            "the reserved wire title must never enter the persisted ordinary title cache: \(persisted ?? [:])"
+        )
+        XCTAssertTrue(
+            harness.appState.sessions.contains { $0.title == BotMode.canonicalChatTitle },
+            "the filter is selection-only: the published catalog keeps the row"
+        )
+    }
+
+    /// The reserved row is not a fallback either. When it is the only
+    /// candidate, ordinary selection declines (the pre-existing "no eligible
+    /// chat" behaviour) rather than adopting a bot's forever chat as this
+    /// workspace's conversation. The resume seam is what makes the assertion
+    /// meaningful: it proves the row was never even attempted, not that a
+    /// failed resume happened to leave the state clean.
+    func testAutomaticResumeDeclinesWhenOnlyCandidateIsReservedBotChat() async {
+        let botChatRow = makeSessionSummary(
+            id: "runtime-bot",
+            title: BotMode.canonicalChatTitle,
+            storedID: "stored-bot"
+        )
+        var resumedIDs: [String] = []
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [botChatRow] },
+            openSession: { _, id, _ in
+                resumedIDs.append(id)
+                return SessionResumeResult(
+                    sessionId: id,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+
+        await harness.appState.syncSession(
+            purpose: .automaticReturn,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertTrue(resumedIDs.isEmpty, "the reserved row is never resumed: \(resumedIDs)")
+        XCTAssertNil(harness.appState.activeSessionId, "the reserved row is never adopted")
+        XCTAssertNil(harness.store.lastSessionID(for: "default"))
+        let persisted = lastHarnessDefaults?.dictionary(
+            forKey: "conduit.activeSessionTitlesByProfile.v1"
+        ) as? [String: String]
+        XCTAssertFalse(
+            persisted?.values.contains(BotMode.canonicalChatTitle) ?? false,
+            "declining must not persist the reserved title either: \(persisted ?? [:])"
+        )
+    }
+
+    /// A canonical Bot Chat known to the registry can still be opened through
+    /// the ORDINARY path (`requestOpenSession` and friends pass no
+    /// conversation profile). Ownership must therefore come from registry
+    /// identity, so the raw catalog row titled "Bot Chat" never reaches the
+    /// persisted ordinary title cache — while ordinary opens are unchanged.
+    func testOrdinaryOpenOfRegistryKnownBotChatNeverPersistsWireTitle() async {
+        var resumedProfiles: [String?] = []
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            openSessionWithProfile: { _, id, _, profile in
+                resumedProfiles.append(profile)
+                return SessionResumeResult(
+                    sessionId: id,
+                    storedSessionId: id == "runtime-1" ? "stored-1" : nil,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            findBotChat: { _, _ in
+                [BotChatLookupRow(id: "stored-1", resolvedID: "runtime-1", title: "Bot Chat")]
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        let bot = makeBot(name: "atlas")
+
+        // The roster's own open registers the canonical conversation.
+        let openedAsBot = await harness.appState.openBotChat(for: bot)
+        XCTAssertTrue(openedAsBot)
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-1")
+        XCTAssertEqual(harness.appState.activeSessionTitle, bot.displayLabel)
+        XCTAssertEqual(resumedProfiles, ["atlas"])
+
+        // A stale/legacy visible canonical row sits in the raw catalog.
+        harness.appState.sessions = [
+            makeSessionSummary(
+                id: "runtime-1",
+                title: BotMode.canonicalChatTitle,
+                storedID: "stored-1"
+            )
+        ]
+
+        let reopenedOrdinary = await harness.appState.openSession("runtime-1")
+        XCTAssertTrue(reopenedOrdinary, "a registry-known bot chat still opens through the ordinary path")
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-1")
+        XCTAssertNil(
+            harness.store.lastSessionID(for: "default"),
+            "an ordinary-path open of a bot conversation never claims the cold-restore selection"
+        )
+        XCTAssertEqual(
+            harness.appState.activeSessionTitle,
+            bot.displayLabel,
+            "the reserved wire title never displaces the bot's display label"
+        )
+        let persistedAfterOrdinaryOpen = lastHarnessDefaults?.dictionary(
+            forKey: "conduit.activeSessionTitlesByProfile.v1"
+        ) as? [String: String]
+        XCTAssertFalse(
+            persistedAfterOrdinaryOpen?.values.contains(BotMode.canonicalChatTitle) ?? false,
+            "ordinary opens of a bot conversation never persist the wire title: \(persistedAfterOrdinaryOpen ?? [:])"
+        )
+
+        // An ordinary conversation keeps persisting its title exactly as before.
+        harness.appState.sessions = [
+            makeSessionSummary(
+                id: "runtime-1",
+                title: BotMode.canonicalChatTitle,
+                storedID: "stored-1"
+            ),
+            makeSessionSummary(id: "ordinary-1", title: "Design review")
+        ]
+        let openedOrdinary = await harness.appState.openSession("ordinary-1")
+        XCTAssertTrue(openedOrdinary)
+        XCTAssertEqual(harness.appState.activeSessionId, "ordinary-1")
+        let persistedAfterOrdinarySession = lastHarnessDefaults?.dictionary(
+            forKey: "conduit.activeSessionTitlesByProfile.v1"
+        ) as? [String: String]
+        XCTAssertEqual(persistedAfterOrdinarySession?["default"], "Design review")
+    }
+
+    /// A canonical Bot Chat's identity IS the exact title "Bot Chat", so it
+    /// must never enter automatic title generation — a generated rename would
+    /// break the exact-title lookup that resolves the profile's forever chat.
+    /// Ordinary conversations keep the historical recovery scheduling.
+    func testSecondaryTitleRecoveryNeverSchedulesForCanonicalBotChat() async {
+        var resumedProfiles: [String?] = []
+        let harness = makeBotHarness(
+            configureDefaults: { defaults in
+                // The recovery's own historical gate: it only runs for a
+                // non-default workspace profile.
+                defaults.set("analyst", forKey: "conduit.activeProfile")
+            },
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                openSessionWithProfile: { _, id, _, profile in
+                    resumedProfiles.append(profile)
+                    return SessionResumeResult(
+                        sessionId: id,
+                        storedSessionId: id == "runtime-1" ? "stored-1" : nil,
+                        messages: [
+                            ChatMessage(id: "user-1", role: .user, content: "Question", timestamp: "1"),
+                            ChatMessage(id: "assistant-1", role: .assistant, content: "Answer", timestamp: "2")
+                        ],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in },
+                findBotChat: { _, _ in
+                    [BotChatLookupRow(id: "stored-1", resolvedID: "runtime-1", title: "Bot Chat")]
+                }
+            )
+        )
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "analyst"
+        )
+        XCTAssertEqual(harness.appState.activeProfile, "analyst")
+
+        let openedAsBot = await harness.appState.openBotChat(for: makeBot(name: "atlas"))
+        XCTAssertTrue(openedAsBot)
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-1")
+        XCTAssertEqual(resumedProfiles, ["atlas"])
+        XCTAssertFalse(
+            harness.appState.hasSecondaryTitleRecoveryScheduled(forSessionID: "runtime-1"),
+            "a canonical Bot Chat never enters automatic title recovery"
+        )
+
+        // Positive control: the same entry point still schedules for an
+        // ordinary conversation, so the assertion above cannot be vacuous.
+        harness.appState.sessions = [
+            makeSessionSummary(id: "ordinary-1", title: "Design review", profile: "analyst")
+        ]
+        let openedOrdinary = await harness.appState.openSession("ordinary-1")
+        XCTAssertTrue(openedOrdinary)
+        XCTAssertTrue(
+            harness.appState.hasSecondaryTitleRecoveryScheduled(forSessionID: "ordinary-1"),
+            "ordinary conversations keep the historical title-recovery scheduling"
+        )
+    }
+
     // MARK: - harness
 
     /// The UserDefaults suite of the most recent harness, so tests can pin

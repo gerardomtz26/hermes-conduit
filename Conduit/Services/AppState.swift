@@ -3776,8 +3776,20 @@ final class AppState: ObservableObject {
                 )
                 return chatResumeSyncInterruptionOutcome(for: automaticWorkToken)
             }
+            // A canonical Bot Chat is reserved presentation state reachable
+            // only through the Bots roster: it must never be chosen as this
+            // workspace's ordinary resume target. Selection-only — the
+            // published catalog above stays raw — and deliberately
+            // roster-INDEPENDENT, because a cold launch has no roster yet and
+            // a stale visible canonical row would otherwise be the newest
+            // candidate, making itself the active conversation, the
+            // cold-restore selection, and the persisted title's source.
+            let resumeCandidates = BotChatHygiene.ordinaryResumeCandidates(
+                allSessions,
+                roster: botRoster
+            )
             let target = selectChatResumeTarget(
-                in: allSessions,
+                in: resumeCandidates,
                 profile: profile,
                 purpose: purpose,
                 currentSessionID: activeSessionId,
@@ -8179,8 +8191,14 @@ final class AppState: ObservableObject {
         // A bot chat is not the dashboard workspace's selected conversation:
         // it must never seed the cold-restore resume store with a pointer
         // the ordinary restore path cannot resume (upstream keeps bot tabs
-        // out of the main workspace's selection for the same reason).
-        setActiveSessionState(id: sessionId, recordsResumeSelection: conversationProfile == nil)
+        // out of the main workspace's selection for the same reason). The
+        // registry conjunct covers a KNOWN bot conversation opened through
+        // the ordinary path, exactly like the title guard below.
+        setActiveSessionState(
+            id: sessionId,
+            recordsResumeSelection: conversationProfile == nil
+                && botConversationProfile(for: sessionId) == nil
+        )
         messages = []
         persistedTranscriptWindow = nil
         // Freshness evidence belongs to the conversation it was captured
@@ -8189,10 +8207,15 @@ final class AppState: ObservableObject {
         clearStreamingText()
         activeAssistantMessageId = nil
         resetReasoningTurn()
-        // A bot open carries its own title (the bot's display label) and
-        // must never write the catalog's wire title — or any title — into
-        // the dashboard profile's persisted title cache.
-        if conversationProfile == nil {
+        // A canonical Bot Chat carries its own title (the bot's display
+        // label) and must never write the catalog's wire title — or any
+        // title — into the dashboard profile's persisted title cache. Both
+        // conditions are required: the parameter covers the roster's own
+        // open, and the registry covers a KNOWN bot conversation opened
+        // through the ordinary path (`requestOpenSession` and friends,
+        // which pass no conversation profile).
+        if conversationProfile == nil,
+           botConversationProfile(for: sessionId) == nil {
             updateActiveSessionTitle(for: sessionId)
         }
         if let preferredTitle, !preferredTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -13720,8 +13743,38 @@ final class AppState: ObservableObject {
         profile: String,
         sessionIDs: [String]
     ) async {
-        let taskKeys = Set(sessionIDs.filter { !$0.isEmpty }.map { "\(profile)|\($0)" })
+        let taskKeys = Set(
+            sessionIDs.filter { !$0.isEmpty }.map {
+                Self.secondaryTitleRecoveryTaskKey(profile: profile, sessionID: $0)
+            }
+        )
         await sessionTitleRecoveryTracker.cancel(taskKeys)
+    }
+
+    /// One source of truth for the secondary-recovery task key. The scheduler,
+    /// its cancellation, and the observability seam below must agree: a
+    /// key-format change made in only one of them would silently disable
+    /// another (and quietly turn a test pinning the boundary vacuous).
+    private static func secondaryTitleRecoveryTaskKey(
+        profile: String,
+        sessionID: String
+    ) -> String {
+        "\(profile)|\(sessionID)"
+    }
+
+    /// Whether a secondary automatic title-recovery task is registered for
+    /// this conversation. Canonical Bot Chats are excluded from that
+    /// machinery outright (see `scheduleSecondaryProfileTitleRecovery`), so
+    /// this answers `false` for them, while ordinary conversations keep the
+    /// historical behaviour. Internal rather than private so regression
+    /// tests can pin the boundary without waiting out the recovery delay.
+    func hasSecondaryTitleRecoveryScheduled(forSessionID sessionID: String) -> Bool {
+        sessionTitleRecoveryTracker.hasTask(
+            for: Self.secondaryTitleRecoveryTaskKey(
+                profile: activeProfile,
+                sessionID: sessionID
+            )
+        )
     }
 
     private func titleGenerationSettings(for profile: String) async -> TitleGenerationSettings? {
@@ -13782,13 +13835,21 @@ final class AppState: ObservableObject {
         userMessage: String,
         assistantMessage: String
     ) {
+        // A canonical Bot Chat never participates in automatic title
+        // generation: its identity IS the exact title "Bot Chat", so a
+        // generated rename would break the exact-title lookup that resolves
+        // the profile's forever chat (and could make the bot unmintable or
+        // mintable-twice downstream). Registry identity — never a title
+        // comparison — decides ownership, so this returns before any RPC,
+        // settings read, or task registration.
+        guard botConversationProfile(for: sessionId) == nil else { return }
         let profile = activeProfile
         guard profile != "default",
               let client,
               !userMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !assistantMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
-        let taskKey = "\(profile)|\(sessionId)"
+        let taskKey = Self.secondaryTitleRecoveryTaskKey(profile: profile, sessionID: sessionId)
         guard !sessionTitleRecoveryTracker.isSuppressed(taskKey),
               !sessionTitleRecoveryTracker.hasTask(for: taskKey) else { return }
         let token = UUID()
@@ -13920,7 +13981,10 @@ final class AppState: ObservableObject {
 
     func handleStreamEvent(_ event: StreamEvent) {
         if case .sessionTitle(let runtimeSessionId, let storedSessionId, let title) = event {
-            let taskKey = "\(activeProfile)|\(runtimeSessionId)"
+            let taskKey = Self.secondaryTitleRecoveryTaskKey(
+                profile: activeProfile,
+                sessionID: runtimeSessionId
+            )
             sessionTitleRecoveryTracker.cancel(taskKey)
             applyRecoveredSessionTitle(
                 title,
