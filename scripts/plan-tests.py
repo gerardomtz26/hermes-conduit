@@ -74,6 +74,15 @@ MAX_UNIT_CLASSES_PER_XCODEBUILD_BATCH = 7
 # batches measured 211-488s wall INCLUDING startup.
 UNIT_BATCH_TIMEOUT_MIN_S = 600
 UNIT_BATCH_TIMEOUT_MULTIPLIER = 2.5
+# Parallelism policy: a unit lane may not chain more than this many
+# sequential xcodebuild batches inside one GitHub job. #184's first live run
+# was reliable but slow (2 jobs x 9-10 batches = 29-48 min wall), so the
+# planner treats this as a lower bound on the unit lane count: batches run
+# CONCURRENTLY across hosted Macs instead of serially on one. The cap is on
+# BATCHES per job, not on an arbitrary "safe class count"; with the 7-class
+# batch cap this bounds a normal lane at roughly 28 classes. Watchdog
+# budgets are deliberately untouched - one variable per change.
+MAX_UNIT_BATCHES_PER_JOB = 4
 # Modeled fixed cost of ONE xcodebuild invocation on a lane: process startup,
 # simulator boot, app/test-host install, and xcresult finalization. Measured
 # on macos-26 hosted runners as lane actual minus predicted execution
@@ -441,6 +450,46 @@ def unit_job_timeout_min(batches: list, cfg: dict) -> int:
     return int(math.ceil(total / 60.0))
 
 
+def enforce_batches_per_job(items: list, n_lanes: int, cfg: dict) -> tuple:
+    """Raise the unit lane count (never lower it) until the ACTUAL LPT
+    assignment gives every lane at most unit_max_batches_per_job batches
+    (ceil(lane class count / unit_batch_max_classes)). Returns the final
+    (lane count, lanes). Deterministic: the check is exact and the
+    assignment at each count is the same LPT the rest of the planner uses.
+
+    A pure ceil(N / (batch_cap x batches)) floor is only a starting point:
+    LPT balances timing load, so a lane can legitimately receive far more
+    than the average class count when estimates are skewed. The only
+    guarantee that counts is verification of the produced assignment."""
+    n_classes = len(items)
+    if n_classes == 0:
+        return 0, []
+    size = cfg.get("unit_batch_max_classes", MAX_UNIT_CLASSES_PER_XCODEBUILD_BATCH)
+    max_batches = cfg.get("unit_max_batches_per_job", MAX_UNIT_BATCHES_PER_JOB)
+    if size < 1 or max_batches < 1:
+        # Structured fail-closed, never a crash: skip the floor (the
+        # division is meaningless) and let validate_plan report the
+        # invalid policy, exactly like unit_batch_max_classes < 1.
+        return n_lanes, longest_processing_time_first(items, n_lanes)
+    lo = max(n_lanes, -(-n_classes // (size * max_batches)))
+    hi = min(cfg["max_lanes"], n_classes)
+    n = max(lo, 1)
+    candidate = None
+    while n <= hi:
+        candidate = longest_processing_time_first(items, n)
+        if all(-(-len(lane) // size) <= max_batches for lane in candidate):
+            return n, candidate
+        n += 1
+    # Bounds exhausted without a policy-satisfying assignment: return the
+    # best (largest) attempt and let validate_plan fail the run closed -
+    # planning must never silently ship a plan that violates the policy.
+    # (The floor may exceed hi outright; hi >= 1 whenever there are classes,
+    # so the returned assignment is still well-defined.)
+    if candidate is None:
+        candidate = longest_processing_time_first(items, hi)
+    return hi, candidate
+
+
 def imbalance_pct(values: list) -> float:
     if not values:
         return 0.0
@@ -460,7 +509,23 @@ def build_plan(discovery: dict, cfg: dict, estimates: dict) -> dict:
     items = sorted(unit_est.items(), key=lambda kv: (-kv[1], kv[0]))
     total = sum(s for _n, s in items)
     n_lanes = lane_count_for(items, cfg)
-    lanes = longest_processing_time_first(items, n_lanes)
+    # Parallelism floor: timing-aware selection may CONSOLIDATE below what
+    # the per-job batch policy allows, and LPT balances LOAD, not class
+    # counts - so even a lane count >= ceil(N / (cap x batches)) can leave
+    # one lane with too many classes. Verify the ACTUAL assignment and
+    # increment the lane count (never lower it) until every lane fits the
+    # per-job batch policy; validate_plan fails the run closed if the
+    # configured bounds make the policy unsatisfiable.
+    n_lanes, lanes = enforce_batches_per_job(items, n_lanes, cfg)
+    if unit_names and n_lanes >= cfg["max_lanes"]:
+        warn(
+            "unit lane count is at max_lanes ({0}); the {1}-batch per-job "
+            "policy bounds the suite at {2} classes - further growth will "
+            "fail planning closed until max_lanes or the batch policy is "
+            "raised".format(
+                cfg["max_lanes"], cfg["unit_max_batches_per_job"],
+                cfg["max_lanes"] * cfg["unit_max_batches_per_job"]
+                * cfg["unit_batch_max_classes"]))
 
     unit_lanes = []
     for i, classes in enumerate(lanes, start=1):
@@ -523,6 +588,7 @@ def build_plan(discovery: dict, cfg: dict, estimates: dict) -> dict:
             "invocation_overhead_s", "lane_wall_tolerance_s",
             "unit_batch_max_classes", "unit_batch_timeout_min_s",
             "unit_batch_timeout_multiplier", "unit_batch_recovery_overhead_s",
+            "unit_max_batches_per_job",
             "ui_min_lanes", "ui_max_lanes", "ui_class_timeout_min_s",
             "ui_class_timeout_multiplier", "job_timeout_margin_s")},
         "inventory": {"unit": unit_names, "ui": ui_names},
@@ -633,6 +699,15 @@ def validate_plan(plan: dict, discovery: dict) -> list:
                 "reordering)")
         if lane.get("batch_count") != len(lane_batches):
             errors.append(f"unit lane {lane['lane']} batch_count mismatch")
+        max_batches = plan["config"].get("unit_max_batches_per_job")
+        if max_batches is not None and max_batches < 1:
+            errors.append("unit_max_batches_per_job must be >= 1")
+            max_batches = None
+        if max_batches is not None and len(lane_batches) > max_batches:
+            errors.append(
+                f"unit lane {lane['lane']} plans {len(lane_batches)} "
+                f"sequential batches, exceeding the {max_batches}-batch "
+                "per-job policy")
     n_ui = len(ui_names)
     ui_lo = min(plan["config"]["ui_min_lanes"], n_ui)
     if plan["ui_lanes"]:
@@ -700,7 +775,9 @@ def plan_summary_md(plan: dict, discovery: dict, source: str) -> str:
     lines.append(
         "- Unit lanes execute as sequential fresh-xcodebuild batches of at most "
         f"**{plan['config']['unit_batch_max_classes']}** classes on one runner "
-        "(same Simulator session; no erase between successful batches). "
+        "(same Simulator session; no erase between successful batches), with at "
+        f"most **{plan['config']['unit_max_batches_per_job']}** batches per job "
+        "(more unit jobs run the batches concurrently). "
         "The lane watchdog is the sum of the per-batch budgets.")
     lines.append("")
     lines.append(f"- Predicted imbalance: **{plan['imbalance_predicted_pct']}%** "
@@ -855,6 +932,7 @@ def _cfg_from_args(a) -> dict:
         "unit_batch_timeout_min_s": a.unit_batch_timeout_min_s,
         "unit_batch_timeout_multiplier": a.unit_batch_timeout_multiplier,
         "unit_batch_recovery_overhead_s": a.unit_batch_recovery_overhead_s,
+        "unit_max_batches_per_job": a.unit_max_batches_per_job,
         "ui_min_lanes": a.ui_min_lanes,
         "ui_max_lanes": a.ui_max_lanes,
         "ui_class_timeout_min_s": a.ui_class_timeout_min_s,
@@ -935,6 +1013,8 @@ def main(argv=None) -> int:
                        default=UNIT_BATCH_TIMEOUT_MULTIPLIER)
         p.add_argument("--unit-batch-recovery-overhead-s", type=int,
                        default=UNIT_BATCH_RECOVERY_OVERHEAD_S)
+        p.add_argument("--unit-max-batches-per-job", type=int,
+                       default=MAX_UNIT_BATCHES_PER_JOB)
         p.add_argument("--ui-min-lanes", type=int, default=UI_MIN_LANES)
         p.add_argument("--ui-max-lanes", type=int, default=UI_MAX_LANES)
         p.add_argument("--ui-class-timeout-min-s", type=int, default=UI_CLASS_TIMEOUT_MIN_S)
