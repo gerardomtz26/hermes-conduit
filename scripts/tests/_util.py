@@ -54,6 +54,7 @@ def default_cfg(**overrides):
         "unit_batch_timeout_min_s": 600,
         "unit_batch_timeout_multiplier": 2.5,
         "unit_batch_recovery_overhead_s": 600,
+        "unit_max_batches_per_job": 4,
         "ui_min_lanes": 3,
         "ui_max_lanes": 4,
         "ui_class_timeout_min_s": 420,

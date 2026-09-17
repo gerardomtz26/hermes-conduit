@@ -117,6 +117,16 @@ small batches**:
   (`--batches-json`) and the runner refuses to start unless the batches
   exactly reproduce the lane's class order; the planner is the single
   source of that policy.
+* A lane may not chain more than `MAX_UNIT_BATCHES_PER_JOB = 4` sequential
+  batches inside one GitHub job. The cap is on BATCHES per job, not on an
+  arbitrary "safe class count": the planner verifies the ACTUAL LPT
+  assignment (`ceil(lane classes / 7) <= 4` per lane) and increments the
+  lane count - never lowering what timing-aware selection chose - until
+  every lane fits, failing planning closed if the configured lane bounds
+  make the policy unsatisfiable. This keeps unit wall time in the 10-20
+  minute range: batches run concurrently across hosted Macs instead of
+  serially on one. Watchdog budgets are deliberately untouched by this
+  policy (one variable per change).
 * Each batch runs as its own fresh `xcodebuild test-without-building`
   invocation on the same runner and the same Simulator session - **no
   erase or reset between successful batches** (the fresh process is the
