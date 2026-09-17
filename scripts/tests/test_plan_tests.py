@@ -490,6 +490,9 @@ class UnitBatchParallelismTests(unittest.TestCase):
         self.assertEqual(errors, [])
 
     def test_twenty_nine_classes_need_a_second_job(self):
+        # Off-by-one pin at the 7x4 boundary: 29 classes can never fit one
+        # 4-batch job. (Timing alone also picks 2 lanes here, so this also
+        # pins that the floor never OVER-splits a small inventory.)
         names = ['C{0:02d}Tests'.format(i) for i in range(29)]
         discovery, plan, errors = self._plan(names)
         self.assertGreaterEqual(plan['lane_count'], 2)
@@ -592,6 +595,29 @@ class UnitBatchParallelismTests(unittest.TestCase):
         violations = planner.validate_plan(broken, discovery)
         self.assertTrue(
             any('per-job policy' in e for e in violations), violations)
+
+    def test_invalid_policy_value_fails_closed_without_crashing(self):
+        # unit_max_batches_per_job=0 must produce a structured planning
+        # error, never a ZeroDivisionError (the natural "disable the cap"
+        # value an operator would try first).
+        names = ['M{0}Tests'.format(i) for i in range(10)]
+        cfg = default_cfg(unit_max_batches_per_job=0)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(make_repo(Path(tmp), names, []))
+            est = {n: 10.0 for n in names}
+            discovery, plan = plan_from_tree(root, est, cfg)
+            errors = planner.validate_plan(plan, discovery)
+            self.assertTrue(
+                any('unit_max_batches_per_job must be >= 1' in e
+                    for e in errors), errors)
+
+    def test_empty_inventory_passes_through_the_helper(self):
+        self.assertEqual(
+            planner.enforce_batches_per_job([], 0, default_cfg()), (0, []))
+        self.assertEqual(
+            planner.enforce_batches_per_job(
+                [('OnlyTests', 1.0)], 1, default_cfg()),
+            (1, [['OnlyTests']]))
 
     def test_policy_bounds_can_make_the_plan_fail_closed(self):
         # An inventory too large for the configured lane maximum cannot

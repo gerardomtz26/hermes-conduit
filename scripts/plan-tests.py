@@ -464,11 +464,17 @@ def enforce_batches_per_job(items: list, n_lanes: int, cfg: dict) -> tuple:
     n_classes = len(items)
     if n_classes == 0:
         return 0, []
-    size = cfg["unit_batch_max_classes"]
-    max_batches = cfg["unit_max_batches_per_job"]
+    size = cfg.get("unit_batch_max_classes", MAX_UNIT_CLASSES_PER_XCODEBUILD_BATCH)
+    max_batches = cfg.get("unit_max_batches_per_job", MAX_UNIT_BATCHES_PER_JOB)
+    if size < 1 or max_batches < 1:
+        # Structured fail-closed, never a crash: skip the floor (the
+        # division is meaningless) and let validate_plan report the
+        # invalid policy, exactly like unit_batch_max_classes < 1.
+        return n_lanes, longest_processing_time_first(items, n_lanes)
     lo = max(n_lanes, -(-n_classes // (size * max_batches)))
     hi = min(cfg["max_lanes"], n_classes)
     n = max(lo, 1)
+    candidate = None
     while n <= hi:
         candidate = longest_processing_time_first(items, n)
         if all(-(-len(lane) // size) <= max_batches for lane in candidate):
@@ -477,7 +483,11 @@ def enforce_batches_per_job(items: list, n_lanes: int, cfg: dict) -> tuple:
     # Bounds exhausted without a policy-satisfying assignment: return the
     # best (largest) attempt and let validate_plan fail the run closed -
     # planning must never silently ship a plan that violates the policy.
-    return hi, longest_processing_time_first(items, hi)
+    # (The floor may exceed hi outright; hi >= 1 whenever there are classes,
+    # so the returned assignment is still well-defined.)
+    if candidate is None:
+        candidate = longest_processing_time_first(items, hi)
+    return hi, candidate
 
 
 def imbalance_pct(values: list) -> float:
@@ -507,6 +517,15 @@ def build_plan(discovery: dict, cfg: dict, estimates: dict) -> dict:
     # per-job batch policy; validate_plan fails the run closed if the
     # configured bounds make the policy unsatisfiable.
     n_lanes, lanes = enforce_batches_per_job(items, n_lanes, cfg)
+    if unit_names and n_lanes >= cfg["max_lanes"]:
+        warn(
+            "unit lane count is at max_lanes ({0}); the {1}-batch per-job "
+            "policy bounds the suite at {2} classes - further growth will "
+            "fail planning closed until max_lanes or the batch policy is "
+            "raised".format(
+                cfg["max_lanes"], cfg["unit_max_batches_per_job"],
+                cfg["max_lanes"] * cfg["unit_max_batches_per_job"]
+                * cfg["unit_batch_max_classes"]))
 
     unit_lanes = []
     for i, classes in enumerate(lanes, start=1):
@@ -681,6 +700,9 @@ def validate_plan(plan: dict, discovery: dict) -> list:
         if lane.get("batch_count") != len(lane_batches):
             errors.append(f"unit lane {lane['lane']} batch_count mismatch")
         max_batches = plan["config"].get("unit_max_batches_per_job")
+        if max_batches is not None and max_batches < 1:
+            errors.append("unit_max_batches_per_job must be >= 1")
+            max_batches = None
         if max_batches is not None and len(lane_batches) > max_batches:
             errors.append(
                 f"unit lane {lane['lane']} plans {len(lane_batches)} "

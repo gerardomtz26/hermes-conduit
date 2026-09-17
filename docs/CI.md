@@ -126,7 +126,11 @@ small batches**:
   make the policy unsatisfiable. This keeps unit wall time in the 10-20
   minute range: batches run concurrently across hosted Macs instead of
   serially on one. Watchdog budgets are deliberately untouched by this
-  policy (one variable per change).
+  policy (one variable per change). The policy bounds the suite at
+  `max_lanes x unit_max_batches_per_job x 7` classes (224 with defaults):
+  beyond that, planning fails closed loudly and `MAX_LANES` or the batch
+  policy must be raised - the planner warns as the lane count approaches
+  the bound.
 * Each batch runs as its own fresh `xcodebuild test-without-building`
   invocation on the same runner and the same Simulator session - **no
   erase or reset between successful batches** (the fresh process is the
