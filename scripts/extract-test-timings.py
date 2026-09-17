@@ -242,10 +242,14 @@ def lane_result(args) -> int:
         "persistent_infra_classes": [
             c for c in (args.persistent_infra_classes or "").split(",") if c],
         "isolation": None,
+        "batches": [],
+        "hung_batch": args.hung_batch if args.hung_batch else None,
     }
     # Every external input is best-effort: this script assembles the canonical
     # lane result, so malformed side data must never crash a green lane.
-    for field, raw in (("attempts", args.attempts_json), ("isolation", args.isolation_json)):
+    for field, raw in (("attempts", args.attempts_json),
+                       ("isolation", args.isolation_json),
+                       ("batches", args.batches_json)):
         if raw:
             try:
                 result[field] = json.loads(raw)
@@ -294,12 +298,14 @@ def _part_sort_key(name: str) -> tuple:
     """Chronological fold order, returned as (is_batch, stem, attempt):
     batch-named parts fold before every class-named part regardless of
     ASCII order (the lowercase stem would otherwise sort after the class
-    names and win last-wins with stale killed-batch data). Within a group
-    the constant is_batch field collapses and (stem, attempt) orders
-    numeric attempts correctly (a2 after a10 - plain filename sort would
-    put a10 first)."""
+    names and win last-wins with stale killed-batch data; the batch group
+    covers both the UI shard's "batch" part and the unit lane runner's
+    numbered "batch-<n>" parts). Within a group the constant is_batch field
+    collapses and (stem, attempt) orders numeric attempts correctly (a2
+    after a10 - plain filename sort would put a10 first)."""
     stem = re.sub(r"-a\d+\.json$", "", name)
-    is_batch = 0 if _part_class(name) == "batch" else 1
+    cls = _part_class(name)
+    is_batch = 0 if (cls == "batch" or cls.startswith("batch-")) else 1
     return (is_batch, stem, _attempt_index(name))
 
 
@@ -483,6 +489,23 @@ def _load_json(path: str):
         return json.load(fh)
 
 
+def _batch_summary_line(batch: dict, total: int) -> str:
+    """One concise batch line for the report, e.g.
+    `batch 3/5 watchdog -> retry PASS`."""
+    index = batch.get("batch", "?")
+    label = f"batch {index}/{total}"
+    attempts = batch.get("attempts") or []
+    statuses = [str(a.get("status", "?")) for a in attempts]
+    if batch.get("status") == "not_run":
+        return f"{label} NOT RUN (lane stopped earlier)"
+    if not statuses:
+        return f"{label} {batch.get('status', '?')}"
+    if len(statuses) == 1:
+        return f"{label} {statuses[0].upper()}"
+    return "{0} {1} -> retry {2}".format(
+        label, statuses[0], statuses[-1].upper())
+
+
 def aggregate(args) -> int:
     lines: list = []
     plan = _load_json(args.plan)
@@ -532,8 +555,8 @@ def aggregate(args) -> int:
     # --- Unit lanes ----------------------------------------------------------
     lines.append("## Unit lanes")
     lines.append("")
-    lines.append("| Lane | Predicted | Actual | Status | Classes |")
-    lines.append("|---|---|---|---|---|")
+    lines.append("| Lane | Predicted | Actual | Status | Batches | Classes |")
+    lines.append("|---|---|---|---|---|---|")
     any_actual = False
     for lane in lanes:
         name = lane.get("lane")
@@ -541,13 +564,42 @@ def aggregate(args) -> int:
         actual = res.get("actual_s")
         if actual is not None:
             any_actual = True
+        batch_count = lane.get("batch_count", len(lane.get("batches", [])))
         lines.append(
             f"| {name} | {_fmt_secs(lane.get('predicted_s'))} | {_fmt_secs(actual)} "
-            f"| {res.get('status', 'no result')} | {len(lane.get('classes', []))} |"
+            f"| {res.get('status', 'no result')} | {batch_count} | {len(lane.get('classes', []))} |"
         )
     if not lanes:
-        lines.append("| (no unit lanes planned) | | | | |")
+        lines.append("| (no unit lanes planned) | | | | | |")
     lines.append("")
+
+    # --- Unit batch detail -----------------------------------------------------
+    # Every unit lane's per-batch outcome, so a reviewer never has to open raw
+    # Actions logs to learn which batch stalled (or that all batches passed).
+    batch_lines_rendered = False
+    for lane in lanes:
+        res = results.get(lane.get("lane"), {})
+        batches = res.get("batches") or []
+        if not isinstance(batches, list) or not batches:
+            continue
+        if not batch_lines_rendered:
+            lines.append("### Unit lane batches")
+            lines.append("")
+            batch_lines_rendered = True
+        total = len(batches)
+        lines.append(f"- **{lane.get('lane')}** ({total} batches)")
+        for batch in batches:
+            if not isinstance(batch, dict):
+                continue
+            lines.append(f"  - {_batch_summary_line(batch, total)}")
+    if batch_lines_rendered:
+        lines.append("")
+        lines.append(
+            "Each batch is a fresh xcodebuild invocation on the lane's own "
+            "runner/Simulator session; a batch-level watchdog stall or "
+            "infrastructure wedge retries that SAME batch once (never the "
+            "whole lane).")
+        lines.append("")
 
     # --- UI ------------------------------------------------------------------
     lines.append("## UI lanes")
@@ -649,6 +701,17 @@ def aggregate(args) -> int:
             if attempts:
                 chain = " -> ".join(str(a.get("status", "?")) for a in attempts)
                 lines.append(f"- attempts: {chain}")
+            if res.get("hung_batch"):
+                hung = res["hung_batch"]
+                batch = next((b for b in (res.get("batches") or [])
+                              if isinstance(b, dict) and b.get("batch") == hung), {})
+                cls_list = ", ".join(batch.get("classes", []) or []) or "?"
+                lines.append(
+                    f"- **HUNG: unit batch {hung} stalled twice** "
+                    f"(watchdog on both attempts; classes: `{cls_list}`; "
+                    "its one allowed batch retry also stalled - never retried "
+                    "again)"
+                )
             if res.get("hung_class"):
                 if res.get("kind") == "ui":
                     lines.append(
@@ -789,12 +852,14 @@ def main(argv=None) -> int:
     p.add_argument("--started-at", default=None)
     p.add_argument("--attempts-json", default="")
     p.add_argument("--isolation-json", default="")
+    p.add_argument("--batches-json", default="")
     p.add_argument("--retried-classes", default="")
     p.add_argument("--infra-recovered-classes", default="")
     p.add_argument("--persistent-infra-classes", default="")
     p.add_argument("--simulator-reset", action="store_true")
     p.add_argument("--simulator-erase", action="store_true")
     p.add_argument("--hung-class", default="")
+    p.add_argument("--hung-batch", type=int, default=0)
     p.add_argument("--observations", default="")
     p.add_argument("--detail", default="")
     p.add_argument("--out", required=True)

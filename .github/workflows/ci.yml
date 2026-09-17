@@ -18,11 +18,17 @@ name: CI
 #                              generated .xctestrun for absolute-path
 #                              portability; upload products as an artifact.
 #   unit/ui   (macos, matrix) test-without-building from the downloaded
-#                             products; measured watchdogs; native flake
-#                             retry (units); one batched invocation per UI
-#                             shard with method-precise retry of only the
-#                             failed tests and a per-class diagnosis
-#                             fallback for timeouts/infrastructure wedges.
+#                             products; measured watchdogs. Units execute
+#                             each lane as SEQUENTIAL small xcodebuild
+#                             batches (<= 7 classes per invocation, fresh
+#                             xcodebuild per batch, same runner/Simulator;
+#                             native flake retry inside every batch; one
+#                             batch-level retry for a watchdog stall or
+#                             infrastructure wedge). UI: one batched
+#                             invocation per shard with method-precise retry
+#                             of only the failed tests and a per-class
+#                             diagnosis fallback for timeouts/infrastructure
+#                             wedges.
 #   report   (ubuntu, always) aggregate lane results into the step summary.
 #   timing-history-update (main only) EWMA-merge fresh per-class timings into
 #                             the timing-history cache.
@@ -211,8 +217,11 @@ jobs:
     name: "Unit - ${{ matrix.lane }}"
     needs: [plan, build]
     runs-on: macos-26
-    # Outer emergency ceiling only: attempt 1 + attempt 2 + a full isolation
-    # pass plus bounded resets all fit underneath it (see plan-tests.py).
+    # Outer emergency ceiling only: every batch burning its budget twice
+    # (attempt 1 plus its single batch-level retry) plus per-batch bounded
+    # recovery and extraction bounds all fit underneath it (see
+    # unit_job_timeout_min in plan-tests.py); the per-batch watchdogs inside
+    # ci-test-lane.sh are the real enforcement.
     timeout-minutes: ${{ matrix.job_timeout_min }}
     strategy:
       fail-fast: false
@@ -240,15 +249,20 @@ jobs:
       - name: Run unit lane
         # Matrix values enter through the environment, never through bash
         # template interpolation, so even a hostile class name cannot become
-        # code execution in the runner.
+        # code execution in the runner. The runner executes the lane's
+        # classes as SEQUENTIAL small xcodebuild batches (--batches-json is
+        # the planner-owned layout + per-batch watchdog table; at most 7
+        # classes per invocation, fresh xcodebuild process per batch, same
+        # runner and same Simulator session, no erase between successful
+        # batches). A batch-level watchdog stall or infrastructure wedge
+        # retries that SAME batch once.
         env:
-          CLASS_TIMEOUT_MIN_S: "180"
-          CLASS_TIMEOUT_MULTIPLIER: "4.0"
           CONDUIT_PERF_TRACE: "1"
           LANE_NAME: "${{ matrix.lane }}"
           LANE_TARGET: "${{ matrix.target }}"
           LANE_CLASSES: "${{ matrix.classes }}"
           LANE_CLASS_ESTIMATES: "${{ matrix.class_estimates }}"
+          LANE_BATCHES: "${{ matrix.batches }}"
           LANE_PREDICTED: "${{ matrix.predicted_s }}"
           LANE_TIMEOUT: "${{ matrix.timeout_s }}"
         run: |
@@ -258,6 +272,7 @@ jobs:
             --target "$LANE_TARGET" \
             --classes "$LANE_CLASSES" \
             --class-estimates "$LANE_CLASS_ESTIMATES" \
+            --batches-json "$LANE_BATCHES" \
             --predicted "$LANE_PREDICTED" \
             --timeout "$LANE_TIMEOUT" \
             --iterations 3 \

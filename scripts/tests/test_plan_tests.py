@@ -203,8 +203,12 @@ class PlanningTests(unittest.TestCase):
             estimates = {"SlowTests": 200.0, "UiTests": 60.0}
             _d, plan = plan_from_tree(root, estimates)
             lane = plan["unit_lanes"][0]
+            # One class -> one execution batch; the batch watchdog prices the
+            # modeled invocation overhead + execution with lane headroom:
+            # max(600, ceil((240 + 200) x 2.5)) = 1100. The lane watchdog is
+            # the sum of its batch budgets.
             self.assertEqual(lane["predicted_s"], 200.0)
-            self.assertEqual(lane["timeout_s"], 600)  # floor wins: max(600, 500)
+            self.assertEqual(lane["timeout_s"], 1100)
             # UI class watchdog: floor wins for a small class
             # (max(420, ceil(60 x 3)) = 420).
             ui_lane = plan["ui_lanes"][0]
@@ -231,15 +235,23 @@ class PlanningTests(unittest.TestCase):
             421)
 
     def test_job_ceiling_covers_worst_in_script_path(self):
-        # Ceiling must fit attempt1 + attempt2 + a full isolation pass plus
-        # two bounded simulator resets (3*T + margin) - and stay under
-        # GitHub's 6-hour hard limit in every configurable case.
-        for timeout in (300, 500, 900, 1800):
-            cfg = default_cfg()
-            ceiling_s = planner.job_timeout_min(timeout, cfg) * 60
-            worst_case = 3 * timeout + cfg["job_timeout_margin_s"]
+        # Ceiling must fit the worst in-script path - EVERY batch burning its
+        # budget twice (attempt 1 plus its single batch-level retry), each
+        # retry paying one bounded erase-path recovery, every attempt's
+        # extraction wedging to the xcresulttool bound - plus the setup
+        # margin, and stay under GitHub's 6-hour hard limit for realistic
+        # batch vectors.
+        cfg = default_cfg()
+        for budgets in ([600], [800, 800], [1100, 2625, 900], [600] * 6):
+            batches = [{"timeout_s": b} for b in budgets]
+            n = len(batches)
+            ceiling_s = planner.unit_job_timeout_min(batches, cfg) * 60
+            worst_case = (2 * sum(budgets)
+                          + n * cfg["unit_batch_recovery_overhead_s"]
+                          + (2 * n + 1) * cfg["ui_extract_bound_s"]
+                          + cfg["job_timeout_margin_s"])
             self.assertGreaterEqual(ceiling_s, worst_case,
-                                    f"ceiling too small for T={timeout}")
+                                    f"ceiling too small for budgets={budgets}")
             self.assertLess(ceiling_s, 6 * 3600)
 
     def test_lane_count_edges(self):
@@ -289,6 +301,156 @@ class PlanningTests(unittest.TestCase):
             self.assertEqual(source, "timing history")
             plan = planner.build_plan(discovery, default_cfg(), estimates)
             self.assertEqual(plan["estimates"]["AlphaTests"], 33.0)
+
+
+class UnitBatchingTests(unittest.TestCase):
+    """The sequential-xcodebuild batch partition: deterministic mechanical
+    chunking of each lane's class order at 7 classes, with per-batch budgets.
+    These pin the exact invariants the runner's fail-closed validation and
+    the batch-level recovery rely on."""
+
+    def _batches(self, names, estimates=None, cfg=None):
+        cfg = cfg or default_cfg()
+        est = {n: (estimates or {}).get(n, 10.0) for n in names}
+        return planner.unit_batches_for(names, est, cfg)
+
+    def test_zero_classes_produce_no_batches(self):
+        self.assertEqual(self._batches([]), [])
+
+    def test_one_to_seven_classes_form_one_batch(self):
+        for n in (1, 4, 7):
+            names = ["A{0}Tests".format(i) for i in range(n)]
+            batches = self._batches(names)
+            self.assertEqual(len(batches), 1)
+            self.assertEqual(batches[0]["classes"], names)
+
+    def test_eight_classes_chunk_seven_plus_one(self):
+        names = ["C{0}Tests".format(i) for i in range(8)]
+        batches = self._batches(names)
+        self.assertEqual([b["classes"] for b in batches],
+                         [names[:7], names[7:]])
+
+    def test_fourteen_classes_chunk_seven_plus_seven(self):
+        names = ["D{0}Tests".format(i) for i in range(14)]
+        batches = self._batches(names)
+        self.assertEqual([b["classes"] for b in batches],
+                         [names[:7], names[7:]])
+
+    def test_fifteen_classes_chunk_seven_seven_one(self):
+        names = ["E{0}Tests".format(i) for i in range(15)]
+        batches = self._batches(names)
+        self.assertEqual([b["classes"] for b in batches],
+                         [names[:7], names[7:14], names[14:]])
+
+    def test_batches_concatenate_to_exact_lane_order(self):
+        # The runner replays -only-testing filters from these batches; any
+        # reordering/duplication would desync coverage from the plan.
+        names = ["F{0:02d}Tests".format(i) for i in range(37)]
+        batches = self._batches(names)
+        self.assertEqual([c for b in batches for c in b["classes"]], names)
+
+    def test_no_duplicates_or_omissions_across_batches(self):
+        names = ["G{0:02d}Tests".format(i) for i in range(23)]
+        batches = self._batches(names)
+        flattened = [c for b in batches for c in b["classes"]]
+        self.assertEqual(len(flattened), len(set(flattened)))
+        self.assertEqual(sorted(flattened), sorted(names))
+
+    def test_every_batch_respects_the_cap(self):
+        names = ["H{0:02d}Tests".format(i) for i in range(50)]
+        cfg = default_cfg()
+        batches = self._batches(names, cfg=cfg)
+        for b in batches:
+            self.assertGreaterEqual(len(b["classes"]), 1)
+            self.assertLessEqual(len(b["classes"]),
+                                 cfg["unit_batch_max_classes"])
+
+    def test_batch_budgets_are_floored_overhead_inclusive_ints(self):
+        # max_classes=1 forces one batch per class so each budget is checked
+        # in isolation: ceil((240 + 1) x 2.5) = 603 clears the 600s floor;
+        # the big batch is pure overhead-inclusive headroom:
+        # ceil((240 + 300) x 2.5) = 1350.
+        cfg = default_cfg(unit_batch_max_classes=1, unit_batch_timeout_min_s=600)
+        est = {"BigTests": 300.0, "SmallTests": 1.0}
+        batches = planner.unit_batches_for(["SmallTests", "BigTests"], est, cfg)
+        self.assertEqual(batches[0]["timeout_s"], 603)
+        self.assertEqual(batches[1]["timeout_s"], 1350)
+        for b in batches:
+            self.assertIsInstance(b["timeout_s"], int)
+            self.assertGreater(b["timeout_s"], 0)
+
+    def test_lane_timeout_is_the_sum_of_batch_budgets(self):
+        names = ["I{0}Tests".format(i) for i in range(8)]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(make_repo(Path(tmp), names, []))
+            _d, plan = plan_from_tree(root, {n: 10.0 for n in names})
+            lane = plan["unit_lanes"][0]
+            self.assertEqual(lane["batch_count"], 2)
+            self.assertEqual(
+                lane["timeout_s"],
+                sum(b["timeout_s"] for b in lane["batches"]))
+            self.assertEqual(
+                lane["job_timeout_min"],
+                planner.unit_job_timeout_min(lane["batches"], default_cfg()))
+
+    def test_validate_rejects_batch_invariant_violations(self):
+        names = ["J{0}Tests".format(i) for i in range(8)]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(make_repo(Path(tmp), names, []))
+            discovery, plan = plan_from_tree(root, {n: 10.0 for n in names})
+            self.assertEqual(planner.validate_plan(plan, discovery), [])
+
+            def errors_with(mutate):
+                import copy
+                broken = copy.deepcopy(plan)
+                mutate(broken["unit_lanes"][0])
+                return planner.validate_plan(broken, discovery)
+
+            # duplicated class across batches
+            def duplicate(lane):
+                lane["batches"][1]["classes"].append(lane["batches"][0]["classes"][0])
+            self.assertTrue(any("reproduce" in e for e in errors_with(duplicate)))
+
+            # omitted class
+            def omit(lane):
+                lane["batches"][0]["classes"].pop()
+            self.assertTrue(any("reproduce" in e for e in errors_with(omit)))
+
+            # batch over the cap
+            def oversize(lane):
+                lane["batches"][0]["classes"].extend(
+                    lane["batches"][1]["classes"])
+                lane["batches"].pop()
+                lane["batch_count"] = 1
+            self.assertTrue(any("cap" in e for e in errors_with(oversize)))
+
+            # non-positive batch watchdog
+            def bad_budget(lane):
+                lane["batches"][0]["timeout_s"] = 0
+            self.assertTrue(any("watchdog" in e for e in errors_with(bad_budget)))
+
+            # batches removed entirely
+            def no_batches(lane):
+                lane["batches"] = []
+            self.assertTrue(any("no execution batches" in e
+                                for e in errors_with(no_batches)))
+
+    def test_unit_matrix_carries_batches_as_compact_json(self):
+        names = ["K{0}Tests".format(i) for i in range(9)]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(make_repo(Path(tmp), names, []))
+            _d, plan = plan_from_tree(root, {n: 10.0 for n in names})
+            matrix = json.loads(planner.matrix_json(plan))
+            entry = matrix["include"][0]
+            self.assertEqual(entry["batch_count"], 2)
+            batches = json.loads(entry["batches"])
+            self.assertEqual([b["classes"] for b in batches],
+                             [lane_b["classes"] for lane_b in
+                              plan["unit_lanes"][0]["batches"]])
+            self.assertTrue(all(isinstance(b["timeout_s"], int)
+                                for b in batches))
+            # GitHub matrix values must be scalars: the field is a STRING.
+            self.assertIsInstance(entry["batches"], str)
 
 
 class UiShardingTests(unittest.TestCase):
