@@ -7486,7 +7486,11 @@ final class AppState: ObservableObject {
 
         let profile = activeProfile
         let knownIDs = [session.id] + session.alternateIds
-        let titleRecoveryTaskKeys = Set(knownIDs.filter { !$0.isEmpty }.map { "\(profile)|\($0)" })
+        let titleRecoveryTaskKeys = Set(
+            knownIDs.filter { !$0.isEmpty }.map {
+                Self.secondaryTitleRecoveryTaskKey(profile: profile, sessionID: $0)
+            }
+        )
         sessionTitleRecoveryTracker.suppress(titleRecoveryTaskKeys)
         sessionMutationID = session.id
         defer {
