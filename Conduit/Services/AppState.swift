@@ -39,6 +39,10 @@ struct ChatResumeLifecycleOperations {
     var loadCatalog: (@MainActor (HermesClient, Bool) async throws -> [SessionSummary])?
     var mintTicket: (@MainActor (String) async throws -> String)?
     var openSession: (@MainActor (HermesClient, String, Bool) async throws -> SessionResumeResult)?
+    /// Profile-aware variant of `openSession`. Preferred over the 3-argument
+    /// seam when set, so tests can pin WHICH Hermes profile a resume
+    /// addresses (bot chats resume the bot's profile).
+    var openSessionWithProfile: (@MainActor (HermesClient, String, Bool, String?) async throws -> SessionResumeResult)?
     /// Seam for the initial persisted-history fetch. Receives the session id,
     /// profile, AND the exact query the production path builder built —
     /// `order=latest offset=0` for the bounded tail page, the legacy one-shot
@@ -96,12 +100,24 @@ struct ChatResumeLifecycleOperations {
         String,
         String?
     ) async throws -> SessionCompressResult)?
+    /// Bot Mode roster probe (`profiles.list`).
+    var botRoster: (@MainActor (HermesClient) async throws -> BotRosterSnapshot)?
+    /// Bot Mode canonical-chat registry lookup (`session.list` exact title).
+    var findBotChat: (@MainActor (HermesClient, String) async throws -> [BotChatLookupRow])?
+    /// Bot Mode canonical chat creation (`session.create`, hidden).
+    var createBotChat: (@MainActor (HermesClient, String) async throws -> (sessionId: String, storedSessionId: String?))?
+    /// Bot Mode canonical title write (`session.title`). The fourth
+    /// argument is the BOT profile being addressed — it exists so tests can
+    /// pin the addressing, and must never be forwarded to the 3-argument
+    /// `setSessionTitle` seam used by ordinary (dashboard-profile) renames.
+    var titleBotChat: (@MainActor (HermesClient, String, String, String) async throws -> Void)?
 
     init(
         connectClient: (@MainActor (HermesClient) async throws -> Void)? = nil,
         loadCatalog: (@MainActor (HermesClient, Bool) async throws -> [SessionSummary])? = nil,
         mintTicket: (@MainActor (String) async throws -> String)? = nil,
         openSession: (@MainActor (HermesClient, String, Bool) async throws -> SessionResumeResult)? = nil,
+        openSessionWithProfile: (@MainActor (HermesClient, String, Bool, String?) async throws -> SessionResumeResult)? = nil,
         persistedTranscript: (@MainActor (
             String,
             String,
@@ -144,12 +160,17 @@ struct ChatResumeLifecycleOperations {
             HermesClient,
             String,
             String?
-        ) async throws -> SessionCompressResult)? = nil
+        ) async throws -> SessionCompressResult)? = nil,
+        botRoster: (@MainActor (HermesClient) async throws -> BotRosterSnapshot)? = nil,
+        findBotChat: (@MainActor (HermesClient, String) async throws -> [BotChatLookupRow])? = nil,
+        createBotChat: (@MainActor (HermesClient, String) async throws -> (sessionId: String, storedSessionId: String?))? = nil,
+        titleBotChat: (@MainActor (HermesClient, String, String, String) async throws -> Void)? = nil
     ) {
         self.connectClient = connectClient
         self.loadCatalog = loadCatalog
         self.mintTicket = mintTicket
         self.openSession = openSession
+        self.openSessionWithProfile = openSessionWithProfile
         self.persistedTranscript = persistedTranscript
         self.loadEarlierTranscriptPage = loadEarlierTranscriptPage
         self.branchSession = branchSession
@@ -170,6 +191,10 @@ struct ChatResumeLifecycleOperations {
         self.loadProfileDisplayPreferences = loadProfileDisplayPreferences
         self.loadSlashCommands = loadSlashCommands
         self.compressSession = compressSession
+        self.botRoster = botRoster
+        self.findBotChat = findBotChat
+        self.createBotChat = createBotChat
+        self.titleBotChat = titleBotChat
     }
 
     static let live = ChatResumeLifecycleOperations()
@@ -734,14 +759,79 @@ final class AppState: ObservableObject {
 
     /// Profile changes and network refreshes are asynchronous. Keep a final
     /// ownership boundary at the published catalog so a stale row can never
-    /// render under another workspace while a switch is in flight.
+    /// render under another workspace while a switch is in flight. Canonical
+    /// Bot Chats are projected out here (never in the identity machinery's
+    /// own catalog views): they are reachable only through the Bots roster.
     var activeProfileSessions: [SessionSummary] {
-        sessions.filter { sessionBelongsToProfile($0, profile: activeProfile) }
+        sessions.filter {
+            sessionBelongsToProfile($0, profile: activeProfile)
+                && !BotChatHygiene.isCanonicalBotChatRow($0, roster: botRoster)
+        }
     }
 
     var activeProfileCronSessions: [SessionSummary] {
         cronSessions.filter { sessionBelongsToProfile($0, profile: activeProfile) }
     }
+
+    // MARK: - Bot Mode
+
+    /// Lifecycle of the Bot Mode capability probe. `profiles.list` is the
+    /// capability call: a gateway old enough to lack the method has no
+    /// Bot Mode, and the UI degrades to "requires a newer Hermes gateway"
+    /// without blocking Sessions or anything else.
+    @Published private(set) var botModePhase: BotModePhase = .idle
+    /// The read-only roster. Hermes remains authoritative; nothing bot-related
+    /// is durably persisted client-side.
+    @Published private(set) var botRoster: [BotProfile] = []
+    @Published private(set) var isRefreshingBotRoster = false
+    /// Bumped at every server-identity boundary; responses captured under an
+    /// older epoch are dropped, so a stale async roster can never overwrite
+    /// the state of a different dashboard/profile.
+    private var botRosterEpoch = 0
+    /// Ownership token for the in-flight roster refresh: only the refresh
+    /// that captured the CURRENT token may release the single-flight flag,
+    /// so no superseded refresh can clear a newer one's claim and no
+    /// identity change can strand the flag.
+    private var botRosterRefreshToken: UUID?
+    /// The in-flight roster refresh, held so a replacement `.task` can JOIN
+    /// it instead of racing it (see `refreshBotRoster`). Unstructured on
+    /// purpose: a SwiftUI `.task(id:)` identity change cancels the VIEW
+    /// task, never this work. Class box: `Task` is a value with no identity,
+    /// and the joiner must be able to tell its (completed) flight from a
+    /// newer one's before clearing the handle.
+    private final class BotRosterRefreshFlight {
+        let task: Task<Void, Never>
+        init(task: Task<Void, Never>) { self.task = task }
+    }
+
+    private var botRosterRefreshFlight: BotRosterRefreshFlight?
+    /// Bot chats belong to the BOT's profile, not the dashboard's. Every
+    /// re-resume of an open bot chat (reconnect, refresh, preserve-current
+    /// sync) consults this in-memory registry to scope the resume RPC; it is
+    /// never persisted — a canonical Bot Chat has no client-side pointer.
+    /// Bot profile ownership per canonical-chat session id (runtime id,
+    /// stored id, and every adopted alias). Superseded runtime ids are
+    /// deliberately KEPT, never pruned on resume/compression rebinding:
+    /// late lifecycle, stream, and compaction events may still arrive
+    /// addressed to an old runtime id and must keep resolving to the right
+    /// bot profile — dropping the alias would misroute those events into
+    /// the ordinary dashboard scope. The map is runtime-only (cleared at
+    /// the server-identity boundary in `invalidateBotModeState`) and grows
+    /// by one entry per rebound id, which is bounded by how often a bot
+    /// chat's runtime id is actually rebound. If a provably-dead alias
+    /// lifecycle point ever exists upstream (e.g. an explicit
+    /// session-destroyed event), a bounded cleanup could hook there —
+    /// none exists today, so correctness wins over the small dictionary.
+    private var botChatSessionProfiles: [String: String] = [:]
+    /// One resolve/create/open flight per bot name: double-tapping a row must
+    /// not mint two canonical chats (upstream `canonicalCreations`). The box
+    /// exists so a stale flight's cleanup can never evict a newer flight's
+    /// entry (identity-checked removal), and so a server switch can cancel
+    /// the underlying task.
+    private final class BotChatOpenFlight {
+        var task: Task<Bool, Never>?
+    }
+    private var botChatOpenFlights: [String: BotChatOpenFlight] = [:]
 
     /// Kept as a computed compatibility surface for views that only need the
     /// currently-running flag. New code should use `turnState` for actions.
@@ -1256,7 +1346,7 @@ final class AppState: ObservableObject {
         )
         let restorationKeys: Set<String>? = {
             guard let restorationGuard = restoredPendingDecisionCardsAwaitingConfirmation,
-                  restorationGuard.profile == activeProfile,
+                  restorationGuard.profile == presentationProfile(for: activeSessionId),
                   activeSessionId == restorationGuard.sessionID else {
                 return nil
             }
@@ -1276,7 +1366,7 @@ final class AppState: ObservableObject {
         // store's pending keys or the flush would drop the card before the
         // notification-open resume merge could restore it.
         let storedPendingDecisionKeys = sessionPresentationCache.storedPendingDecisionKeys(
-            profile: activeProfile,
+            profile: presentationProfile(for: activeSessionId),
             sessionIDs: ids
         )
         let pendingDecisionKeysToPreserve = restorationKeys
@@ -1286,7 +1376,7 @@ final class AppState: ObservableObject {
             || !storedPendingDecisionKeys.isEmpty
         sessionPresentationCache.save(
             cacheableMessages,
-            profile: activeProfile,
+            profile: presentationProfile(for: activeSessionId),
             sessionIDs: ids,
             preservePendingDecisionCards: preservePendingDecisionCards,
             unconfirmedPendingDecisionKeys: pendingDecisionKeysToPreserve
@@ -1581,7 +1671,7 @@ final class AppState: ObservableObject {
 
     private func pendingDecisionRestorationMessages(for sessionID: String) -> [ChatMessage] {
         guard let restorationGuard = restoredPendingDecisionCardsAwaitingConfirmation,
-              restorationGuard.profile == activeProfile,
+              restorationGuard.profile == presentationProfile(for: sessionID),
               restorationGuard.sessionID == sessionID else {
             return []
         }
@@ -1598,21 +1688,27 @@ final class AppState: ObservableObject {
         restoredPendingDecisionCardsAwaitingConfirmation = nil
     }
 
-    private func setActiveSessionState(id: String?, title: String? = nil) {
+    private func setActiveSessionState(
+        id: String?,
+        title: String? = nil,
+        recordsResumeSelection: Bool = true
+    ) {
         if activeSessionId != id {
             clearPendingDecisionRestorationGuard()
             resetResponseHapticTurn()
         }
         activeSessionId = id
-        if let persistedID = ChatSessionPersistenceIdentity.canonicalID(
-            for: id,
-            identity: activeChatScrollSessionIdentity,
-            catalog: sessions + cronSessions,
-            activeProfile: activeProfile
-        ) {
-            chatResumeCoordinator.rememberSessionID(persistedID, for: activeProfile)
-        } else {
-            chatResumeCoordinator.rememberSessionID(nil, for: activeProfile)
+        if recordsResumeSelection {
+            if let persistedID = ChatSessionPersistenceIdentity.canonicalID(
+                for: id,
+                identity: activeChatScrollSessionIdentity,
+                catalog: sessions + cronSessions,
+                activeProfile: activeProfile
+            ) {
+                chatResumeCoordinator.rememberSessionID(persistedID, for: activeProfile)
+            } else {
+                chatResumeCoordinator.rememberSessionID(nil, for: activeProfile)
+            }
         }
         if let title {
             activeSessionTitle = title
@@ -2224,7 +2320,30 @@ final class AppState: ObservableObject {
         // the resume store, titles, pins, and review cache.
         conversationIdentityIndex.removeAll()
         sessionYoloStore.clearAllOverrides()
+        // Bot Mode state is per-server: the roster, the capability phase, and
+        // the in-memory bot-chat profile registry all describe the outgoing
+        // gateway and are re-probed when the Bots surface is next opened.
+        invalidateBotModeState()
         return true
+    }
+
+    /// Drops all Bot Mode runtime state at a server-identity boundary. The
+    /// epoch bump fences every in-flight roster response; in-flight bot
+    /// opens are cancelled so a stale flight can never navigate the UI or
+    /// mutate state against the outgoing server.
+    private func invalidateBotModeState() {
+        botRosterEpoch += 1
+        botChatOpenFlights.values.forEach { $0.task?.cancel() }
+        botChatSessionProfiles.removeAll()
+        botChatOpenFlights.removeAll()
+        botRoster = []
+        botRosterRefreshToken = nil
+        // The in-flight refresh, if any, still completes but its epoch guard
+        // discards the stale snapshot; drop the join handle so the next
+        // identity's first refresh cannot join a dead flight.
+        botRosterRefreshFlight = nil
+        isRefreshingBotRoster = false
+        botModePhase = .idle
     }
 
     /// Runtime-only speech retirement at the server-replacement boundary.
@@ -3657,8 +3776,20 @@ final class AppState: ObservableObject {
                 )
                 return chatResumeSyncInterruptionOutcome(for: automaticWorkToken)
             }
+            // A canonical Bot Chat is reserved presentation state reachable
+            // only through the Bots roster: it must never be chosen as this
+            // workspace's ordinary resume target. Selection-only — the
+            // published catalog above stays raw — and deliberately
+            // roster-INDEPENDENT, because a cold launch has no roster yet and
+            // a stale visible canonical row would otherwise be the newest
+            // candidate, making itself the active conversation, the
+            // cold-restore selection, and the persisted title's source.
+            let resumeCandidates = BotChatHygiene.ordinaryResumeCandidates(
+                allSessions,
+                roster: botRoster
+            )
             let target = selectChatResumeTarget(
-                in: allSessions,
+                in: resumeCandidates,
                 profile: profile,
                 purpose: purpose,
                 currentSessionID: activeSessionId,
@@ -3970,7 +4101,8 @@ final class AppState: ObservableObject {
         automaticSyncOperationID: UUID? = nil,
         requiredViewportTransitionGeneration: UInt64? = nil,
         historySourceUnavailable: Bool = false,
-        presentationMigrationSessionIDs: Set<String> = []
+        presentationMigrationSessionIDs: Set<String> = [],
+        conversationProfile: String? = nil
     ) async -> Bool {
         guard automaticChatResumeWorkIsCurrent(
             automaticWorkToken,
@@ -3978,6 +4110,11 @@ final class AppState: ObservableObject {
         ), chatViewportTransitionIsCurrent(requiredViewportTransitionGeneration) else {
             return false
         }
+        // Canonical Bot Chats live in the bot's profile: every re-entry path
+        // (explicit open, reconnect, refresh, preserve-current sync) resolves
+        // the resume scope through the in-memory registry, so a re-resume can
+        // never land on the dashboard profile and lose the session.
+        let conversationScopeProfile = conversationProfile ?? botConversationProfile(for: sessionId)
         let priorReconciliation = reconciliation?.token == token ? reconciliation : nil
         let bufferedEvents = priorReconciliation?.bufferedEvents ?? []
         reconciliation = Reconciliation(
@@ -4035,11 +4172,12 @@ final class AppState: ObservableObject {
                 async let resumedSession = openChatResumeSession(
                     sessionId,
                     using: client,
-                    compact: true
+                    compact: true,
+                    profile: conversationScopeProfile
                 )
                 async let transcriptOutcome = persistedTranscriptOutcome(
                     sessionId: sessionId,
-                    profile: profile,
+                    profile: conversationScopeProfile ?? profile,
                     using: bridge
                 )
                 result = try await resumedSession
@@ -4060,7 +4198,8 @@ final class AppState: ObservableObject {
                         result = try await openChatResumeSession(
                             sessionId,
                             using: client,
-                            compact: false
+                            compact: false,
+                            profile: conversationScopeProfile
                         )
                     }
                 case .unavailable:
@@ -4070,7 +4209,8 @@ final class AppState: ObservableObject {
                     result = try await openChatResumeSession(
                         sessionId,
                         using: client,
-                        compact: false
+                        compact: false,
+                        profile: conversationScopeProfile
                     )
                 case .failed(let error):
                     // An unrelated history failure must not be papered over by
@@ -4081,7 +4221,8 @@ final class AppState: ObservableObject {
                 result = try await openChatResumeSession(
                     sessionId,
                     using: client,
-                    compact: false
+                    compact: false,
+                    profile: conversationScopeProfile
                 )
             }
             guard automaticChatResumeWorkIsCurrent(
@@ -4181,9 +4322,21 @@ final class AppState: ObservableObject {
                         conversationIdentityIndex.recordAuthoritative(
                             runtimeID: admittedRuntimeID,
                             durableID: admittedDurable,
-                            profile: profile,
+                            // A canonical Bot Chat is indexed under the BOT's
+                            // profile: it must never satisfy an identity
+                            // lookup made for a dashboard-profile
+                            // conversation.
+                            profile: conversationScopeProfile ?? profile,
                             source: .resume
                         )
+                    }
+                    // Keep the bot-chat resume scope reachable for every
+                    // later re-resume of this conversation (reconnects,
+                    // refreshes) — in-memory only, never a durable pointer.
+                    if let conversationScopeProfile {
+                        noteBotChatSession(result.sessionId, profile: conversationScopeProfile)
+                        noteBotChatSession(sessionId, profile: conversationScopeProfile)
+                        noteBotChatSession(result.storedSessionId, profile: conversationScopeProfile)
                     }
                     // Durable-owned presentation: the durable key is the
                     // only persistent presentation key for this
@@ -4201,7 +4354,9 @@ final class AppState: ObservableObject {
                         .union(presentationMigrationSessionIDs)
                         .subtracting([admittedDurable])
                     sessionPresentationCache.consolidateUnderDurableKey(
-                        profile: profile,
+                        // The conversation's own namespace: a bot chat's
+                        // presentation survives dashboard-profile switches.
+                        profile: conversationScopeProfile ?? profile,
                         durableSessionID: admittedDurable,
                         runtimeAliases: Array(runtimeAliases)
                     )
@@ -4259,7 +4414,7 @@ final class AppState: ObservableObject {
                     ?? sessionId
                 sessionPresentationCache.save(
                     transcript.messages,
-                    profile: profile,
+                    profile: conversationScopeProfile ?? profile,
                     sessionIDs: Self.durableOwnedPresentationIDs(
                         [sessionId, result.sessionId, transcript.resolvedSessionId].compactMap { $0 },
                         durableSessionID: presentationDurableID
@@ -4281,7 +4436,7 @@ final class AppState: ObservableObject {
                 requestedSessionId: sessionId,
                 resolvedSessionId: transcript?.resolvedSessionId,
                 runtimeSessionId: result.sessionId,
-                profile: profile
+                profile: conversationScopeProfile ?? profile
             ) ? priorWindow : nil
             let presentationResult: SessionResumeResult
             var graftedBackfilledPrefix = false
@@ -4335,9 +4490,11 @@ final class AppState: ObservableObject {
                 // transaction produced — requested, resolved stored, and
                 // runtime — so ownership stays self-contained even before
                 // the session catalog learns the runtime↔stored alias.
+                // The profile stamp is the conversation's own scope: a bot
+                // chat's older pages must be fetched from the BOT's store.
                 persistedTranscriptWindow = PersistedTranscriptWindowState(
                     requestedSessionID: sessionId,
-                    profile: profile,
+                    profile: conversationScopeProfile ?? profile,
                     pageSize: PersistedTranscriptPagination.pageSize,
                     resolvedSessionID: transcript.resolvedSessionId,
                     runtimeSessionID: result.sessionId,
@@ -4517,15 +4674,19 @@ final class AppState: ObservableObject {
     private func openChatResumeSession(
         _ sessionID: String,
         using client: HermesClient,
-        compact: Bool
+        compact: Bool,
+        profile: String? = nil
     ) async throws -> SessionResumeResult {
+        if let openSessionWithProfile = chatResumeLifecycleOperations.openSessionWithProfile {
+            return try await openSessionWithProfile(client, sessionID, compact, profile)
+        }
         if let openSession = chatResumeLifecycleOperations.openSession {
             return try await openSession(client, sessionID, compact)
         }
         if compact {
-            return try await client.openSession(sessionID)
+            return try await client.openSession(sessionID, profile: profile)
         }
-        return try await client.openSessionLegacy(sessionID)
+        return try await client.openSessionLegacy(sessionID, profile: profile)
     }
 
     private func refreshChatResumeContext(
@@ -4713,11 +4874,22 @@ final class AppState: ObservableObject {
         ) else { return false }
         let retainedRestoredMessages = pendingDecisionRestorationMessages(for: result.sessionId)
         markChatViewportReplacement()
-        setActiveSessionState(id: result.sessionId, title: AppLocalization.string("New conversation"))
-        updateActiveSessionTitle(
-            for: result.sessionId,
-            fallbackSessionId: reconciliation?.requestedSessionId
+        // A canonical Bot Chat keeps the title the open just applied (the
+        // bot's display label) and never enters the dashboard's cold-restore
+        // selection: the ordinary create-adoption defaults apply only to
+        // dashboard-profile conversations.
+        let isBotConversation = botConversationProfile(for: result.sessionId) != nil
+        setActiveSessionState(
+            id: result.sessionId,
+            title: isBotConversation ? nil : AppLocalization.string("New conversation"),
+            recordsResumeSelection: !isBotConversation
         )
+        if !isBotConversation {
+            updateActiveSessionTitle(
+                for: result.sessionId,
+                fallbackSessionId: reconciliation?.requestedSessionId
+            )
+        }
         // Pending clarifications and approvals are user-actionable decision
         // events, not merely projections of the gateway's current turn state.
         // Hermes can omit a one-shot decision event from a resume, and
@@ -4737,7 +4909,7 @@ final class AppState: ObservableObject {
         }
         let restored = sessionPresentationCache.merge(
             result.messages + retainedMessages,
-            profile: activeProfile,
+            profile: presentationProfile(for: result.sessionId),
             sessionIDs: sessionIDs,
             includePendingClarifications: restorePendingDecisionCards,
             includePendingApprovals: restorePendingDecisionCards
@@ -4807,18 +4979,18 @@ final class AppState: ObservableObject {
         )
         sessionPresentationCache.save(
             shouldPersistMergedPresentation ? messages : result.messages,
-            profile: activeProfile,
+            profile: presentationProfile(for: result.sessionId),
             sessionIDs: persistedSessionIDs,
             preservePendingDecisionCards: gatewayConfirmsActiveTurn || !unconfirmedPendingDecisionKeys.isEmpty,
             unconfirmedPendingDecisionKeys: unconfirmedPendingDecisionKeys
         )
         if result.snapshot.running != true && !restoredPendingDecisionKeys.isEmpty {
             let restoredAt = sessionPresentationCache.unconfirmedPendingDecisionDate(
-                profile: activeProfile,
+                profile: presentationProfile(for: result.sessionId),
                 sessionIDs: sessionIDs
             ) ?? Date()
             restoredPendingDecisionCardsAwaitingConfirmation = PendingDecisionRestorationGuard(
-                profile: activeProfile,
+                profile: presentationProfile(for: result.sessionId),
                 sessionID: result.sessionId,
                 pendingDecisionKeys: restoredPendingDecisionKeys,
                 restoredAt: restoredAt,
@@ -6850,7 +7022,6 @@ final class AppState: ObservableObject {
         reconciliationToken token: UUID,
         automaticWorkToken: ChatResumeAutomaticWorkToken?
     ) async {
-        let profile = activeProfile
         let bridge = dashboardTicketBridge
         let localFrontier = durablePersistedRowIDs
         let localMessageIDs = Set(messages.map { $0.id })
@@ -6858,6 +7029,9 @@ final class AppState: ObservableObject {
         let locallyOwnedTurn = locallyOwnedFreshnessTurnEvidence(
             forRequested: requestedSessionID
         )
+        // A bot chat's persisted tail lives in the BOT's store; the scope
+        // must follow the active conversation, not the dashboard default.
+        let profile = botConversationProfile(for: requestedSessionID) ?? activeProfile
         let outcome = await foregroundPersistedTailOutcome(
             sessionId: requestedSessionID,
             profile: profile,
@@ -7192,7 +7366,16 @@ final class AppState: ObservableObject {
             // Labeled rows are positive identity evidence; commit them so
             // notification routing survives a later catalog omission.
             conversationIdentityIndex.recordCatalogIdentity(allSessions, profile: profile)
-            if let activeSessionId { updateActiveSessionTitle(for: activeSessionId) }
+            // A canonical Bot Chat's raw catalog row is titled exactly
+            // "Bot Chat": refreshing the ordinary active-title cache from it
+            // would persist the wire title over the bot's display label and
+            // write "Bot Chat" into the dashboard profile's persisted cache
+            // (the cold-restore bug). Ownership comes from the bot
+            // conversation registry, never a title guess.
+            if let activeSessionId,
+               botConversationProfile(for: activeSessionId) == nil {
+                updateActiveSessionTitle(for: activeSessionId)
+            }
             if let activeClient {
                 Task { [weak self] in
                     await self?.loadProjects(using: activeClient, profile: profile)
@@ -7303,7 +7486,11 @@ final class AppState: ObservableObject {
 
         let profile = activeProfile
         let knownIDs = [session.id] + session.alternateIds
-        let titleRecoveryTaskKeys = Set(knownIDs.filter { !$0.isEmpty }.map { "\(profile)|\($0)" })
+        let titleRecoveryTaskKeys = Set(
+            knownIDs.filter { !$0.isEmpty }.map {
+                Self.secondaryTitleRecoveryTaskKey(profile: profile, sessionID: $0)
+            }
+        )
         sessionTitleRecoveryTracker.suppress(titleRecoveryTaskKeys)
         sessionMutationID = session.id
         defer {
@@ -7454,7 +7641,10 @@ final class AppState: ObservableObject {
     /// to publish is allowed to have temporarily forgotten the runtime alias.
     /// Reconstructing the set from the already-replaced catalog would drop
     /// the alias for exactly the reconcile window that needs it.
-    private func captureConversationIdentity(for selectedID: String?) -> ConversationIdentity? {
+    private func captureConversationIdentity(
+        for selectedID: String?,
+        scopeProfile: String? = nil
+    ) -> ConversationIdentity? {
         guard let selectedID, !selectedID.isEmpty else { return nil }
         var accepted = Set([selectedID])
         var durableSessionID: String?
@@ -7481,7 +7671,10 @@ final class AppState: ObservableObject {
             }
         }
         return ConversationIdentity(
-            profile: activeProfile,
+            // Capture metadata for the conversation's owning workspace: a
+            // canonical Bot Chat belongs to the bot's profile, not the
+            // dashboard's. The admission gate never compares this field.
+            profile: scopeProfile ?? activeProfile,
             durableSessionID: durableSessionID,
             runtimeSessionID: durableSessionID == selectedID ? nil : selectedID,
             acceptedSessionIDs: accepted
@@ -7532,9 +7725,393 @@ final class AppState: ObservableObject {
         _ = await (sessionRefresh, jobsRefresh)
     }
 
+    // MARK: - Bot Mode (roster + canonical chat)
+
+    /// Refreshes the roster and the Bot Mode capability phase. Safe to call
+    /// on every Bots-surface appearance: an established roster is refreshed
+    /// in place, an empty one shows the loading phase. Responses fenced
+    /// against the dashboard/profile epoch so a stale async answer can never
+    /// describe the wrong server.
+    func refreshBotRoster() async {
+        if let running = botRosterRefreshFlight {
+            // JOIN the in-flight refresh instead of bailing on the
+            // single-flight guard. A `.task(id:)` identity change cancels
+            // the previous view task while its refresh is in flight; that
+            // holder releases the claim without committing a phase, so a
+            // replacement that merely returned could strand `.loading`.
+            // The work runs unstructured, so the join always sees it run to
+            // completion, and its epoch/dashboard guard still discards
+            // results captured before a server or dashboard transition.
+            await running.task.value
+            if botRosterRefreshFlight === running {
+                botRosterRefreshFlight = nil
+            }
+            // A joined refresh that was superseded by an identity
+            // transition discards its snapshot and commits nothing; fall
+            // through and run once for the current identity instead of
+            // leaving the empty roster stuck on `.loading`.
+            if !(botRoster.isEmpty && botModePhase == .loading) {
+                return
+            }
+        }
+        guard !isRefreshingBotRoster, botRosterRefreshFlight == nil else { return }
+        let flight = BotRosterRefreshFlight(task: Task<Void, Never> { [weak self] in
+            guard let self else { return }
+            await self.performBotRosterRefresh()
+        })
+        botRosterRefreshFlight = flight
+        await flight.task.value
+        if botRosterRefreshFlight === flight {
+            botRosterRefreshFlight = nil
+        }
+    }
+
+    /// The single-flight roster refresh. Runs unstructured (never cancelled
+    /// by a view task identity change) and keeps the token-based claim
+    /// release: only the holder of the CURRENT token may clear
+    /// `isRefreshingBotRoster`, so a superseded or invalidated refresh can
+    /// never clear a newer refresh's claim.
+    private func performBotRosterRefresh() async {
+        let epoch = botRosterEpoch
+        let dashboardID = activeDashboardID
+        guard let client, isConnected else {
+            if botRoster.isEmpty, botModePhase != .gatewayUnsupported {
+                botModePhase = .failed(
+                    message: AppLocalization.string("Connect to Hermes to see your bots.")
+                )
+            }
+            return
+        }
+        isRefreshingBotRoster = true
+        let refreshToken = UUID()
+        botRosterRefreshToken = refreshToken
+        // Ownership-checked release: only the refresh holding the CURRENT
+        // token releases the flag. A refresh superseded by invalidation
+        // (token cleared) or by a newer refresh (token replaced) never
+        // clears someone else's claim, and no identity transition can
+        // strand the flag.
+        defer {
+            if botRosterRefreshToken == refreshToken {
+                botRosterRefreshToken = nil
+                isRefreshingBotRoster = false
+            }
+        }
+        if botRoster.isEmpty {
+            botModePhase = .loading
+        }
+        do {
+            let snapshot: BotRosterSnapshot
+            if let botRoster = chatResumeLifecycleOperations.botRoster {
+                snapshot = try await botRoster(client)
+            } else {
+                snapshot = try await client.botRoster()
+            }
+            guard botModeStateIsCurrent(epoch: epoch, dashboardID: dashboardID) else { return }
+            // The FULL roster is kept: sessions-list hygiene must know every
+            // bot's canonical registry (including meta-hidden bots), while
+            // the roster VIEW hides meta-hidden rows for display only.
+            botRoster = BotProfile.displayOrder(snapshot.bots)
+            botModePhase = .available
+        } catch {
+            guard botModeStateIsCurrent(epoch: epoch, dashboardID: dashboardID),
+                  !Task.isCancelled else { return }
+            if HermesClient.isMissingRPCMethod(error) {
+                botModePhase = .gatewayUnsupported
+            } else if botRoster.isEmpty {
+                botModePhase = .failed(
+                    message: AppLocalization.string("Could not load bots.")
+                )
+            } else {
+                // An established roster stays on screen; the failure renders
+                // as a non-blocking notice above it.
+                botModePhase = .failed(
+                    message: AppLocalization.string("Could not refresh bots.")
+                )
+            }
+        }
+    }
+
+    private func botModeStateIsCurrent(
+        epoch: Int,
+        dashboardID: UUID?
+    ) -> Bool {
+        // The roster is gateway-wide: the epoch (server identity) and the
+        // dashboard fence it; the dashboard's own profile selection is
+        // irrelevant to a profiles.list answer.
+        epoch == botRosterEpoch && dashboardID == activeDashboardID
+    }
+
+    /// Opens a bot's canonical Bot Chat: consult the name-identity registry,
+    /// open the confirmed chat (lineage tip), or — only once absence is
+    /// CONFIRMED — create the one hidden "Bot Chat". Fail-closed throughout:
+    /// a failed or unconfirmable lookup NEVER mints a chat, because that is
+    /// the one remaining way to fork a bot's forever chat. Concurrent opens
+    /// of the same bot share one flight.
+    @discardableResult
+    func openBotChat(for bot: BotProfile) async -> Bool {
+        guard let client, isConnected else {
+            errorMessage = AppLocalization.string("Connect to Hermes to chat with bots.")
+            return false
+        }
+        let flightKey = bot.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let flight = botChatOpenFlights[flightKey] {
+            return await flight.task?.value ?? false
+        }
+        // The closure captures the box WEAKLY: a strong capture would form
+        // a flight<->task retain cycle that outlives the map entry.
+        let flight = BotChatOpenFlight()
+        let task = Task { @MainActor [weak self, weak flight] () -> Bool in
+            // `flight` is retained strongly by the creating scope across
+            // `await task.value`, so the weak capture only breaks the
+            // box<->task cycle — it can never fire nil here.
+            guard let self, let flight else { return false }
+            // Identity-checked cleanup: a flight orphaned by a server switch
+            // (map cleared, then a newer flight for the same bot) must never
+            // evict that newer flight's entry.
+            defer {
+                if self.botChatOpenFlights[flightKey] === flight {
+                    self.botChatOpenFlights.removeValue(forKey: flightKey)
+                }
+            }
+            return await self.resolveAndOpenBotChat(bot, client: client)
+        }
+        flight.task = task
+        botChatOpenFlights[flightKey] = flight
+        return await task.value
+    }
+
+    /// A bot open spans several awaited RPCs. Every step re-validates that
+    /// the server identity this flight captured is still current; a server
+    /// switch mid-flight (invalidation cancels the task AND bumps the epoch)
+    /// abandons the flight silently — the user has moved on.
+    private func botOpenFenceIsCurrent(epoch: Int, client: HermesClient) -> Bool {
+        epoch == botRosterEpoch && client === self.client
+    }
+
+    private func resolveAndOpenBotChat(_ bot: BotProfile, client: HermesClient) async -> Bool {
+        let epoch = botRosterEpoch
+        // THE identity lookup, on the bot's own profile. A failed RPC is not
+        // "no Bot Chat exists" — it is "unknown", and unknown means retry.
+        let rows: [BotChatLookupRow]
+        do {
+            if let findBotChat = chatResumeLifecycleOperations.findBotChat {
+                rows = try await findBotChat(client, bot.name)
+            } else {
+                rows = try await client.findBotChatSession(profile: bot.name)
+            }
+        } catch {
+            guard botOpenFenceIsCurrent(epoch: epoch, client: client) else { return false }
+            return failBotChatOpen(bot, error: error, stage: .lookup)
+        }
+        guard botOpenFenceIsCurrent(epoch: epoch, client: client) else { return false }
+        switch BotChatResolver.resolve(rows: rows, rosterCanonicalID: bot.canonicalSessionID) {
+        case .failure(.unconfirmedAbsence):
+            refuseBotChatConfirmation(bot)
+            return false
+        case .success(.openExisting(let registryID, let resumeID)):
+            return await openCanonicalBotChat(
+                bot,
+                registryID: registryID,
+                resumeID: resumeID,
+                epoch: epoch,
+                client: client
+            )
+        case .success(.create):
+            return await createAndOpenBotChat(bot, client: client, epoch: epoch)
+        }
+    }
+
+    /// Opens an existing canonical chat through the ordinary session
+    /// machinery: `requestOpenSession`'s full path (identity capture,
+    /// admission gate, hydration, reconcile). The resume rides the bot's
+    /// profile scope; nothing bot-specific runs beside it.
+    private func openCanonicalBotChat(
+        _ bot: BotProfile,
+        registryID: String,
+        resumeID: String,
+        epoch: Int,
+        client: HermesClient
+    ) async -> Bool {
+        noteBotChatSession(resumeID, profile: bot.name)
+        noteBotChatSession(registryID, profile: bot.name)
+        let outcome = await performSessionOpen(
+            resumeID,
+            reusing: nil,
+            conversationProfile: bot.name,
+            preferredTitle: bot.displayLabel
+        )
+        // Only a GENUINE failure owned by this invocation may publish: a
+        // superseded open (the user navigated elsewhere, or re-tapped this
+        // same bot so a newer open owns the viewport) is navigation state,
+        // not an error.
+        if outcome == .failed, !Task.isCancelled,
+           botOpenFenceIsCurrent(epoch: epoch, client: client),
+           errorMessage == nil {
+            errorMessage = AppLocalization.string(
+                "Could not open \(bot.displayLabel)'s Bot Chat."
+            )
+        }
+        return outcome == .opened
+    }
+
+    /// Creates the bot's ONE forever chat (lookup confirmed absence): hidden,
+    /// titled "Bot Chat", following the profile's current config. The eager
+    /// `session.title` write materializes the lazy row BEFORE any open, so a
+    /// second click can never mint a duplicate while the first is in flight.
+    /// A title-uniqueness rejection — at the title write, or at `session.create`
+    /// itself on gateways that enforce the canonical name at create time —
+    /// means another writer won the canonical title in between:
+    /// adopt-before-mint. Re-run the authoritative lookup and open the
+    /// winner instead of forking. The in-memory registry is only seeded
+    /// AFTER the canonical title has landed, so an abandoned lazy session
+    /// never leaves a stale entry behind.
+    private func createAndOpenBotChat(_ bot: BotProfile, client: HermesClient, epoch: Int) async -> Bool {
+        let created: (sessionId: String, storedSessionId: String?)
+        do {
+            if let createBotChat = chatResumeLifecycleOperations.createBotChat {
+                created = try await createBotChat(client, bot.name)
+            } else {
+                created = try await client.createBotChatSession(profile: bot.name)
+            }
+        } catch {
+            if BotChatTitleCollision.isError(error) {
+                return await adoptWinningBotChat(bot, client: client, epoch: epoch)
+            }
+            guard botOpenFenceIsCurrent(epoch: epoch, client: client) else { return false }
+            return failBotChatOpen(bot, error: error, stage: .create)
+        }
+        guard botOpenFenceIsCurrent(epoch: epoch, client: client) else { return false }
+        do {
+            if let titleBotChat = chatResumeLifecycleOperations.titleBotChat {
+                try await titleBotChat(client, created.sessionId, BotMode.canonicalChatTitle, bot.name)
+            } else {
+                try await client.setSessionTitle(
+                    created.sessionId,
+                    title: BotMode.canonicalChatTitle,
+                    profile: bot.name
+                )
+            }
+        } catch {
+            if BotChatTitleCollision.isError(error) {
+                return await adoptWinningBotChat(bot, client: client, epoch: epoch)
+            }
+            guard botOpenFenceIsCurrent(epoch: epoch, client: client) else { return false }
+            return failBotChatOpen(bot, error: error, stage: .title)
+        }
+        guard botOpenFenceIsCurrent(epoch: epoch, client: client) else { return false }
+        noteBotChatSession(created.sessionId, profile: bot.name)
+        if let stored = created.storedSessionId {
+            noteBotChatSession(stored, profile: bot.name)
+        }
+        return await openCanonicalBotChat(
+            bot,
+            registryID: created.storedSessionId ?? created.sessionId,
+            resumeID: created.sessionId,
+            epoch: epoch,
+            client: client
+        )
+    }
+
+    /// The canonical title was taken by another writer between our registry
+    /// miss and the eager title. Re-consult the registry; adopt the winner.
+    /// Our abandoned lazy session holds zero messages and the gateway prunes
+    /// it. If the winner cannot be confirmed, fail closed — never open our
+    /// untitled stray, never mint again.
+    private func adoptWinningBotChat(_ bot: BotProfile, client: HermesClient, epoch: Int) async -> Bool {
+        let rows: [BotChatLookupRow]
+        do {
+            if let findBotChat = chatResumeLifecycleOperations.findBotChat {
+                rows = try await findBotChat(client, bot.name)
+            } else {
+                rows = try await client.findBotChatSession(profile: bot.name)
+            }
+        } catch {
+            // A cancelled or server-switched flight abandons silently, like
+            // every other stage; only a current flight speaks.
+            guard botOpenFenceIsCurrent(epoch: epoch, client: client) else { return false }
+            refuseBotChatConfirmation(bot)
+            return false
+        }
+        guard botOpenFenceIsCurrent(epoch: epoch, client: client) else { return false }
+        if case .success(.openExisting(let registryID, let resumeID)) =
+            BotChatResolver.resolve(rows: rows, rosterCanonicalID: bot.canonicalSessionID) {
+            return await openCanonicalBotChat(
+                bot,
+                registryID: registryID,
+                resumeID: resumeID,
+                epoch: epoch,
+                client: client
+            )
+        }
+        refuseBotChatConfirmation(bot)
+        return false
+    }
+
+    private enum BotChatOpenStage {
+        case lookup
+        case create
+        case title
+    }
+
+    private func failBotChatOpen(
+        _ bot: BotProfile,
+        error: Error,
+        stage: BotChatOpenStage
+    ) -> Bool {
+        if HermesClient.isMissingRPCMethod(error) {
+            botModePhase = .gatewayUnsupported
+            errorMessage = AppLocalization.string("Bot Mode requires a newer Hermes gateway.")
+        } else if !Task.isCancelled {
+            switch stage {
+            case .lookup:
+                errorMessage = AppLocalization.string(
+                    "Could not check \(bot.displayLabel)'s Bot Chat — not starting a new chat."
+                )
+            case .create:
+                errorMessage = AppLocalization.string(
+                    "Could not create \(bot.displayLabel)'s Bot Chat."
+                )
+            case .title:
+                errorMessage = AppLocalization.string(
+                    "Could not title \(bot.displayLabel)'s Bot Chat — not starting a new chat."
+                )
+            }
+        }
+        return false
+    }
+
+    private func refuseBotChatConfirmation(_ bot: BotProfile) {
+        errorMessage = AppLocalization.string(
+            "Could not confirm \(bot.displayLabel)'s Bot Chat — not starting a new chat."
+        )
+    }
+
+    private func noteBotChatSession(_ sessionID: String?, profile: String) {
+        guard let sessionID,
+              !sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        botChatSessionProfiles[sessionID] = profile
+    }
+
+    /// The bot profile an in-flight or active conversation belongs to, when
+    /// that conversation is a canonical Bot Chat. Nil for ordinary sessions —
+    /// the ordinary dashboard scope applies.
+    private func botConversationProfile(for sessionID: String) -> String? {
+        botChatSessionProfiles[sessionID]
+    }
+
+    /// The presentation-cache namespace for a conversation. Canonical Bot
+    /// Chats are partitioned under their OWN profile so presentation rows
+    /// and pending decision cards survive dashboard-profile switches and
+    /// reconcile under the same key they were written with; ordinary
+    /// conversations resolve to the dashboard profile exactly as before.
+    private func presentationProfile(for sessionID: String?) -> String {
+        guard let sessionID else { return activeProfile }
+        return botConversationProfile(for: sessionID) ?? activeProfile
+    }
+
     @discardableResult
     func openSession(_ sessionId: String) async -> Bool {
-        await openSession(sessionId, reusing: nil)
+        await performSessionOpen(sessionId, reusing: nil) == .opened
     }
 
     @discardableResult
@@ -7560,30 +8137,48 @@ final class AppState: ObservableObject {
         explicitSessionOpenTask = nil
     }
 
-    private func openSession(
+    /// Why an open did not complete. A SUPERSEDED open (a newer navigation
+    /// owns the viewport transition) is navigation state, never a failure:
+    /// callers must not publish failure text for it, even when the newer
+    /// navigation re-opened the SAME session id.
+    enum SessionOpenOutcome {
+        case opened
+        case superseded
+        case failed
+    }
+
+    private func performSessionOpen(
         _ sessionId: String,
         reusing viewportTransitionGeneration: UInt64?,
-        presentationMigrationSessionIDs: Set<String> = []
-    ) async -> Bool {
-        guard let client else { return false }
+        presentationMigrationSessionIDs: Set<String> = [],
+        conversationProfile: String? = nil,
+        preferredTitle: String? = nil
+    ) async -> SessionOpenOutcome {
+        guard let client else { return .failed }
         let previousTurnState = turnState
-        if let session = (sessions + cronSessions).first(where: {
-            $0.id == sessionId || $0.alternateIds.contains(sessionId)
-        }), !sessionBelongsToProfile(session, profile: activeProfile) {
+        // The catalog-ownership guard protects ORDINARY opens from another
+        // dashboard profile's rows. A bot open carries the conversation's
+        // profile explicitly (its canonical row may legitimately surface in
+        // the raw catalog as a stray from older server data), so the guard
+        // would only misfire here.
+        if conversationProfile == nil,
+           let session = (sessions + cronSessions).first(where: {
+               $0.id == sessionId || $0.alternateIds.contains(sessionId)
+           }), !sessionBelongsToProfile(session, profile: activeProfile) {
             errorMessage = AppLocalization.string("That conversation belongs to another workspace. Switch profiles to open it.")
-            return false
+            return .failed
         }
         let transitionGeneration: UInt64
         if let viewportTransitionGeneration {
             guard chatViewportTransitionIsCurrent(
                 generation: viewportTransitionGeneration
-            ) else { return false }
+            ) else { return .superseded }
             transitionGeneration = viewportTransitionGeneration
         } else {
             transitionGeneration = beginExplicitChatViewportTransition()
         }
         guard chatViewportTransitionIsCurrent(generation: transitionGeneration) else {
-            return false
+            return .superseded
         }
         markChatViewportReplacement()
         // Atomically switch session identity BEFORE clearing the transcript.
@@ -7591,10 +8186,23 @@ final class AppState: ObservableObject {
         // through `eventBelongsToActiveSession` and repopulating the
         // cleared message array while reconciliation is in flight.
         flushPendingPresentationCache()
-        let openedIdentity = captureConversationIdentity(for: sessionId)
+        let openedIdentity = captureConversationIdentity(
+            for: sessionId,
+            scopeProfile: conversationProfile
+        )
         let token = beginReconciliation()
         let acceptedSessionIDs = knownSessionIDs(for: sessionId)
-        setActiveSessionState(id: sessionId)
+        // A bot chat is not the dashboard workspace's selected conversation:
+        // it must never seed the cold-restore resume store with a pointer
+        // the ordinary restore path cannot resume (upstream keeps bot tabs
+        // out of the main workspace's selection for the same reason). The
+        // registry conjunct covers a KNOWN bot conversation opened through
+        // the ordinary path, exactly like the title guard below.
+        setActiveSessionState(
+            id: sessionId,
+            recordsResumeSelection: conversationProfile == nil
+                && botConversationProfile(for: sessionId) == nil
+        )
         messages = []
         persistedTranscriptWindow = nil
         // Freshness evidence belongs to the conversation it was captured
@@ -7603,7 +8211,20 @@ final class AppState: ObservableObject {
         clearStreamingText()
         activeAssistantMessageId = nil
         resetReasoningTurn()
-        updateActiveSessionTitle(for: sessionId)
+        // A canonical Bot Chat carries its own title (the bot's display
+        // label) and must never write the catalog's wire title — or any
+        // title — into the dashboard profile's persisted title cache. Both
+        // conditions are required: the parameter covers the roster's own
+        // open, and the registry covers a KNOWN bot conversation opened
+        // through the ordinary path (`requestOpenSession` and friends,
+        // which pass no conversation profile).
+        if conversationProfile == nil,
+           botConversationProfile(for: sessionId) == nil {
+            updateActiveSessionTitle(for: sessionId)
+        }
+        if let preferredTitle, !preferredTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            activeSessionTitle = preferredTitle
+        }
         let reconciled = await reconcile(
             sessionId: sessionId,
             using: client,
@@ -7611,18 +8232,22 @@ final class AppState: ObservableObject {
             acceptedSessionIDs: acceptedSessionIDs,
             conversationIdentity: openedIdentity,
             requiredViewportTransitionGeneration: transitionGeneration,
-            presentationMigrationSessionIDs: presentationMigrationSessionIDs
+            presentationMigrationSessionIDs: presentationMigrationSessionIDs,
+            conversationProfile: conversationProfile
         )
         guard chatViewportTransitionIsCurrent(generation: transitionGeneration) else {
-            return false
+            return .superseded
         }
         if !reconciled {
             finishChatViewportTransition(generation: transitionGeneration)
             if Task.isCancelled, turnState == .synchronizing {
                 turnState = previousTurnState
             }
+            // This open still owns the viewport, so the reconcile failure is
+            // genuine (identity rejection and friends set their own message).
+            return .failed
         }
-        return reconciled
+        return .opened
     }
 
     /// Routes a notification to its originating profile/session without
@@ -7742,7 +8367,7 @@ final class AppState: ObservableObject {
                 cacheSessionIDs: [requestedID]
             )
         }
-        let opened = await openSession(
+        let opened = await performSessionOpen(
             route.resumeTargetID,
             reusing: transitionGeneration,
             // The push-named runtime id is a PRESENTATION MIGRATION SOURCE,
@@ -7752,7 +8377,7 @@ final class AppState: ObservableObject {
             // rejected open nothing migrates (the hook only runs on
             // admission success).
             presentationMigrationSessionIDs: [requestedID]
-        )
+        ) == .opened
         // Commit the payload's dual identity as positive evidence only once
         // the open actually succeeded — a failed resume (e.g. the durable
         // conversation was deleted server-side) must not leave a mapping
@@ -7778,7 +8403,7 @@ final class AppState: ObservableObject {
             // conversation.
             sessionPresentationCache.removePendingDecision(
                 key: evictionKey,
-                profile: activeProfile,
+                profile: presentationProfile(for: requestedID),
                 sessionIDs: [requestedID]
             )
         }
@@ -7821,6 +8446,11 @@ final class AppState: ObservableObject {
         cacheSessionIDs: [String]? = nil
     ) {
         let persistedIDs = cacheSessionIDs ?? sessionIDs
+        // The notified conversation's own namespace: the live session on
+        // screen is not necessarily the conversation the push named, and
+        // the later open/eviction of the named conversation must find the
+        // card under the same key it was recorded under.
+        let recordProfile = presentationProfile(for: persistedIDs.first ?? activeSessionId)
         switch decision {
         case let .approval(sessionKey, description, choices):
             // Compare trimmed on both sides: the payload parser trims the
@@ -7850,7 +8480,7 @@ final class AppState: ObservableObject {
             )
             sessionPresentationCache.recordPendingDecision(
                 message,
-                profile: activeProfile,
+                profile: recordProfile,
                 sessionIDs: persistedIDs
             )
         case let .clarify(requestId, question, choices):
@@ -7874,7 +8504,7 @@ final class AppState: ObservableObject {
             )
             sessionPresentationCache.recordPendingDecision(
                 message,
-                profile: activeProfile,
+                profile: recordProfile,
                 sessionIDs: persistedIDs
             )
         case let .clarifyBatch(requestId, questions):
@@ -7891,7 +8521,7 @@ final class AppState: ObservableObject {
             )
             sessionPresentationCache.recordPendingDecision(
                 message,
-                profile: activeProfile,
+                profile: recordProfile,
                 sessionIDs: persistedIDs
             )
         }
@@ -8501,7 +9131,9 @@ final class AppState: ObservableObject {
             // no-client outcome.
             return .proceed
         }
-        let profile = activeProfile
+        // A bot chat's persisted tail lives in the BOT's store (see the
+        // cross-surface freshness path); scope to the active conversation.
+        let profile = botConversationProfile(for: sessionId) ?? activeProfile
         let bridge = dashboardTicketBridge
         let localFrontier = durablePersistedRowIDs
         let localMessageIDs = Set(messages.map { $0.id })
@@ -10181,19 +10813,44 @@ final class AppState: ObservableObject {
             // would rethrow the RESUME failure instead.)
             let originalError = error
             guard HermesClient.isSessionNotFoundError(originalError) else { throw originalError }
-            // Recovery needs the durable stored id the catalog anchors this
-            // conversation to; an unanchored runtime has nowhere to resume.
-            guard let catalogRow = (sessions + cronSessions).first(where: {
-                $0.id == sessionID || $0.alternateIds.contains(sessionID)
-            }) else { throw originalError }
-            let storedSessionID = catalogRow.storedSessionId ?? catalogRow.id
+            // Recovery needs the durable stored id the conversation's
+            // identity anchors. A canonical Bot Chat has no catalog row
+            // (hidden, another profile): its anchor is the accepted scroll
+            // identity, and the recovery resume must ride the BOT profile —
+            // otherwise the re-resume would address the dashboard store and
+            // never find the session.
+            let botScope = botConversationProfile(for: sessionID)
+            let storedSessionID: String
+            let acceptedIDs: Set<String>
+            let recoveryProfile: String?
+            if let botScope {
+                let canonical = activeChatScrollSessionIdentity.canonicalSessionID ?? sessionID
+                storedSessionID = canonical
+                acceptedIDs = activeChatScrollSessionIdentity.equivalentSessionIDs
+                    .union([sessionID, canonical])
+                recoveryProfile = botScope
+            } else {
+                guard let catalogRow = (sessions + cronSessions).first(where: {
+                    $0.id == sessionID || $0.alternateIds.contains(sessionID)
+                }) else { throw originalError }
+                storedSessionID = catalogRow.storedSessionId ?? catalogRow.id
+                acceptedIDs = Set(
+                    [catalogRow.id, storedSessionID, sessionID] + catalogRow.alternateIds
+                )
+                recoveryProfile = nil
+            }
             // Drift fence BEFORE the resume side effect: a resume mints a
             // fresh runtime — never mint one for a submission the user has
             // already abandoned.
             guard isCurrentComposerSubmission(context) else { throw originalError }
             let resumed: SessionResumeResult
             do {
-                resumed = try await openChatResumeSession(storedSessionID, using: client, compact: true)
+                resumed = try await openChatResumeSession(
+                    storedSessionID,
+                    using: client,
+                    compact: true,
+                    profile: recoveryProfile
+                )
             } catch {
                 // Resume failure: surface the ORIGINAL compression error
                 // (upstream Desktop rethrows it too).
@@ -10209,13 +10866,11 @@ final class AppState: ObservableObject {
             // conversation this recovery intended. A contradictory durable
             // claim or a runtime positively owned by another catalog row is
             // rejected without rebind or retry.
-            // Accept everything the catalog row positively anchors — the
-            // same seeding breadth the resume reconciliation uses.
-            let acceptedIDs = Set(
-                [catalogRow.id, storedSessionID, sessionID] + catalogRow.alternateIds
-            )
+            // Accept everything the conversation's identity positively
+            // anchors — the same seeding breadth the resume reconciliation
+            // uses.
             let selectedIdentity = ConversationIdentity(
-                profile: activeProfile,
+                profile: recoveryProfile ?? activeProfile,
                 durableSessionID: storedSessionID,
                 runtimeSessionID: sessionID,
                 acceptedSessionIDs: acceptedIDs
@@ -10242,13 +10897,13 @@ final class AppState: ObservableObject {
             conversationIdentityIndex.recordAuthoritative(
                 runtimeID: recoveredSessionID,
                 durableID: storedSessionID,
-                profile: activeProfile,
+                profile: recoveryProfile ?? activeProfile,
                 source: .resume
             )
             conversationIdentityIndex.recordAuthoritative(
                 runtimeID: sessionID,
                 durableID: storedSessionID,
-                profile: activeProfile,
+                profile: recoveryProfile ?? activeProfile,
                 source: .resume
             )
             // Migrate the invocation generation onto the recovered
@@ -10268,8 +10923,20 @@ final class AppState: ObservableObject {
             // rebind and do not send compression to the recovered runtime.
             guard isCurrentComposerSubmission(context) else { throw originalError }
             // Rebind through the canonical state helper: updates
-            // `activeSessionId` and re-anchors the persisted identity.
-            setActiveSessionState(id: recoveredSessionID)
+            // `activeSessionId` and re-anchors the persisted identity. A
+            // bot chat rebind never seeds the dashboard's cold-restore
+            // selection, exactly like its open.
+            setActiveSessionState(
+                id: recoveredSessionID,
+                recordsResumeSelection: recoveryProfile == nil
+            )
+            // Re-register the recovered runtime: every later scope
+            // resolution (reconnect reconcile, backfill ownership,
+            // post-compress rehydration) resolves through this registry.
+            if let recoveryProfile {
+                noteBotChatSession(recoveredSessionID, profile: recoveryProfile)
+                noteBotChatSession(storedSessionID, profile: recoveryProfile)
+            }
             onRecover(recoveredSessionID)
             // Re-base the submission onto the recovered runtime: the old
             // context describes the dead runtime and would fail every
@@ -10495,7 +11162,10 @@ final class AppState: ObservableObject {
         }
         let merged = sessionPresentationCache.merge(
             compressed + retainedDecisionMessages,
-            profile: activeProfile,
+            // The compressed conversation's own namespace: for a bot chat
+            // this must agree with the reconcile/open writes, or retained
+            // decision cards and presentation land in a foreign partition.
+            profile: presentationProfile(for: sessionID),
             sessionIDs: [sessionID],
             includePendingClarifications: false,
             includePendingApprovals: false
@@ -10532,7 +11202,10 @@ final class AppState: ObservableObject {
         context: ComposerSubmissionContext
     ) async {
         guard isCurrentComposerSubmission(context) else { return }
-        let profile = activeProfile
+        // A bot chat's post-compress rehydration must read the BOT's store
+        // and stamp the window with the bot scope, exactly like the initial
+        // hydration did.
+        let profile = botConversationProfile(for: requestedSessionID) ?? activeProfile
         let outcome = await persistedTranscriptOutcome(
             sessionId: requestedSessionID,
             profile: profile,
@@ -11751,10 +12424,14 @@ final class AppState: ObservableObject {
         _ window: PersistedTranscriptWindowState
     ) -> Bool {
         guard let activeId = activeSessionId else { return false }
+        // The ownership comparison uses the ACTIVE CONVERSATION's profile
+        // scope, not the dashboard's: a canonical Bot Chat's window is
+        // stamped with the bot profile, and must stay actionable (for
+        // "Load earlier messages") while that chat is on screen.
         return PersistedTranscriptWindow.ownershipHolds(
             window: window,
             conversationSessionIds: [activeId],
-            profile: activeProfile,
+            profile: botConversationProfile(for: activeId) ?? activeProfile,
             windowAliasIds: catalogAliasIDs(for: window.trustedSessionIDs),
             conversationAliasIds: knownSessionIDs(for: activeId)
         )
@@ -13070,8 +13747,38 @@ final class AppState: ObservableObject {
         profile: String,
         sessionIDs: [String]
     ) async {
-        let taskKeys = Set(sessionIDs.filter { !$0.isEmpty }.map { "\(profile)|\($0)" })
+        let taskKeys = Set(
+            sessionIDs.filter { !$0.isEmpty }.map {
+                Self.secondaryTitleRecoveryTaskKey(profile: profile, sessionID: $0)
+            }
+        )
         await sessionTitleRecoveryTracker.cancel(taskKeys)
+    }
+
+    /// One source of truth for the secondary-recovery task key. The scheduler,
+    /// its cancellation, and the observability seam below must agree: a
+    /// key-format change made in only one of them would silently disable
+    /// another (and quietly turn a test pinning the boundary vacuous).
+    private static func secondaryTitleRecoveryTaskKey(
+        profile: String,
+        sessionID: String
+    ) -> String {
+        "\(profile)|\(sessionID)"
+    }
+
+    /// Whether a secondary automatic title-recovery task is registered for
+    /// this conversation. Canonical Bot Chats are excluded from that
+    /// machinery outright (see `scheduleSecondaryProfileTitleRecovery`), so
+    /// this answers `false` for them, while ordinary conversations keep the
+    /// historical behaviour. Internal rather than private so regression
+    /// tests can pin the boundary without waiting out the recovery delay.
+    func hasSecondaryTitleRecoveryScheduled(forSessionID sessionID: String) -> Bool {
+        sessionTitleRecoveryTracker.hasTask(
+            for: Self.secondaryTitleRecoveryTaskKey(
+                profile: activeProfile,
+                sessionID: sessionID
+            )
+        )
     }
 
     private func titleGenerationSettings(for profile: String) async -> TitleGenerationSettings? {
@@ -13132,13 +13839,21 @@ final class AppState: ObservableObject {
         userMessage: String,
         assistantMessage: String
     ) {
+        // A canonical Bot Chat never participates in automatic title
+        // generation: its identity IS the exact title "Bot Chat", so a
+        // generated rename would break the exact-title lookup that resolves
+        // the profile's forever chat (and could make the bot unmintable or
+        // mintable-twice downstream). Registry identity — never a title
+        // comparison — decides ownership, so this returns before any RPC,
+        // settings read, or task registration.
+        guard botConversationProfile(for: sessionId) == nil else { return }
         let profile = activeProfile
         guard profile != "default",
               let client,
               !userMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !assistantMessage.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
-        let taskKey = "\(profile)|\(sessionId)"
+        let taskKey = Self.secondaryTitleRecoveryTaskKey(profile: profile, sessionID: sessionId)
         guard !sessionTitleRecoveryTracker.isSuppressed(taskKey),
               !sessionTitleRecoveryTracker.hasTask(for: taskKey) else { return }
         let token = UUID()
@@ -13160,7 +13875,13 @@ final class AppState: ObservableObject {
 
             do {
                 // Give Hermes' built-in asynchronous title task precedence.
-                if let existingTitle = try await client.sessionTitle(sessionId) {
+                // The profile field is self-describing even though current
+                // Hermes session.title resolution is session-scoped: bot
+                // conversations address their own profile explicitly.
+                if let existingTitle = try await client.sessionTitle(
+                    sessionId,
+                    profile: botConversationProfile(for: sessionId)
+                ) {
                     guard !Task.isCancelled,
                           self.sessionTitleRecoveryTracker.isCurrent(token, for: taskKey),
                           self.activeProfile == profile,
@@ -13247,14 +13968,27 @@ final class AppState: ObservableObject {
         sessions = sessions.map(updated)
         cronSessions = cronSessions.map(updated)
         archivedSessions = archivedSessions.map(updated)
-        if matchesActiveSession { setActiveSessionTitle(title) }
+        // Catalog rows may carry the recovered title either way, but the
+        // ACTIVE ordinary persisted title must not: a .sessionTitle event
+        // for a canonical Bot Chat would otherwise displace the bot's
+        // display label and persist the literal wire title into the
+        // dashboard profile's cache. Registry identity — never a title
+        // comparison — decides ownership.
+        if matchesActiveSession {
+            if let activeSessionId, botConversationProfile(for: activeSessionId) == nil {
+                setActiveSessionTitle(title)
+            }
+        }
     }
 
     // MARK: - Stream event handling
 
     func handleStreamEvent(_ event: StreamEvent) {
         if case .sessionTitle(let runtimeSessionId, let storedSessionId, let title) = event {
-            let taskKey = "\(activeProfile)|\(runtimeSessionId)"
+            let taskKey = Self.secondaryTitleRecoveryTaskKey(
+                profile: activeProfile,
+                sessionID: runtimeSessionId
+            )
             sessionTitleRecoveryTracker.cancel(taskKey)
             applyRecoveredSessionTitle(
                 title,
@@ -13303,6 +14037,17 @@ final class AppState: ObservableObject {
     /// alias-addressed terminal edges and pending continuations share one
     /// counter across runtime rebinds.
     private func serverCompactionGenerationKey(for sessionId: String) -> String {
+        // A bot chat's runtime->durable mapping is indexed under the BOT
+        // profile; ordinary sessions keep the dashboard lookup. Try the
+        // conversation's own scope first, then the dashboard scope as a
+        // fallback so a pre-existing mapping is never orphaned.
+        let scopeProfile = botConversationProfile(for: sessionId) ?? activeProfile
+        if let durable = conversationIdentityIndex.durableID(
+            forRuntime: sessionId,
+            profile: scopeProfile
+        ) {
+            return durable
+        }
         if let durable = conversationIdentityIndex.durableID(
             forRuntime: sessionId,
             profile: activeProfile
@@ -13834,7 +14579,7 @@ final class AppState: ObservableObject {
         for requestId in supersededRequestIds {
             sessionPresentationCache.removePendingDecision(
                 key: "clarify:\(requestId)",
-                profile: activeProfile,
+                profile: presentationProfile(for: activeSessionId),
                 sessionIDs: cacheSessionIDs
             )
         }
