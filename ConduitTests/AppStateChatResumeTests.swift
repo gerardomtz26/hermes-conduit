@@ -1343,11 +1343,15 @@ final class AppStateChatResumeTests: XCTestCase {
         harness.appState.showSidebar = false
         let partials = harness.appState.messages.filter { $0.role == .partial }
         let olderToolIndex = harness.appState.messages.firstIndex { $0.id == olderToolID }
-        let replayedToolIndex = harness.appState.messages.lastIndex { $0.role == .tool }
+        let replayedToolIndex = harness.appState.messages.firstIndex { $0.tool?.id == "buffered-tool" }
+        guard let replayedToolIndex else {
+            XCTFail("Expected the replayed tool card")
+            return
+        }
         let partialIndex = harness.appState.messages.firstIndex { $0.role == .partial }
         XCTAssertEqual(partials.map(\.content), ["CDE"])
         XCTAssertEqual(harness.appState.messages.filter { $0.role == .tool }.count, 2)
-        XCTAssertEqual(harness.appState.messages[replayedToolIndex ?? 0].tool?.id, "buffered-tool")
+        XCTAssertEqual(harness.appState.messages[replayedToolIndex].tool?.id, "buffered-tool")
         XCTAssertTrue(
             olderToolIndex.map { index in partialIndex.map { index < $0 } ?? false } ?? false,
             "The older identical running call must be preserved ahead of the buffered text"
@@ -5581,6 +5585,97 @@ final class AppStateChatResumeTests: XCTestCase {
         XCTAssertEqual(openedSessionIDs, [], "No session may be resumed after the edit")
         XCTAssertEqual(harness.appState.turnState, .idle)
         XCTAssertEqual(harness.recoverySequence.currentPurpose, .preserveCurrent)
+    }
+
+    func testChatResumeRecoverySequenceTransitionsAndResets() {
+        let sequence = ChatResumeRecoverySequence()
+        XCTAssertEqual(sequence.currentPurpose, ChatResumeSyncPurpose.preserveCurrent)
+
+        sequence.register(.automaticReturn)
+        XCTAssertEqual(sequence.currentPurpose, ChatResumeSyncPurpose.automaticReturn)
+
+        // Mid-sequence preserveCurrent request retains automaticReturn for retry
+        let registered = sequence.register(.preserveCurrent)
+        XCTAssertEqual(registered, ChatResumeSyncPurpose.automaticReturn)
+        XCTAssertEqual(sequence.currentPurpose, ChatResumeSyncPurpose.automaticReturn)
+
+        let decision1 = sequence.planReconnect(requestedPurpose: .preserveCurrent)
+        XCTAssertEqual(decision1, .schedule(.automaticReturn))
+        XCTAssertEqual(sequence.queuedReconnectPurpose, ChatResumeSyncPurpose.automaticReturn)
+
+        // preserveTransportAfterAutomaticIntentCancellation downgrades to preserveCurrent
+        sequence.preserveTransportAfterAutomaticIntentCancellation()
+        XCTAssertEqual(sequence.currentPurpose, ChatResumeSyncPurpose.preserveCurrent)
+        XCTAssertEqual(sequence.queuedReconnectPurpose, ChatResumeSyncPurpose.preserveCurrent)
+
+        // Re-register automaticReturn then complete resets both to preserveCurrent/nil
+        sequence.register(.automaticReturn)
+        sequence.complete()
+        XCTAssertEqual(sequence.currentPurpose, ChatResumeSyncPurpose.preserveCurrent)
+        XCTAssertNil(sequence.queuedReconnectPurpose)
+    }
+
+    func testFailedAutomaticReturnSessionCreationDoesNotStickyCorruptSubsequentPreserveCurrent() async {
+        let scheduler = ControlledReconnectScheduler()
+        let visible = session("visible-session")
+        let newest = session("newest-session")
+        var openedSessionIDs: [String] = []
+        var catalogLoads = 0
+
+        let harness = makeHarness(
+            reconnectScheduler: scheduler.schedule(after:operation:),
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                connectClient: { _ in },
+                loadCatalog: { _, _ in
+                    catalogLoads += 1
+                    if catalogLoads == 1 {
+                        return []
+                    } else {
+                        return [newest, visible]
+                    }
+                },
+                openSession: { _, sessionID, _ in
+                    openedSessionIDs.append(sessionID)
+                    return SessionResumeResult(
+                        sessionId: sessionID,
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in }
+            )
+        )
+
+        installComposerClient(in: harness)
+        harness.appState.sessions = [visible]
+        harness.appState.activeSessionId = visible.id
+
+        // 1. Trigger an automatic return sync which fails during createSession
+        let automaticWork = harness.appState.beginAutomaticChatResumeWork()
+        await harness.appState.syncSession(
+            purpose: .automaticReturn,
+            using: nil,
+            automaticWorkToken: automaticWork
+        )
+
+        XCTAssertTrue(
+            harness.appState.errorMessage?.hasPrefix("Failed to create session:") == true,
+            "The create path should run and fail on the unconnected test client"
+        )
+        XCTAssertEqual(harness.appState.activeSessionId, visible.id)
+        XCTAssertEqual(harness.recoverySequence.currentPurpose, ChatResumeSyncPurpose.preserveCurrent)
+
+        // 2. Subsequent sync triggers with .preserveCurrent (e.g. foreground recovery)
+        await harness.appState.syncSession(
+            purpose: .preserveCurrent,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        // 3. Verify .preserveCurrent is strictly honored and visible session is preserved
+        XCTAssertEqual(harness.appState.activeSessionId, visible.id)
+        XCTAssertEqual(openedSessionIDs, [visible.id])
+        XCTAssertEqual(harness.recoverySequence.currentPurpose, ChatResumeSyncPurpose.preserveCurrent)
     }
 
     private func assertComposerEditStopsAutomaticSessionSelection(

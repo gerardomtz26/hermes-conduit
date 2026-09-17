@@ -1025,7 +1025,7 @@ final class HermesClientTests: XCTestCase {
 
     private func capturedApprovalRespond(
         requestId: String?,
-        resolved: Int
+        resultPayload: [String: Any]
     ) async throws -> (request: [String: Any], accepted: Bool) {
         let transport = FakeTransport()
         let socket = FakeSocket()
@@ -1049,12 +1049,36 @@ final class HermesClientTests: XCTestCase {
             JSONSerialization.jsonObject(with: Data(try XCTUnwrap(socket.sentTexts.last).utf8)) as? [String: Any]
         )
         let id = try XCTUnwrap(request["id"] as? Int)
-        socket.deliver(String(data: try JSONSerialization.data(withJSONObject: [
-            "jsonrpc": "2.0", "id": id, "result": ["resolved": resolved]
-        ]), encoding: .utf8)!)
+        let payload = try XCTUnwrap(String(data: try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "id": id, "result": resultPayload
+        ]), encoding: .utf8))
+        socket.deliver(payload)
         let accepted = try await awaitResult(of: respondTask, "the approval.respond response")
         client.disconnect()
         return (request, accepted)
+    }
+
+    private func capturedApprovalRespond(
+        requestId: String?,
+        resolved: Int?
+    ) async throws -> (request: [String: Any], accepted: Bool) {
+        var payload: [String: Any] = [:]
+        if let resolved { payload["resolved"] = resolved }
+        return try await capturedApprovalRespond(requestId: requestId, resultPayload: payload)
+    }
+
+    func testExactIntValueRejectsNonIntegersAndTrappingDoubles() {
+        XCTAssertEqual(HermesClient.exactIntValue(.number(0)), 0)
+        XCTAssertEqual(HermesClient.exactIntValue(.number(42)), 42)
+        XCTAssertEqual(HermesClient.exactIntValue(.number(-10)), -10)
+        XCTAssertNil(HermesClient.exactIntValue(.number(1.5)))
+        XCTAssertNil(HermesClient.exactIntValue(.number(1e300)))
+        XCTAssertNil(HermesClient.exactIntValue(.number(-1e300)))
+        XCTAssertNil(HermesClient.exactIntValue(.number(Double.infinity)))
+        XCTAssertNil(HermesClient.exactIntValue(.number(-Double.infinity)))
+        XCTAssertNil(HermesClient.exactIntValue(.number(Double.nan)))
+        XCTAssertNil(HermesClient.exactIntValue(.string("42")))
+        XCTAssertNil(HermesClient.exactIntValue(nil))
     }
 
     func testApprovalRespondSendsRequestIdentityAndRejectsZeroResolved() async throws {
@@ -1070,6 +1094,51 @@ final class HermesClientTests: XCTestCase {
         let params = try XCTUnwrap(request["params"] as? [String: Any])
         XCTAssertNil(params["request_id"])
         XCTAssertTrue(accepted)
+    }
+
+    func testApprovalRespondOmittedResolvedDefaultsToTrue() async throws {
+        let (_, accepted) = try await capturedApprovalRespond(requestId: "approval-legacy", resolved: nil)
+        XCTAssertTrue(accepted, "Omitted resolved field in legacy response defaults to true")
+    }
+
+    func testApprovalRespondRejectsMalformedAndOutOfRangeResolved() async throws {
+        for rawResolved in ["1e300", "-1e300", "1.5", "\"true\"", "9223372036854775808"] {
+            let transport = FakeTransport()
+            let socket = FakeSocket()
+            transport.nextSocket = { socket }
+            let client = makeClient(transport: transport)
+            let connectTask = Task { try? await client.connect() }
+            transport.open(socket)
+            try await awaitCompletion(of: connectTask, "connect() to complete")
+
+            let sent = Gate()
+            socket.onSend = { sent.signal() }
+            let respondTask = Task<Bool, Error> {
+                try await client.respondToApproval(
+                    sessionId: "runtime-1",
+                    requestId: "approval-malformed",
+                    choice: "once"
+                )
+            }
+            try await sent.wait("the approval.respond request to be sent")
+            let request = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(try XCTUnwrap(socket.sentTexts.last).utf8)) as? [String: Any]
+            )
+            let id = try XCTUnwrap(request["id"] as? Int)
+            socket.deliver("""
+            {"jsonrpc": "2.0", "id": \(id), "result": {"resolved": \(rawResolved)}}
+            """)
+            do {
+                _ = try await awaitResult(of: respondTask, "the approval.respond response")
+                XCTFail("Expected invalidResponse error for resolved=\(rawResolved)")
+            } catch let error as HermesError {
+                guard case .invalidResponse = error else {
+                    XCTFail("Expected .invalidResponse error for resolved=\(rawResolved), but got \(error)")
+                    continue
+                }
+            }
+            client.disconnect()
+        }
     }
 
     func testResumeSnapshotParsesPendingApprovalRequestIdentity() throws {
@@ -1108,12 +1177,13 @@ final class HermesClientTests: XCTestCase {
         let params = try XCTUnwrap(request["params"] as? [String: Any])
         XCTAssertEqual(params["session_id"] as? String, "runtime-queue")
         let id = try XCTUnwrap(request["id"] as? Int)
-        socket.deliver(String(data: try JSONSerialization.data(withJSONObject: [
+        let payload = try XCTUnwrap(String(data: try JSONSerialization.data(withJSONObject: [
             "jsonrpc": "2.0", "id": id, "result": ["approvals": [
                 ["request_id": "approval-a", "description": "Run A?"],
                 ["request_id": "approval-b", "description": "Run B?", "choices": ["once", "deny"]]
             ]]
-        ]), encoding: .utf8)!)
+        ]), encoding: .utf8))
+        socket.deliver(payload)
 
         let approvals = try await awaitResult(of: pendingTask, "the approval.pending response")
         XCTAssertEqual(approvals.map(\.requestId), ["approval-a", "approval-b"])

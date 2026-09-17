@@ -204,14 +204,16 @@ final class AppStateDecisionFenceTests: XCTestCase {
         let socket = ClarifyFakeSocket()
         let client = try await installConnectedClient(appState, socket: socket, transport: transport)
 
-        appState.schedulePendingApprovalsRefresh(sessionId: "runtime-queue", using: client)
-        for _ in 0..<1_000 where socket.sentTexts.isEmpty { await Task.yield() }
+        let sent = Gate()
+        socket.onSend = { sent.signal() }
+        let refresh = appState.schedulePendingApprovalsRefresh(sessionId: "runtime-queue", using: client)
+        try await sent.wait("the pending approval request to be sent")
         let id = try rpcID(try XCTUnwrap(socket.sentTexts.last))
         deliverResult(socket, rpcID: id, result: ["approvals": [
             ["request_id": "approval-a", "description": "Run A?"],
             ["request_id": "approval-b", "description": "Run B?"]
         ]])
-        for _ in 0..<1_000 where appState.messages.count < 2 { await Task.yield() }
+        await refresh.value
 
         XCTAssertEqual(appState.messages.count, 2)
         let first = try XCTUnwrap(appState.messages.first(where: { $0.approval?.requestId == "approval-a" })?.approval)
@@ -227,16 +229,22 @@ final class AppStateDecisionFenceTests: XCTestCase {
         let socket = ClarifyFakeSocket()
         let client = try await installConnectedClient(appState, socket: socket, transport: transport)
 
+        let sent1 = Gate()
+        socket.onSend = { sent1.signal() }
         let olderRefresh = appState.schedulePendingApprovalsRefresh(
             sessionId: "runtime-queue",
             using: client
         )
-        for _ in 0..<1_000 where socket.sentTexts.count < 1 { await Task.yield() }
+        try await sent1.wait("the first refresh request to be sent")
+
+        let sent2 = Gate()
+        socket.onSend = { sent2.signal() }
         let newerRefresh = appState.schedulePendingApprovalsRefresh(
             sessionId: "runtime-queue",
             using: client
         )
-        for _ in 0..<1_000 where socket.sentTexts.count < 2 { await Task.yield() }
+        try await sent2.wait("the second refresh request to be sent")
+
         let oldID = try rpcID(socket.sentTexts[0])
         let newID = try rpcID(socket.sentTexts[1])
         deliverResult(socket, rpcID: newID, result: ["approvals": [
@@ -258,11 +266,13 @@ final class AppStateDecisionFenceTests: XCTestCase {
         let socket = ClarifyFakeSocket()
         let client = try await installConnectedClient(appState, socket: socket, transport: transport)
 
+        let sent = Gate()
+        socket.onSend = { sent.signal() }
         let refresh = appState.schedulePendingApprovalsRefresh(
             sessionId: "runtime-queue",
             using: client
         )
-        for _ in 0..<1_000 where socket.sentTexts.isEmpty { await Task.yield() }
+        try await sent.wait("the refresh request to be sent")
         let id = try rpcID(try XCTUnwrap(socket.sentTexts.last))
         appState.client = makeReplacementClient(baseURL: "https://two.example")
         deliverResult(socket, rpcID: id, result: ["approvals": [
@@ -769,5 +779,52 @@ final class AppStateDecisionFenceTests: XCTestCase {
             "Gateway connection is unavailable.",
             "The relay branch must be reachable without any HermesClient"
         )
+    }
+}
+
+private final class Gate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var signalled = false
+    private var continuation: CheckedContinuation<Bool, Never>?
+
+    func signal() {
+        lock.lock()
+        signalled = true
+        let continuation = self.continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(returning: false)
+    }
+
+    func wait(
+        _ phase: String,
+        timeout: TimeInterval = 10,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        let timedOut = await withCheckedContinuation { continuation in
+            lock.lock()
+            if signalled {
+                lock.unlock()
+                continuation.resume(returning: false)
+                return
+            }
+            self.continuation = continuation
+            lock.unlock()
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                self.lock.lock()
+                guard !self.signalled, let c = self.continuation else {
+                    self.lock.unlock()
+                    return
+                }
+                self.continuation = nil
+                self.lock.unlock()
+                c.resume(returning: true)
+            }
+        }
+        if timedOut {
+            XCTFail("Timed out waiting for \(phase)", file: file, line: line)
+        }
     }
 }

@@ -424,28 +424,18 @@ final class SessionPresentationCache {
         guard message.role == .tool, message.tool?.status == .running else { return }
         let ids = Set(sessionIDs.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
         guard !ids.isEmpty else { return }
-
-        var store = loadPendingTools()
         let record = CachedMessage(message)
+        var pendingStore = loadPendingTools()
         for id in ids {
             let cacheKey = key(profile: profile, sessionID: id)
-            var records = store[cacheKey] ?? []
-            // Upsert by the local card id while allowing distinct, sequential
-            // calls of the same tool to remain independently representable.
-            records.removeAll { $0.id == record.id }
-            records.append(record)
-            store[cacheKey] = Array(records.suffix(maxMessagesPerSession))
-        }
-        if store.count > maxSessions {
-            let protectedKeys = Set(ids.map { key(profile: profile, sessionID: $0) })
-            while store.count > maxSessions {
-                let cacheKey = store.keys.sorted().first { !protectedKeys.contains($0) }
-                    ?? store.keys.sorted().first
-                guard let cacheKey else { break }
-                store.removeValue(forKey: cacheKey)
+            var records = pendingStore[cacheKey] ?? []
+            if let toolID = stableToolID(record.toolID) {
+                records.removeAll { stableToolID($0.toolID) == toolID }
             }
+            records.append(record)
+            pendingStore[cacheKey] = Array(records.suffix(maxMessagesPerSession))
         }
-        persistPendingTools(store)
+        persistPendingTools(pendingStore)
     }
 
     /// A completion event makes the local running projection obsolete. A
@@ -480,11 +470,17 @@ final class SessionPresentationCache {
             pendingChanged = true
             matchedPendingKeys.insert(cacheKey)
         }
+        if pendingChanged { persistPendingTools(pendingStore) }
+
+        // Common path: if pendingStore resolved the tool for all sessions,
+        // skip decoding the large presentation store on the main thread.
+        let unresolvedIDs = ids.filter { !matchedPendingKeys.contains(key(profile: profile, sessionID: $0)) }
+        guard !unresolvedIDs.isEmpty else { return }
+
         var store = load()
         var changed = false
-        for id in ids {
+        for id in unresolvedIDs {
             let cacheKey = key(profile: profile, sessionID: id)
-            if stableToolID == nil && matchedPendingKeys.contains(cacheKey) { continue }
             guard var session = store[cacheKey],
                   let index = session.messages.lastIndex(where: { message in
                       message.role == .tool
@@ -500,7 +496,6 @@ final class SessionPresentationCache {
             changed = true
         }
         if changed { persist(store) }
-        if pendingChanged { persistPendingTools(pendingStore) }
     }
 
     /// An explicitly idle resume is authoritative: any local tool-start
@@ -509,8 +504,17 @@ final class SessionPresentationCache {
     func removePendingTools(profile: String, sessionIDs: [String]) {
         let ids = Set(sessionIDs.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
         guard !ids.isEmpty else { return }
-        var store = load()
         var pendingStore = loadPendingTools()
+        var pendingChanged = false
+        for id in ids {
+            let cacheKey = key(profile: profile, sessionID: id)
+            if pendingStore.removeValue(forKey: cacheKey) != nil {
+                pendingChanged = true
+            }
+        }
+        if pendingChanged { persistPendingTools(pendingStore) }
+        guard defaults.data(forKey: storageKey) != nil else { return }
+        var store = load()
         var changed = false
         for id in ids {
             let cacheKey = key(profile: profile, sessionID: id)
@@ -522,9 +526,7 @@ final class SessionPresentationCache {
             store[cacheKey] = session
             changed = true
         }
-        for id in ids { pendingStore[key(profile: profile, sessionID: id)] = nil }
         if changed { persist(store) }
-        persistPendingTools(pendingStore)
     }
 
     /// Pending decision keys currently held in the store for the given

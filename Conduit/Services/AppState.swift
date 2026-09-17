@@ -2924,6 +2924,7 @@ final class AppState: ObservableObject {
             // must retain the saved dashboard session and retry.
             showLogin = false
             if continuation.purpose == .preserveCurrent {
+                recoverySequence.complete()
                 scheduleReconnect(purpose: continuation.purpose)
             } else {
                 scheduleReconnectAfterFailedSync()
@@ -4934,15 +4935,8 @@ final class AppState: ObservableObject {
             }
             if let replacingLegacyErrorMessageID {
                 let identifiedApprovals = acceptedApprovals.filter { $0.requestId != nil }
-                guard !identifiedApprovals.isEmpty,
-                      let legacyIndex = self.messages.firstIndex(where: {
-                          $0.id == replacingLegacyErrorMessageID
-                      }),
-                      let legacy = self.messages[legacyIndex].approval,
-                      legacy.requestId == nil,
-                      legacy.status == .error,
-                      acceptedSessionIDs.contains(legacy.sessionId) else {
-                    return
+                if !identifiedApprovals.isEmpty {
+                    self.messages.removeAll { $0.id == replacingLegacyErrorMessageID }
                 }
                 // Started only after the legacy response settled: these
                 // identified rows are fresh gateway truth and can replace the
@@ -5118,7 +5112,7 @@ final class AppState: ObservableObject {
             settleReconciliation(token, automaticSyncOperationID: automaticSyncOperationID)
             chatResumeCoordinator.abandonPendingAutomaticSync()
             if resumePurpose == .automaticReturn {
-                scheduleReconnect(purpose: resumePurpose)
+                scheduleReconnectAfterFailedSync()
             }
         }
     }
@@ -11096,7 +11090,7 @@ final class AppState: ObservableObject {
                 // commit-time ownership check; reconciles that start after
                 // this point fetch post-compression state and legitimately
                 // own the fence.
-                reconciliationToken = UUID()
+                invalidateReconciliation()
                 await reestablishPersistedHistoryAfterCompression(
                     requestedSessionID: outcome.sessionID,
                     context: outcome.context
@@ -14562,7 +14556,7 @@ final class AppState: ObservableObject {
             transcriptFreshnessIsStale = true
             // Fence: a reconcile that fetched pre-compaction rows must not
             // commit them underneath the live turn after this rewrite.
-            reconciliationToken = UUID()
+            invalidateReconciliation()
             return
         }
         // Idle: drive the authoritative transcript reconciliation now — the
@@ -14729,9 +14723,16 @@ final class AppState: ObservableObject {
             let stableToolID = toolID?.isEmpty == false ? toolID : nil
             // Tool lifecycle events can be replayed after a resume. A stable
             // gateway id makes a repeated start idempotent without splitting
-            // the current reasoning or text projection.
-            if let stableToolID,
-               messages.contains(where: { $0.tool?.id == stableToolID }) {
+            // the current reasoning or text projection. For legacy events
+            // without a tool ID, avoid duplicating an active running card for
+            // the same tool and input.
+            if let stableToolID {
+                if messages.contains(where: { $0.tool?.id == stableToolID }) {
+                    break
+                }
+            } else if let lastRunningTool = messages.last(where: { $0.role == .tool && $0.tool?.status == .running })?.tool,
+                      lastRunningTool.name == name,
+                      lastRunningTool.input == input {
                 break
             }
             // The tool card must land after a complete reasoning card; commit

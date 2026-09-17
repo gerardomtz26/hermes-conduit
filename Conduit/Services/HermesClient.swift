@@ -353,19 +353,9 @@ struct SessionCompressResult {
     var isPending: Bool { status == .pending }
     var isAborted: Bool { status == .aborted || summaryAborted }
 
-    /// Non-trapping exact `Int` extraction. `Int(Double)` traps outside the
-    /// Int64 range, and `removed` is gateway-authored — a hostile or buggy
-    /// payload must degrade to "unknown", never crash the client. Non-integer
-    /// doubles are likewise rejected: only exact whole values convert.
+    /// Non-trapping exact `Int` extraction. Delegates to `HermesClient.exactIntValue`.
     private static func exactIntValue(_ value: AnyCodable?) -> Int? {
-        guard case .number(let n)? = value else { return nil }
-        guard n.isFinite,
-              n >= -9_223_372_036_854_775_808.0, // Int.min == -2^63, exact as Double
-              n < 9_223_372_036_854_775_808.0,   // 2^63 itself already overflows
-              n == n.rounded(.towardZero) else {
-            return nil
-        }
-        return Int(n)
+        HermesClient.exactIntValue(value)
     }
 
     init(from result: AnyCodable) {
@@ -633,6 +623,7 @@ final class HermesClient: ObservableObject {
     /// for the generic request timeout. 8s matches the pre-existing
     /// health-check budget; a timed-out probe takes the same fallback paths
     /// as any other probe failure.
+    static let livenessProbeTimeout: TimeInterval = 8
     /// Dedicated budget for `session.compress`. Manual compression is
     /// LLM-bound and routinely outlives the generic request timeout on large
     /// sessions, while the gateway keeps compressing after the client gives
@@ -648,6 +639,22 @@ final class HermesClient: ObservableObject {
     /// Approval queue hydration is optional recovery context. It must never
     /// hold foreground restoration behind the ordinary RPC timeout.
     static let pendingApprovalsTimeout: TimeInterval = 3
+
+    /// Non-trapping exact `Int` extraction. `Int(Double)` traps outside the
+    /// Int64 range, and numeric fields can be gateway-authored — a hostile or buggy
+    /// payload must degrade to invalid response or unknown, never crash the client.
+    /// Non-integer doubles, NaN, infinity, and out-of-range numbers are rejected:
+    /// only exact whole values convert.
+    nonisolated static func exactIntValue(_ value: AnyCodable?) -> Int? {
+        guard case .number(let n)? = value else { return nil }
+        guard n.isFinite,
+              n >= -9_223_372_036_854_775_808.0, // Int.min == -2^63, exact as Double
+              n < 9_223_372_036_854_775_808.0,   // 2^63 itself already overflows
+              n == n.rounded(.towardZero) else {
+            return nil
+        }
+        return Int(n)
+    }
 
     init(
         connection: HermesConnection,
@@ -1395,7 +1402,13 @@ final class HermesClient: ObservableObject {
         let result = try await rpc("approval.respond", params: params)
         // Current Hermes reports the number of queue entries resolved. Older
         // gateways omitted the field after a successful response.
-        return result.objectValue?["resolved"]?.intValue.map { $0 > 0 } ?? true
+        guard let rawResolved = result.objectValue?["resolved"] else {
+            return true
+        }
+        guard let resolved = Self.exactIntValue(rawResolved) else {
+            throw HermesError.invalidResponse
+        }
+        return resolved > 0
     }
 
     /// Returns every unresolved approval for one live Hermes session. Current
