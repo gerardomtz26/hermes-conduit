@@ -294,11 +294,20 @@ enum BotChatTitleCollision {
 /// Sessions-list hygiene: canonical Bot Chats never surface as ordinary
 /// sessions. Modern gateways keep hidden rows out of every listing server-side;
 /// this projection filter closes the stale-data gap (a stray visible row that
-/// still names a bot's canonical registry). It is precise by construction: a
-/// row is only dropped when it positively matches a KNOWN bot's canonical
-/// registry ids, or is titled exactly "Bot Chat" AND stamped with that bot's
-/// profile. An ordinary user session — including one owned by a bot profile —
-/// is never touched.
+/// still names a bot's canonical registry). A row is canonical when either:
+///
+/// 1. it positively matches a KNOWN bot's canonical registry ids, or
+/// 2. its title is exactly "Bot Chat" AND its profile stamp names that bot.
+///
+/// Rule 2 is INTENTIONAL, not dead fallback weight: upstream identity for the
+/// forever chat is the (profile, "Bot Chat") pair — the roster's
+/// `canonical_session` pointer is an optimization, and stale/legacy listings
+/// can surface the canonical row without one. The documented consequence: an
+/// ordinary session that a user manually titled exactly "Bot Chat" under a
+/// KNOWN bot's profile is indistinguishable from the canonical row on wire
+/// data alone and is deliberately treated as reserved canonical presentation
+/// state (hidden from Sessions). Every other session — including any session
+/// owned by a bot profile under any other title — is never touched.
 enum BotChatHygiene {
     static func isCanonicalBotChatRow(_ row: SessionSummary, roster: [BotProfile]) -> Bool {
         let rowIDs = Set([row.id, row.storedSessionId].compactMap { $0 } + row.alternateIds)

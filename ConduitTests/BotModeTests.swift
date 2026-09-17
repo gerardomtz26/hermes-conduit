@@ -1021,10 +1021,203 @@ final class BotModeTests: XCTestCase {
         XCTAssertEqual(harness.appState.botModePhase, BotModePhase.idle)
     }
 
+    // MARK: - bot title-cache regressions
+
+    /// Opens a canonical Bot Chat as the ACTIVE session and then refreshes
+    /// the catalog, whose raw row is titled exactly "Bot Chat". Neither the
+    /// visible label nor the PERSISTED ordinary active-title cache may pick
+    /// the wire title up (the cold-restore bug).
+    func testCatalogRefreshNeverPersistsBotChatTitleForActiveBotConversation() async {
+        let harness = makeBotHarness(
+            sessionCatalogLoader: { _ in
+                [self.makeSessionSummary(
+                    id: "runtime-1",
+                    title: BotMode.canonicalChatTitle,
+                    storedID: "stored-1",
+                    profile: "default"
+                )]
+            },
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                openSession: { _, id, _ in
+                    SessionResumeResult(
+                        sessionId: id,
+                        storedSessionId: "stored-1",
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in },
+                findBotChat: { _, _ in
+                    [BotChatLookupRow(id: "stored-1", resolvedID: "runtime-1", title: "Bot Chat")]
+                }
+            )
+        )
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        let bot = makeBot(name: "atlas")
+
+        let opened = await harness.appState.openBotChat(for: bot)
+
+        XCTAssertTrue(opened)
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-1")
+        XCTAssertEqual(harness.appState.activeSessionTitle, bot.displayLabel)
+
+        await harness.appState.loadSessions()
+
+        XCTAssertEqual(
+            harness.appState.activeSessionTitle, bot.displayLabel,
+            "the catalog's literal Bot Chat row must not displace the bot's display label"
+        )
+        let persisted = lastHarnessDefaults?.dictionary(
+            forKey: "conduit.activeSessionTitlesByProfile.v1"
+        ) as? [String: String]
+        XCTAssertFalse(
+            persisted?.values.contains(BotMode.canonicalChatTitle) ?? false,
+            "the wire title must never enter the persisted ordinary title cache: \(persisted ?? [:])"
+        )
+    }
+
+    /// A .sessionTitle event addressed to the canonical Bot Chat may update
+    /// catalog rows, but must never overwrite the active bot label or
+    /// persist the literal wire title into the ordinary cache.
+    func testSessionTitleEventNeverPersistsBotChatTitleForActiveBotConversation() async {
+        let harness = makeBotHarness(
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                openSession: { _, id, _ in
+                    SessionResumeResult(
+                        sessionId: id,
+                        storedSessionId: "stored-1",
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in },
+                findBotChat: { _, _ in
+                    [BotChatLookupRow(id: "stored-1", resolvedID: "runtime-1", title: "Bot Chat")]
+                }
+            )
+        )
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        let bot = makeBot(name: "atlas")
+        let opened = await harness.appState.openBotChat(for: bot)
+        XCTAssertTrue(opened)
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-1")
+
+        harness.appState.handleStreamEvent(
+            .sessionTitle(runtimeSessionId: "runtime-1", storedSessionId: "stored-1", title: BotMode.canonicalChatTitle)
+        )
+
+        XCTAssertEqual(
+            harness.appState.activeSessionTitle, bot.displayLabel,
+            "the event must not overwrite the bot's display label"
+        )
+        let persisted = lastHarnessDefaults?.dictionary(
+            forKey: "conduit.activeSessionTitlesByProfile.v1"
+        ) as? [String: String]
+        XCTAssertFalse(
+            persisted?.values.contains(BotMode.canonicalChatTitle) ?? false,
+            "the event title must never enter the persisted ordinary title cache: \(persisted ?? [:])"
+        )
+    }
+
+    /// Ordinary (non-bot) sessions keep both title paths exactly as before.
+    func testOrdinaryActiveSessionTitlesStillPersistThroughBothPaths() async {
+        let harness = makeBotHarness(
+            sessionCatalogLoader: { _ in
+                [self.makeSessionSummary(id: "ordinary-1", title: "Fresh Catalog Title")]
+            },
+            lifecycleOperations: ChatResumeLifecycleOperations()
+        )
+
+        harness.appState.activeSessionId = "ordinary-1"
+        await harness.appState.loadSessions()
+
+        XCTAssertEqual(harness.appState.activeSessionTitle, "Fresh Catalog Title")
+        var persisted = lastHarnessDefaults?.dictionary(
+            forKey: "conduit.activeSessionTitlesByProfile.v1"
+        ) as? [String: String]
+        XCTAssertEqual(persisted?["default"], "Fresh Catalog Title")
+
+        harness.appState.handleStreamEvent(
+            .sessionTitle(runtimeSessionId: "ordinary-1", storedSessionId: "stored-ordinary", title: "Event Title")
+        )
+        XCTAssertEqual(harness.appState.activeSessionTitle, "Event Title")
+        persisted = lastHarnessDefaults?.dictionary(
+            forKey: "conduit.activeSessionTitlesByProfile.v1"
+        ) as? [String: String]
+        XCTAssertEqual(persisted?["default"], "Event Title")
+    }
+
+    /// The `.task(id:)` identity change cancels the VIEW task while its
+    /// refresh is in flight. A replacement that only bails on the
+    /// single-flight guard strands `.loading`: the cancelled holder releases
+    /// the claim without committing a phase. The refresh now runs
+    /// unstructured and late callers JOIN it, so the cancel can no longer
+    /// kill the work and the roster still commits.
+    func testRosterRefreshJoinKeepsPhaseAliveWhenCallerTaskIsCancelled() async {
+        final class Gate: @unchecked Sendable {
+            var open = false
+        }
+        let releaseFirst = Gate()
+        var stubCalls = 0
+        let rosterBot = makeBot(name: "atlas")
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            botRoster: { _ in
+                stubCalls += 1
+                if stubCalls == 1 {
+                    // This await is the network boundary where a cancelled
+                    // VIEW task used to kill the in-flight refresh.
+                    try Task.checkCancellation()
+                    while !releaseFirst.open {
+                        try? await Task.sleep(nanoseconds: 10_000_000)
+                    }
+                    return BotRosterSnapshot(bots: [rosterBot], supportsBotProtocol: true)
+                }
+                return BotRosterSnapshot(bots: [], supportsBotProtocol: true)
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+
+        let first = Task { @MainActor [weak harnessState = harness.appState] in
+            await harnessState?.refreshBotRoster()
+        }
+        while !harness.appState.isRefreshingBotRoster {
+            try? await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let second = Task { @MainActor [weak harnessState = harness.appState] in
+            await harnessState?.refreshBotRoster()
+        }
+        try? await Task.sleep(nanoseconds: 60_000_000)
+        first.cancel()
+        releaseFirst.open = true
+        await second.value
+        await first.value
+
+        XCTAssertEqual(
+            harness.appState.botModePhase, .available,
+            "a cancelled view task must not strand the roster on .loading"
+        )
+        XCTAssertEqual(harness.appState.botRoster.map(\.name), ["atlas"])
+    }
+
     // MARK: - harness
+
+    /// The UserDefaults suite of the most recent harness, so tests can pin
+    /// PERSISTED state (e.g. the active-session title cache), not just the
+    /// visible string.
+    private var lastHarnessDefaults: UserDefaults?
 
     private func makeBotHarness(
         configureDefaults: (UserDefaults) -> Void = { _ in },
+        sessionCatalogLoader: ((Bool) async throws -> [SessionSummary])? = nil,
         lifecycleOperations: ChatResumeLifecycleOperations
     ) -> (appState: AppState, store: ChatResumeStore) {
         let suite = "BotModeTests.\(UUID().uuidString)"
@@ -1034,6 +1227,7 @@ final class BotModeTests: XCTestCase {
         addTeardownBlock {
             defaults.removePersistentDomain(forName: suite)
         }
+        lastHarnessDefaults = defaults
         configureDefaults(defaults)
         let store = ChatResumeStore(defaults: defaults)
         let coordinator = ChatResumeCoordinator(store: store)
@@ -1043,6 +1237,7 @@ final class BotModeTests: XCTestCase {
             recoverySequence: ChatResumeRecoverySequence(),
             loadSavedConnection: false,
             clearSessionPresentationCache: {},
+            sessionCatalogLoader: sessionCatalogLoader,
             chatResumeLifecycleOperations: lifecycleOperations
         )
         appState.isConnected = true

@@ -555,7 +555,87 @@ final class HermesClientTests: XCTestCase {
         let snapshot = try await awaitResult(of: rosterTask, "the profiles.list response")
         XCTAssertTrue(snapshot.supportsBotProtocol)
         XCTAssertEqual(snapshot.bots.map(\.name), ["atlas"])
-        XCTAssertEqual(snapshot.bots[0].canonicalSessionID, "stored-1")
+        let bot = try XCTUnwrap(snapshot.bots.first)
+        XCTAssertEqual(bot.canonicalSessionID, "stored-1")
+        client.disconnect()
+    }
+
+    func testSessionTitleReadIsSelfDescribingAboutProfile() async throws {
+        let transport = FakeTransport()
+        let socket = FakeSocket()
+        transport.nextSocket = { socket }
+        let client = makeClient(transport: transport)
+        let connectTask = Task { try? await client.connect() }
+        transport.open(socket)
+        try await awaitCompletion(of: connectTask, "connect() to complete after the handshake")
+
+        let sent = Gate()
+        socket.onSend = { sent.signal() }
+        let titleTask = Task<String?, Error> {
+            try await client.sessionTitle("runtime-1", profile: "atlas")
+        }
+        try await sent.wait("the session.title read to be sent")
+
+        let request = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(try XCTUnwrap(socket.sentTexts.last).utf8)) as? [String: Any]
+        )
+        XCTAssertEqual(request["method"] as? String, "session.title")
+        let params = try XCTUnwrap(request["params"] as? [String: Any])
+        XCTAssertEqual(params["session_id"] as? String, "runtime-1")
+        XCTAssertEqual(
+            params["profile"] as? String, "atlas",
+            "the bot title read is self-describing about the profile it addresses"
+        )
+
+        let id = try XCTUnwrap(request["id"] as? Int)
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": ["title": "Bot Chat"]
+        ]
+        socket.deliver(try XCTUnwrap(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)))
+
+        let title = try await awaitResult(of: titleTask, "the session.title response")
+        XCTAssertEqual(title, "Bot Chat")
+        client.disconnect()
+    }
+
+    func testSessionTitleReadOmitsProfileForOrdinarySessions() async throws {
+        let transport = FakeTransport()
+        let socket = FakeSocket()
+        transport.nextSocket = { socket }
+        let client = makeClient(transport: transport)
+        let connectTask = Task { try? await client.connect() }
+        transport.open(socket)
+        try await awaitCompletion(of: connectTask, "connect() to complete after the handshake")
+
+        let sent = Gate()
+        socket.onSend = { sent.signal() }
+        let titleTask = Task<String?, Error> {
+            try await client.sessionTitle("ordinary-1")
+        }
+        try await sent.wait("the session.title read to be sent")
+
+        let request = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(try XCTUnwrap(socket.sentTexts.last).utf8)) as? [String: Any]
+        )
+        let params = try XCTUnwrap(request["params"] as? [String: Any])
+        XCTAssertEqual(params["session_id"] as? String, "ordinary-1")
+        XCTAssertNil(
+            params["profile"],
+            "ordinary sessions keep the session-scoped default and carry no profile field"
+        )
+
+        let id = try XCTUnwrap(request["id"] as? Int)
+        let response: [String: Any] = [
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": ["title": "Fresh"]
+        ]
+        socket.deliver(try XCTUnwrap(String(data: try JSONSerialization.data(withJSONObject: response), encoding: .utf8)))
+
+        let title = try await awaitResult(of: titleTask, "the session.title response")
+        XCTAssertEqual(title, "Fresh")
         client.disconnect()
     }
 

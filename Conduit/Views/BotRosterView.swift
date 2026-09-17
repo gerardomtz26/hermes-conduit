@@ -29,8 +29,13 @@ struct BotRosterView: View {
         appState.botRoster.filter { !$0.isHiddenByMeta }
     }
 
+    /// `profiles.list` is gateway-wide and deliberately sent UNSCOPED: the
+    /// roster is fenced by server identity (epoch) and dashboard, never by
+    /// the selected dashboard profile. Keying on `activeProfile` made every
+    /// profile switch cancel the in-flight refresh and re-fire a
+    /// replacement that could only race the single-flight claim.
     private var rosterRefreshKey: String {
-        "\(appState.activeDashboardID?.uuidString ?? "-")/\(appState.activeProfile)"
+        appState.activeDashboardID?.uuidString ?? "-"
     }
 
     private var rosterList: some View {
@@ -191,6 +196,9 @@ private struct BotRosterRow: View {
 /// Animated/complex avatars are out of Phase 1 scope.
 struct BotMonogramView: View {
     let bot: BotProfile
+    /// Scales with Dynamic Type so the glyph never clips at accessibility
+    /// sizes (a fixed 36x36 frame clipped the letter once `.body` grew).
+    @ScaledMetric(relativeTo: .body) private var avatarSize: CGFloat = 36
 
     var body: some View {
         ZStack {
@@ -200,7 +208,7 @@ struct BotMonogramView: View {
                 .font(.body.weight(.semibold))
                 .foregroundStyle(.white)
         }
-        .frame(width: 36, height: 36)
+        .frame(width: avatarSize, height: avatarSize)
     }
 
     private var initial: String {

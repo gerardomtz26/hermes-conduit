@@ -793,10 +793,35 @@ final class AppState: ObservableObject {
     /// so no superseded refresh can clear a newer one's claim and no
     /// identity change can strand the flag.
     private var botRosterRefreshToken: UUID?
+    /// The in-flight roster refresh, held so a replacement `.task` can JOIN
+    /// it instead of racing it (see `refreshBotRoster`). Unstructured on
+    /// purpose: a SwiftUI `.task(id:)` identity change cancels the VIEW
+    /// task, never this work. Class box: `Task` is a value with no identity,
+    /// and the joiner must be able to tell its (completed) flight from a
+    /// newer one's before clearing the handle.
+    private final class BotRosterRefreshFlight {
+        let task: Task<Void, Never>
+        init(task: Task<Void, Never>) { self.task = task }
+    }
+
+    private var botRosterRefreshFlight: BotRosterRefreshFlight?
     /// Bot chats belong to the BOT's profile, not the dashboard's. Every
     /// re-resume of an open bot chat (reconnect, refresh, preserve-current
     /// sync) consults this in-memory registry to scope the resume RPC; it is
     /// never persisted — a canonical Bot Chat has no client-side pointer.
+    /// Bot profile ownership per canonical-chat session id (runtime id,
+    /// stored id, and every adopted alias). Superseded runtime ids are
+    /// deliberately KEPT, never pruned on resume/compression rebinding:
+    /// late lifecycle, stream, and compaction events may still arrive
+    /// addressed to an old runtime id and must keep resolving to the right
+    /// bot profile — dropping the alias would misroute those events into
+    /// the ordinary dashboard scope. The map is runtime-only (cleared at
+    /// the server-identity boundary in `invalidateBotModeState`) and grows
+    /// by one entry per rebound id, which is bounded by how often a bot
+    /// chat's runtime id is actually rebound. If a provably-dead alias
+    /// lifecycle point ever exists upstream (e.g. an explicit
+    /// session-destroyed event), a bounded cleanup could hook there —
+    /// none exists today, so correctness wins over the small dictionary.
     private var botChatSessionProfiles: [String: String] = [:]
     /// One resolve/create/open flight per bot name: double-tapping a row must
     /// not mint two canonical chats (upstream `canonicalCreations`). The box
@@ -2313,6 +2338,10 @@ final class AppState: ObservableObject {
         botChatOpenFlights.removeAll()
         botRoster = []
         botRosterRefreshToken = nil
+        // The in-flight refresh, if any, still completes but its epoch guard
+        // discards the stale snapshot; drop the join handle so the next
+        // identity's first refresh cannot join a dead flight.
+        botRosterRefreshFlight = nil
         isRefreshingBotRoster = false
         botModePhase = .idle
     }
@@ -7325,7 +7354,16 @@ final class AppState: ObservableObject {
             // Labeled rows are positive identity evidence; commit them so
             // notification routing survives a later catalog omission.
             conversationIdentityIndex.recordCatalogIdentity(allSessions, profile: profile)
-            if let activeSessionId { updateActiveSessionTitle(for: activeSessionId) }
+            // A canonical Bot Chat's raw catalog row is titled exactly
+            // "Bot Chat": refreshing the ordinary active-title cache from it
+            // would persist the wire title over the bot's display label and
+            // write "Bot Chat" into the dashboard profile's persisted cache
+            // (the cold-restore bug). Ownership comes from the bot
+            // conversation registry, never a title guess.
+            if let activeSessionId,
+               botConversationProfile(for: activeSessionId) == nil {
+                updateActiveSessionTitle(for: activeSessionId)
+            }
             if let activeClient {
                 Task { [weak self] in
                     await self?.loadProjects(using: activeClient, profile: profile)
@@ -7679,7 +7717,45 @@ final class AppState: ObservableObject {
     /// against the dashboard/profile epoch so a stale async answer can never
     /// describe the wrong server.
     func refreshBotRoster() async {
-        guard !isRefreshingBotRoster else { return }
+        if let running = botRosterRefreshFlight {
+            // JOIN the in-flight refresh instead of bailing on the
+            // single-flight guard. A `.task(id:)` identity change cancels
+            // the previous view task while its refresh is in flight; that
+            // holder releases the claim without committing a phase, so a
+            // replacement that merely returned could strand `.loading`.
+            // The work runs unstructured, so the join always sees it run to
+            // completion, and its epoch/dashboard guard still discards
+            // results captured before a server or dashboard transition.
+            await running.task.value
+            if botRosterRefreshFlight === running {
+                botRosterRefreshFlight = nil
+            }
+            // A joined refresh that was superseded by an identity
+            // transition discards its snapshot and commits nothing; fall
+            // through and run once for the current identity instead of
+            // leaving the empty roster stuck on `.loading`.
+            if !(botRoster.isEmpty && botModePhase == .loading) {
+                return
+            }
+        }
+        guard !isRefreshingBotRoster, botRosterRefreshFlight == nil else { return }
+        let flight = BotRosterRefreshFlight(task: Task<Void, Never> { [weak self] in
+            guard let self else { return }
+            await self.performBotRosterRefresh()
+        })
+        botRosterRefreshFlight = flight
+        await flight.task.value
+        if botRosterRefreshFlight === flight {
+            botRosterRefreshFlight = nil
+        }
+    }
+
+    /// The single-flight roster refresh. Runs unstructured (never cancelled
+    /// by a view task identity change) and keeps the token-based claim
+    /// release: only the holder of the CURRENT token may clear
+    /// `isRefreshingBotRoster`, so a superseded or invalidated refresh can
+    /// never clear a newer refresh's claim.
+    private func performBotRosterRefresh() async {
         let epoch = botRosterEpoch
         let dashboardID = activeDashboardID
         guard let client, isConnected else {
@@ -13734,7 +13810,13 @@ final class AppState: ObservableObject {
 
             do {
                 // Give Hermes' built-in asynchronous title task precedence.
-                if let existingTitle = try await client.sessionTitle(sessionId) {
+                // The profile field is self-describing even though current
+                // Hermes session.title resolution is session-scoped: bot
+                // conversations address their own profile explicitly.
+                if let existingTitle = try await client.sessionTitle(
+                    sessionId,
+                    profile: botConversationProfile(for: sessionId)
+                ) {
                     guard !Task.isCancelled,
                           self.sessionTitleRecoveryTracker.isCurrent(token, for: taskKey),
                           self.activeProfile == profile,
@@ -13821,7 +13903,17 @@ final class AppState: ObservableObject {
         sessions = sessions.map(updated)
         cronSessions = cronSessions.map(updated)
         archivedSessions = archivedSessions.map(updated)
-        if matchesActiveSession { setActiveSessionTitle(title) }
+        // Catalog rows may carry the recovered title either way, but the
+        // ACTIVE ordinary persisted title must not: a .sessionTitle event
+        // for a canonical Bot Chat would otherwise displace the bot's
+        // display label and persist the literal wire title into the
+        // dashboard profile's cache. Registry identity — never a title
+        // comparison — decides ownership.
+        if matchesActiveSession {
+            if let activeSessionId, botConversationProfile(for: activeSessionId) == nil {
+                setActiveSessionTitle(title)
+            }
+        }
     }
 
     // MARK: - Stream event handling
