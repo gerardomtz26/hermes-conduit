@@ -132,8 +132,9 @@ class LaneResultTests(unittest.TestCase):
                 predicted_s=112.0, timeout_s=300, actual_s=98.5,
                 started_at="2026-08-29T00:00:00Z",
                 attempts_json='[{"n": 1, "mode": "lane", "status": "test-failures"}]',
-                isolation_json="", simulator_reset=True, simulator_erase=False,
-                hung_class="", retried_classes="", infra_recovered_classes="",
+                isolation_json="", batches_json="", simulator_reset=True,
+                simulator_erase=False, hung_class="", hung_batch=0,
+                retried_classes="", infra_recovered_classes="",
                 persistent_infra_classes="",
                 observations=str(obs), detail=str(detail), out=str(out))
             rc = ext.lane_result(args)
@@ -158,8 +159,10 @@ class LaneResultTests(unittest.TestCase):
                 attempts_json='[{"n": 1, "mode": "class", "class": "AlphaUITests", "status": "passed"},'
                               ' {"n": 1, "mode": "class", "class": "BetaUITests", "status": "test-failures"},'
                               ' {"n": 2, "mode": "class-retry", "class": "BetaUITests", "status": "passed"}]',
-                isolation_json="", simulator_reset=False, simulator_erase=False,
-hung_class="", retried_classes="BetaUITests", persistent_infra_classes="",
+                isolation_json="", batches_json="", simulator_reset=False,
+                simulator_erase=False,
+                hung_class="", hung_batch=0, retried_classes="BetaUITests",
+                persistent_infra_classes="",
                 infra_recovered_classes="",
                 observations="", detail="", out=str(out))
             rc = ext.lane_result(args)
@@ -168,6 +171,191 @@ hung_class="", retried_classes="BetaUITests", persistent_infra_classes="",
             self.assertEqual(doc["retried_classes"], ["BetaUITests"])
             self.assertEqual([a["status"] for a in doc["attempts"]],
                              ["passed", "test-failures", "passed"])
+
+
+    def test_lane_result_records_batches_and_hung_batch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "lane-result.json"
+            batches = [
+                {"batch": 1, "classes": ["AlphaTests"], "timeout_s": 603,
+                 "status": "pass",
+                 "attempts": [{"attempt": 1, "status": "passed",
+                               "seconds": 30.0, "failures": 0}]},
+                {"batch": 2, "classes": ["BetaTests"], "timeout_s": 603,
+                 "status": "pass",
+                 "attempts": [{"attempt": 1, "status": "timeout",
+                               "seconds": 603.0, "failures": 0},
+                              {"attempt": 2, "status": "passed",
+                               "seconds": 45.0, "failures": 0}]},
+                {"batch": 3, "classes": ["GammaTests"], "timeout_s": 603,
+                 "status": "not_run",
+                 "attempts": [{"attempt": 0, "status": "not_run",
+                               "seconds": 0.0, "failures": 0}]},
+            ]
+            args = SimpleNamespace(
+                lane="unit-2", kind="unit", target="ConduitTests",
+                classes="AlphaTests,BetaTests,GammaTests", status="pass",
+                predicted_s=45.0, timeout_s=1809, actual_s=700.0,
+                started_at="2026-09-16T00:00:00Z",
+                attempts_json='[{"n": 1, "mode": "batch", "status": "passed"},'
+                              ' {"n": 2, "mode": "batch", "status": "timeout"},'
+                              ' {"n": 2, "mode": "batch-retry", "status": "passed"}]',
+                isolation_json="", batches_json=json.dumps(batches),
+                simulator_reset=True, simulator_erase=False,
+                hung_class="", hung_batch=0,
+                retried_classes="", infra_recovered_classes="",
+                persistent_infra_classes="",
+                observations="", detail="", out=str(out))
+            rc = ext.lane_result(args)
+            self.assertEqual(rc, ext.EXIT_OK)
+            doc = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(len(doc["batches"]), 3)
+            self.assertEqual(doc["batches"][1]["attempts"][0]["status"], "timeout")
+            self.assertIsNone(doc["hung_batch"])
+
+    def test_lane_result_tolerates_malformed_batches_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "lane-result.json"
+            args = SimpleNamespace(
+                lane="unit-1", kind="unit", target="ConduitTests",
+                classes="AlphaTests", status="pass",
+                predicted_s=5.0, timeout_s=603, actual_s=4.0,
+                started_at="2026-08-29T00:00:00Z",
+                attempts_json='[{"n": 1, "mode": "batch", "status": "passed"}]',
+                isolation_json="", batches_json="[not valid json",
+                simulator_reset=False, simulator_erase=False,
+                hung_class="", hung_batch=0,
+                retried_classes="", infra_recovered_classes="",
+                persistent_infra_classes="",
+                observations="", detail="", out=str(out))
+            rc = ext.lane_result(args)
+            self.assertEqual(rc, ext.EXIT_OK)
+            doc = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(doc["batches"], [])
+
+    def test_batch_summary_line_covers_all_shapes(self):
+        self.assertEqual(
+            ext._batch_summary_line(
+                {"batch": 2, "status": "pass",
+                 "attempts": [{"status": "passed"}]}, 4),
+            "batch 2/4 PASSED")
+        self.assertEqual(
+            ext._batch_summary_line(
+                {"batch": 3, "status": "pass",
+                 "attempts": [{"status": "timeout"}, {"status": "passed"}]}, 5),
+            "batch 3/5 timeout -> retry PASSED")
+        self.assertEqual(
+            ext._batch_summary_line(
+                {"batch": 4, "status": "not_run",
+                 "attempts": [{"status": "not_run"}]}, 5),
+            "batch 4/5 NOT RUN (lane stopped earlier)")
+        self.assertEqual(
+            ext._batch_summary_line(
+                {"batch": 1, "status": "timeout",
+                 "attempts": [{"status": "timeout"}, {"status": "timeout"}]}, 2),
+            "batch 1/2 timeout -> retry TIMEOUT")
+
+
+class AggregateBatchReportingTests(unittest.TestCase):
+    """The report must show per-batch outcomes so a reviewer never opens raw
+    Actions logs to learn which batch stalled."""
+
+    def _write_plan(self, tmp):
+        plan = {"unit_lanes": [
+            {"lane": "unit-1", "classes": ["AlphaTests", "BetaTests"],
+             "predicted_s": 5.0, "batch_count": 2},
+        ], "ui_lanes": []}
+        path = Path(tmp) / "plan.json"
+        path.write_text(json.dumps(plan), encoding="utf-8")
+        return path
+
+    def test_report_renders_batch_section_with_retry_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = self._write_plan(tmp)
+            d = Path(tmp) / "unit-1"
+            d.mkdir(parents=True)
+            doc = {"lane": "unit-1", "kind": "unit", "status": "pass",
+                   "actual_s": 900.0, "predicted_s": 5.0, "timeout_s": 1206,
+                   "started_at": "2026-09-16T10:00:00Z",
+                   "finished_at": "2026-09-16T10:15:00Z",
+                   "flaky": [], "failures": [], "class_seconds": {},
+                   "hung_batch": None,
+                   "batches": [
+                       {"batch": 1, "classes": ["AlphaTests"],
+                        "timeout_s": 603, "status": "pass",
+                        "attempts": [{"attempt": 1, "status": "passed",
+                                      "seconds": 60.0, "failures": 0}]},
+                       {"batch": 2, "classes": ["BetaTests"],
+                        "timeout_s": 603, "status": "pass",
+                        "attempts": [{"attempt": 1, "status": "timeout",
+                                      "seconds": 603.0, "failures": 0},
+                                     {"attempt": 2, "status": "passed",
+                                      "seconds": 90.0, "failures": 0}]},
+                   ]}
+            (d / "lane-result.json").write_text(json.dumps(doc), encoding="utf-8")
+            out = Path(tmp) / "summary.md"
+            rc = ext.aggregate(SimpleNamespace(
+                plan=str(plan), lanes_dir=str(tmp), build_result="",
+                out=str(out)))
+            self.assertEqual(rc, ext.EXIT_OK)
+            text = out.read_text(encoding="utf-8")
+            self.assertIn("### Unit lane batches", text)
+            self.assertIn("batch 1/2 PASSED", text)
+            self.assertIn("batch 2/2 timeout -> retry PASSED", text)
+            self.assertIn("fresh xcodebuild invocation", text)
+
+    def test_report_renders_double_stall_and_not_run_batches(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = self._write_plan(tmp)
+            d = Path(tmp) / "unit-1"
+            d.mkdir(parents=True)
+            doc = {"lane": "unit-1", "kind": "unit", "status": "timeout",
+                   "actual_s": 1300.0, "predicted_s": 5.0, "timeout_s": 1206,
+                   "started_at": "2026-09-16T10:00:00Z",
+                   "finished_at": "2026-09-16T10:22:00Z",
+                   "flaky": [], "failures": [], "class_seconds": {},
+                   "hung_batch": 2,
+                   "batches": [
+                       {"batch": 1, "classes": ["AlphaTests"],
+                        "timeout_s": 603, "status": "pass",
+                        "attempts": [{"attempt": 1, "status": "passed",
+                                      "seconds": 60.0, "failures": 0}]},
+                       {"batch": 2, "classes": ["BetaTests"],
+                        "timeout_s": 603, "status": "timeout",
+                        "attempts": [{"attempt": 1, "status": "timeout",
+                                      "seconds": 603.0, "failures": 0},
+                                     {"attempt": 2, "status": "timeout",
+                                      "seconds": 603.0, "failures": 0}]},
+                   ]}
+            (d / "lane-result.json").write_text(json.dumps(doc), encoding="utf-8")
+            out = Path(tmp) / "summary.md"
+            rc = ext.aggregate(SimpleNamespace(
+                plan=str(plan), lanes_dir=str(tmp), build_result="",
+                out=str(out)))
+            self.assertEqual(rc, ext.EXIT_OK)
+            text = out.read_text(encoding="utf-8")
+            self.assertIn("batch 2/2 timeout -> retry TIMEOUT", text)
+            self.assertIn("HUNG: unit batch 2 stalled twice", text)
+            self.assertIn("`BetaTests`", text)
+
+    def test_report_hides_batch_section_without_batch_data(self):
+        # Legacy lane results (or UI lanes) carry no batches: no section.
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = self._write_plan(tmp)
+            d = Path(tmp) / "unit-1"
+            d.mkdir(parents=True)
+            doc = {"lane": "unit-1", "kind": "unit", "status": "pass",
+                   "actual_s": 60.0, "predicted_s": 5.0, "timeout_s": 603,
+                   "started_at": "2026-09-16T10:00:00Z",
+                   "finished_at": "2026-09-16T10:01:00Z",
+                   "flaky": [], "failures": [], "class_seconds": {}}
+            (d / "lane-result.json").write_text(json.dumps(doc), encoding="utf-8")
+            out = Path(tmp) / "summary.md"
+            rc = ext.aggregate(SimpleNamespace(
+                plan=str(plan), lanes_dir=str(tmp), build_result="",
+                out=str(out)))
+            self.assertEqual(rc, ext.EXIT_OK)
+            self.assertNotIn("### Unit lane batches", out.read_text(encoding="utf-8"))
 
 
 class MergePartsTests(unittest.TestCase):
@@ -577,8 +765,9 @@ class AggregateTests(unittest.TestCase):
                 predicted_s=5.0, timeout_s=300, actual_s=4.0,
                 started_at="2026-08-29T00:00:00Z",
                 attempts_json="[not valid json",
-                isolation_json="", simulator_reset=False,
-simulator_erase=False, hung_class="", retried_classes="", persistent_infra_classes="",
+                isolation_json="", batches_json="", simulator_reset=False,
+                simulator_erase=False, hung_class="", hung_batch=0,
+                retried_classes="", persistent_infra_classes="",
                 infra_recovered_classes="",
                 observations=str(obs), detail=str(detail), out=str(out))
             rc = ext.lane_result(args)

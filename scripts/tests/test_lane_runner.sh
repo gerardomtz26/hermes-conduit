@@ -28,31 +28,6 @@ assert_eq() { # $1=desc $2=actual $3=expected
   if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (actual='$2' expected='$3')"; fi
 }
 
-write_stub_xcodebuild() {
-  cat > "$STUBS/xcodebuild" <<'EOF'
-#!/bin/bash
-COUNT_FILE="$COUNT_FILE"
-if [ "$FAKE_MODE" = "infra-once" ]; then
-  n=$(cat "$COUNT_FILE" 2>/dev/null || echo 0)
-  n=$((n + 1))
-  echo "$n" > "$COUNT_FILE"
-  if [ "$n" -eq 1 ]; then
-    echo "simulator crashed (stub)"
-    exit 70
-  fi
-  exit 0
-fi
-case "$FAKE_MODE" in
-  pass) exit 0 ;;
-  fail65) echo "Test Case failed (stub)"; exit 65 ;;
-  infra70) echo "Simulator boot failed (stub)"; exit 70 ;;
-  hang) sleep 300; exit 0 ;;
-  *) exit 0 ;;
-esac
-EOF
-  chmod +x "$STUBS/xcodebuild"
-}
-
 write_stub_xcrun() {
   cat > "$STUBS/xcrun" <<'EOF'
 #!/bin/bash
@@ -89,6 +64,82 @@ EOF
   chmod +x "$STUBS/xcrun"
 }
 
+# Compact batches JSON for a lane whose classes each run in their OWN batch
+# (the runner behavior under test is per-batch, not the chunking itself -
+# the chunking invariants are pinned in Python by test_plan_tests.py).
+batches_json_for() { # $1=classes csv $2=timeout seconds
+  python3 -c "
+import json, sys
+classes = [c for c in sys.argv[1].split(',') if c]
+print(json.dumps([{'classes': [c], 'timeout_s': int(sys.argv[2])} for c in classes], separators=(',', ':')))
+" "$1" "$2"
+}
+
+# Unit batch stub: decides per INVOCATION, keyed by the result-bundle stem
+# batch-<n>-a<k> through FAKE_UNIT_B<n>_A<k> (unset = pass). Every invocation
+# writes the canned xcresult document matching its own verdict for every
+# class it was asked to run. Invocation facts land in $INVOCATION_LOG as
+# "batch-<n>-a<k>" lines.
+write_unit_batch_stub_xcodebuild() {
+  cat > "$STUBS/xcodebuild" <<'EOF'
+#!/bin/bash
+# Echo the invocation arguments so the streamed xcodebuild log carries the
+# retry flags (asserted below: unit batches must run under native retry).
+echo "stub args: $*"
+bundle=""
+for a in "$@"; do
+  case "$a" in *.xcresult) bundle="$a"; mkdir -p "$a" ;; esac
+done
+stem=$(basename "$bundle" .xcresult)
+n="${stem#batch-}"; n="${n%%-*}"
+attempt="${stem##*-a}"
+echo "batch-$n-a$attempt" >> "$INVOCATION_LOG"
+classes=""
+for a in "$@"; do
+  case "$a" in
+    -only-testing:*) cls="${a#-only-testing:}"; classes="$classes ${cls#*/}" ;;
+  esac
+done
+mode_var="FAKE_UNIT_B${n}_A${attempt}"
+mode=$(eval "echo \${$mode_var:-pass}")
+write_doc() {
+  [ -n "${FAKE_UNIT_NO_DOC:-}" ] && return 0
+  result="$1"
+  nodes=""
+  sep=""
+  for c in $classes; do
+    # Classes listed in $FAKE_UNIT_OMIT get no Test Suite node at all: the
+    # canned document then models an invocation that exited 0 without ever
+    # running one of its assigned classes.
+    case " $FAKE_UNIT_OMIT " in *" $c "*) continue ;; esac
+    nodes="$nodes$sep{\"nodeType\": \"Test Suite\", \"name\": \"$c\", \"result\": \"$result\",
+      \"children\": [{\"nodeType\": \"Test Case\", \"name\": \"testC()\", \"result\": \"$result\",
+      \"durationInSeconds\": 0.1}]}"
+    sep=","
+  done
+  cat > "$FAKE_CANNED" <<DOC
+{"testNodes": [{"nodeType": "Test Plan", "name": "Conduit", "result": "Passed",
+  "children": [{"nodeType": "Unit test bundle", "name": "ConduitTests", "result": "Passed",
+    "children": [$nodes]}]}]}
+DOC
+}
+case "$mode" in
+  hang) write_doc Passed; sleep 300; exit 0 ;;
+  hangfail) write_doc Failed; sleep 300; exit 0 ;;
+  infra70) write_doc Passed; echo "simulator crashed (stub)"; exit 70 ;;
+  fail65) write_doc Failed; echo "Test Case failed (stub)"; exit 65 ;;
+  *) write_doc Passed; exit 0 ;;
+esac
+EOF
+  chmod +x "$STUBS/xcodebuild"
+}
+
+reset_unit_stub_vars() {
+  unset FAKE_UNIT_B1_A1 FAKE_UNIT_B1_A2 FAKE_UNIT_B2_A1 FAKE_UNIT_B2_A2 \
+        FAKE_UNIT_B3_A1 FAKE_UNIT_B3_A2 FAKE_UNIT_NO_DOC FAKE_UNIT_OMIT \
+        2>/dev/null || true
+}
+
 write_canned() { # $1=file $2=class $3=result
   cat > "$1" <<EOF
 {"testNodes": [{"nodeType": "Test Plan", "name": "Conduit", "result": "Passed",
@@ -101,7 +152,7 @@ EOF
 }
 
 export PATH="$STUBS:$PATH"
-write_stub_xcodebuild
+write_unit_batch_stub_xcodebuild
 write_stub_xcrun
 touch "$WORK/fake.xctestrun"
 # The stub xcodebuild invocations exit instantly; a full 15s poll interval
@@ -124,9 +175,40 @@ end_case() { # closes the current case's timing line (suite-progress telemetry)
   current=""
 }
 
-run_lane() { # $1=classes $2=timeout $3=mode $4=iterations
-  _classes="$1"; _timeout="$2"; _mode="$3"; _iters="$4"; shift 4
-  FAKE_MODE="$_mode" CLASS_TIMEOUT_MIN_S="1" CLASS_TIMEOUT_MULTIPLIER="0.1"     bash "$SCRIPTS/ci-test-lane.sh"     --kind unit --lane unit-t --target ConduitTests     --classes "$_classes"     --predicted 42 --timeout "$_timeout"     --iterations "$_iters"     --xctestrun "$WORK/fake.xctestrun"     --result-dir "$WORKCASE" >"$WORKCASE/stdout.log" 2>&1
+run_lane() { # $1=classes $2=timeout $3=iterations (one batch per class)
+  _classes="$1"; _timeout="$2"; _iters="$3"; shift 3
+  bash "$SCRIPTS/ci-test-lane.sh" \
+    --kind unit --lane unit-t --target ConduitTests \
+    --classes "$_classes" \
+    --batches-json "$(batches_json_for "$_classes" "$_timeout")" \
+    --predicted 42 --timeout "$_timeout" \
+    --iterations "$_iters" \
+    --xctestrun "$WORK/fake.xctestrun" \
+    --result-dir "$WORKCASE" >"$WORKCASE/stdout.log" 2>&1
+  echo $? > "$WORKCASE/exit-code"
+}
+
+run_lane_raw() { # $1=classes $2=RAW batches json (for malformed-layout cases)
+  _classes="$1"; _raw="$2"
+  bash "$SCRIPTS/ci-test-lane.sh" \
+    --kind unit --lane unit-t --target ConduitTests \
+    --classes "$_classes" \
+    --batches-json "$_raw" \
+    --predicted 42 --timeout 300 \
+    --iterations 3 \
+    --xctestrun "$WORK/fake.xctestrun" \
+    --result-dir "$WORKCASE" >"$WORKCASE/stdout.log" 2>&1
+  echo $? > "$WORKCASE/exit-code"
+}
+
+run_lane_missing_batches() { # $1=classes: no --batches-json at all
+  bash "$SCRIPTS/ci-test-lane.sh" \
+    --kind unit --lane unit-t --target ConduitTests \
+    --classes "$1" \
+    --predicted 42 --timeout 300 \
+    --iterations 3 \
+    --xctestrun "$WORK/fake.xctestrun" \
+    --result-dir "$WORKCASE" >"$WORKCASE/stdout.log" 2>&1
   echo $? > "$WORKCASE/exit-code"
 }
 
@@ -148,13 +230,27 @@ print([a['status'] for a in d.get('attempts', [])])
 " "$WORKCASE/lane-result.json" 2>/dev/null || echo NONE
 }
 
-isolation_statuses() {
+batch_statuses() {
   python3 -c "
 import json, sys
 with open(sys.argv[1]) as fh:
     d = json.load(fh)
-print([c['status'] for c in (d.get('isolation') or {}).get('classes', [])])
+print([b['status'] for b in d.get('batches', [])])
 " "$WORKCASE/lane-result.json" 2>/dev/null || echo NONE
+}
+
+batch_attempt_chain() { # $1 = batch index
+  python3 -c "
+import json, sys
+with open(sys.argv[1]) as fh:
+    d = json.load(fh)
+b = d.get('batches', [])[int(sys.argv[2]) - 1]
+print([a['status'] for a in b.get('attempts', [])])
+" "$WORKCASE/lane-result.json" "$1" 2>/dev/null || echo NONE
+}
+
+batch_invocations() { # $1=batch $2=attempt -> exact invocation count
+  grep -cx "batch-$1-a$2" "$INVOCATION_LOG" 2>/dev/null || true
 }
 
 retried_classes() {
@@ -168,7 +264,7 @@ print(d.get('retried_classes'))
 
 run_ui_lane() { # $1=classes $2=lane-timeout(bookkeeping) $3=class-timeouts
   _classes="$1"; _timeout="$2"; _cto="$3"
-  CLASS_TIMEOUT_MIN_S="1" CLASS_TIMEOUT_MULTIPLIER="0.1"     bash "$SCRIPTS/ci-test-lane.sh"     --kind ui --lane ui-t --target ConduitUITests     --classes "$_classes"     --class-timeouts "$_cto"     --predicted 42 --timeout "$_timeout"     --xctestrun "$WORK/fake.xctestrun"     --result-dir "$WORKCASE" >"$WORKCASE/stdout.log" 2>&1
+  bash "$SCRIPTS/ci-test-lane.sh"     --kind ui --lane ui-t --target ConduitUITests     --classes "$_classes"     --class-timeouts "$_cto"     --predicted 42 --timeout "$_timeout"     --xctestrun "$WORK/fake.xctestrun"     --result-dir "$WORKCASE" >"$WORKCASE/stdout.log" 2>&1
   echo $? > "$WORKCASE/exit-code"
 }
 
@@ -341,129 +437,239 @@ class_invocations() { # $1=class -> how many diagnosis invocations it got
 
 
 
-# --- case 1: pass -------------------------------------------------------------
+# ===========================================================================
+# UNIT lane mode: sequential fresh-xcodebuild batches (one class per batch in
+# these cases; the chunking itself is pinned in Python). Each case asserts
+# the lane verdict, the batch attempt chains, exact invocation counts, and
+# that a real failure can never be retried into a green lane.
+# ===========================================================================
+
+export INVOCATION_LOG="$WORK/invocations.log"
+# The batch stub (re)writes this document per invocation to match its own
+# verdict; b3 overrides it with a path that never exists.
+export FAKE_CANNED="$WORK/canned-unit.json"
+
+# --- unit case 1: every batch passes once -------------------------------------
 end_case
-begin_case "pass path" "$WORK/c1"
-write_canned "$WORK/canned-pass.json" "AlphaTests" "Passed"
-run_lane "AlphaTests" 300 pass 3
+begin_case "unit batches all pass" "$WORK/b1"
+: > "$INVOCATION_LOG"
+reset_unit_stub_vars
+run_lane "AlphaTests,BetaTests,GammaTests" 300 3
 assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "0"
 assert_eq "verdict" "$(lane_field "['status']")" "pass"
-assert_eq "attempts" "$(attempts_statuses)" "['passed']"
+assert_eq "attempts" "$(attempts_statuses)" "['passed', 'passed', 'passed']"
+assert_eq "batch statuses" "$(batch_statuses)" "['pass', 'pass', 'pass']"
+assert_eq "batch 1 invoked once" "$(batch_invocations "batch-1-a1")" "1"
+assert_eq "batch 2 invoked once" "$(batch_invocations "batch-2-a1")" "1"
+assert_eq "batch 3 invoked once" "$(batch_invocations "batch-3-a1")" "1"
+assert_eq "no batch retries" "$(batch_invocations "batch-1-a2")$(batch_invocations "batch-2-a2")$(batch_invocations "batch-3-a2")" "000"
+assert_eq "no hung batch" "$(lane_field "['hung_batch']")" "None"
+if grep -q -- "-retry-tests-on-failure" "$WORKCASE/stdout.log"; then
+  ok "unit batches run under native flake retry"
+else
+  bad "unit batches must keep the native retry flags"
+fi
+assert_eq "merged per-class timings reach lane-result" \
+  "$(lane_field "['class_seconds']")" \
+  "{'AlphaTests': 0.1, 'BetaTests': 0.1, 'GammaTests': 0.1}"
+if ls "$WORKCASE"/batch-*.xcresult >/dev/null 2>&1; then
+  bad "clean batch bundles should be pruned from a green lane artifact"
+else
+  ok "clean batch bundles pruned from a green lane artifact"
+fi
 
-# --- case 2: ordinary failure -> fail, no lane retry --------------------------
+# --- unit case 2: real test failure -> lane fails, NO batch retry --------------
 end_case
-begin_case "ordinary failure" "$WORK/c2"
-write_canned "$WORK/canned-fail.json" "AlphaTests" "Failed"
-run_lane "AlphaTests" 300 fail65 3
+begin_case "unit batch real failure" "$WORK/b2"
+: > "$INVOCATION_LOG"
+reset_unit_stub_vars
+FAKE_UNIT_B2_A1="fail65" run_lane "AlphaTests,BetaTests,GammaTests" 300 3
 assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
 assert_eq "verdict" "$(lane_field "['status']")" "fail"
-assert_eq "attempts" "$(attempts_statuses)" "['test-failures']"
-if grep -q "attempt 2" "$WORKCASE/stdout.log"; then
-  bad "ordinary failure must not trigger a full-lane retry"
-else
-  ok "no full-lane retry after ordinary failure"
-fi
+assert_eq "attempts" "$(attempts_statuses)" "['passed', 'test-failures']"
+assert_eq "batch statuses" "$(batch_statuses)" "['pass', 'test-failures', 'not_run']"
+assert_eq "failing batch invoked exactly once" "$(batch_invocations "batch-2-a1")" "1"
+assert_eq "no batch-level retry for a real failure" "$(batch_invocations "batch-2-a2")" "0"
+assert_eq "later batches never ran" "$(batch_invocations "batch-3-a1")" "0"
+assert_eq "failure attributed" "$(lane_field "['failures'][0]['class']")" "BetaTests"
 
-# --- case 3: unclassified failure -> fail, never retried ----------------------
+# --- unit case 3: unclassified failure -> fail, never retried ------------------
 end_case
-begin_case "unclassified failure" "$WORK/c3"
-# Extraction must fail: xcrun returns an invalid document (no canned file).
-export FAKE_CANNED="$WORK/does-not-exist.json"
-run_lane "AlphaTests" 300 fail65 3
+begin_case "unit batch unclassified failure" "$WORK/b3"
+: > "$INVOCATION_LOG"
+reset_unit_stub_vars
+# Extraction must fail: the canned doc path never exists (and the stub is
+# told not to write one), so the xcrun stub returns an invalid document.
+FAKE_UNIT_NO_DOC="1" FAKE_UNIT_B2_A1="fail65" FAKE_CANNED="$WORK/does-not-exist-b3.json" \
+  run_lane "AlphaTests,BetaTests" 300 3
 assert_eq "verdict" "$(lane_field "['status']")" "fail"
-assert_eq "attempts" "$(attempts_statuses)" "['unclassified']"
-if grep -q "attempt 2" "$WORKCASE/stdout.log"; then
-  bad "unclassified failure must not be retried into a second lane run"
+assert_eq "attempts" "$(attempts_statuses)" "['passed', 'unclassified']"
+assert_eq "no retry after an unclassifiable batch" "$(batch_invocations "batch-2-a2")" "0"
+assert_eq "batch statuses" "$(batch_statuses)" "['pass', 'unclassified']"
+
+# --- unit case 4: watchdog stall -> same-batch retry once -> lane continues ----
+end_case
+begin_case "unit watchdog stall recovered by batch retry" "$WORK/b4"
+: > "$INVOCATION_LOG"
+reset_unit_stub_vars
+FAKE_UNIT_B2_A1="hang" FAKE_UNIT_B2_A2="pass" run_lane "AlphaTests,BetaTests,GammaTests" 3 1
+assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "0"
+assert_eq "verdict" "$(lane_field "['status']")" "pass"
+assert_eq "attempts" "$(attempts_statuses)" "['passed', 'timeout', 'passed', 'passed']"
+assert_eq "batch attempt chain" "$(batch_attempt_chain 2)" "['timeout', 'passed']"
+assert_eq "stalled batch invoked exactly twice" "$(batch_invocations "batch-2-a1")$(batch_invocations "batch-2-a2")" "11"
+assert_eq "lane continued after the recovered batch" "$(batch_invocations "batch-3-a1")" "1"
+assert_eq "no hung batch on a recovered lane" "$(lane_field "['hung_batch']")" "None"
+assert_eq "watchdog retry shutdown recorded (no erase)" \
+  "$(lane_field "['simulator_reset']")$(lane_field "['simulator_erase']")" "TrueFalse"
+if ls "$WORKCASE"/batch-1-*.xcresult >/dev/null 2>&1 || ls "$WORKCASE"/batch-3-*.xcresult >/dev/null 2>&1; then
+  bad "clean batches' bundles must be pruned even when a sibling batch needed its retry"
 else
-  ok "unclassified failure not retried"
+  ok "only the recovered batch keeps its bundles"
+fi
+if ls "$WORKCASE"/batch-2-a1.xcresult >/dev/null 2>&1 && ls "$WORKCASE"/batch-2-a2.xcresult >/dev/null 2>&1; then
+  ok "both stall-retry bundles kept on the green lane"
+else
+  bad "stall-retry bundles must be preserved (attempt 1 is the wedge evidence)"
 fi
 
-# --- case 4: infra failure -> exactly one full-lane retry, then error ---------
+# --- unit case 5: second stall -> lane fails, batch named, exactly one retry ---
 end_case
-begin_case "infra failure retry" "$WORK/c4"
-write_canned "$WORK/canned-pass2.json" "AlphaTests" "Passed"
-run_lane "AlphaTests" 300 infra70 1
+begin_case "unit batch stalls twice" "$WORK/b5"
+: > "$INVOCATION_LOG"
+reset_unit_stub_vars
+FAKE_UNIT_B2_A1="hang" FAKE_UNIT_B2_A2="hang" run_lane "AlphaTests,BetaTests,GammaTests" 3 1
+assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
+assert_eq "verdict" "$(lane_field "['status']")" "timeout"
+assert_eq "hung batch named" "$(lane_field "['hung_batch']")" "2"
+assert_eq "attempts" "$(attempts_statuses)" "['passed', 'timeout', 'timeout']"
+assert_eq "batch statuses" "$(batch_statuses)" "['pass', 'timeout', 'not_run']"
+assert_eq "exactly one retry, never a third invocation" "$(batch_invocations "batch-2-a1")$(batch_invocations "batch-2-a2")" "11"
+assert_eq "later batches never ran on the stalled lane" "$(batch_invocations "batch-3-a1")" "0"
+
+# --- unit case 6: infra wedge -> erase + same-batch retry -> green -------------
+end_case
+begin_case "unit infra wedge recovered by batch retry" "$WORK/b6"
+: > "$INVOCATION_LOG"
+reset_unit_stub_vars
+FAKE_UNIT_B2_A1="infra70" FAKE_UNIT_B2_A2="pass" run_lane "AlphaTests,BetaTests" 300 3
+assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "0"
+assert_eq "verdict" "$(lane_field "['status']")" "pass"
+assert_eq "batch attempt chain" "$(batch_attempt_chain 2)" "['infra-error', 'passed']"
+assert_eq "wedge batch invoked exactly twice" "$(batch_invocations "batch-2-a1")$(batch_invocations "batch-2-a2")" "11"
+assert_eq "infra retry erases the simulator" "$(lane_field "['simulator_erase']")" "True"
+assert_eq "batch statuses" "$(batch_statuses)" "['pass', 'pass']"
+
+# --- unit case 7: persistent infra failure -> lane fails after its one retry ---
+end_case
+begin_case "unit persistent infra failure" "$WORK/b7"
+: > "$INVOCATION_LOG"
+reset_unit_stub_vars
+FAKE_UNIT_B2_A1="infra70" FAKE_UNIT_B2_A2="infra70" run_lane "AlphaTests,BetaTests,GammaTests" 300 3
 assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
 assert_eq "verdict" "$(lane_field "['status']")" "error"
-assert_eq "attempts" "$(attempts_statuses)" "['infra-error', 'infra-error']"
+assert_eq "batch statuses" "$(batch_statuses)" "['pass', 'infra-error', 'not_run']"
+assert_eq "wedge batch invoked exactly twice" "$(batch_invocations "batch-2-a1")$(batch_invocations "batch-2-a2")" "11"
+assert_eq "later batches never ran" "$(batch_invocations "batch-3-a1")" "0"
 
-
-# --- case 5: timeout -> isolation directly, hang identified -------------------
+# --- unit case 8: malformed batch layout refuses to start (fail closed) --------
 end_case
-begin_case "timeout isolation" "$WORK/c5"
-export ISOLATION_BUDGET_S=200 CLASS_TIMEOUT_MIN_S=1 CLASS_TIMEOUT_MULTIPLIER=0.1
-run_lane "AlphaTests,BetaTests" 3 hang 1
-assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
-assert_eq "verdict" "$(lane_field "['status']")" "timeout"
-assert_eq "hung class" "$(lane_field "['hung_class']")" "AlphaTests"
-assert_eq "first attempt" "$(attempts_statuses | grep -o 'timeout' | head -1)" "timeout"
-if grep -q "lane-retry" "$WORKCASE/lane-result.json"; then
-  bad "timeout must not do a second full-lane attempt"
-else
-  ok "no full-lane retry after timeout"
-fi
-assert_eq "isolation ran" "$(isolation_statuses)" "['timeout', 'not_diagnosed']"
-
-# --- case 6: incomplete isolation fails the lane ------------------------------
-end_case
-begin_case "incomplete isolation" "$WORK/c6"
-export ISOLATION_BUDGET_S=2 CLASS_TIMEOUT_MIN_S=1 CLASS_TIMEOUT_MULTIPLIER=0.1
-run_lane "AlphaTests,BetaTests" 3 hang 1
-assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
-assert_eq "verdict" "$(lane_field "['status']")" "timeout"
-assert_eq "isolation statuses" "$(isolation_statuses)" "['not_diagnosed', 'not_diagnosed']"
-if grep -q "undiagnosed classes" "$WORKCASE/stdout.log"; then
-  ok "undiagnosed classes reported"
-else
-  bad "undiagnosed classes must be reported loudly"
-fi
-
-
-# --- case 7: isolation stops after the first confirmed hang ------
-# Spec scenario: AlphaTests PASSES, BetaTests TIMES OUT, GammaTests
-# would pass if called - but must NEVER run on the contaminated
-# simulator. Tracks exact xcodebuild invocation counts via the stub.
-end_case
-begin_case "stop after hang" "$WORK/c7"
-cat > "$STUBS/xcodebuild" <<'EOF'
-#!/bin/bash
-n=$(printf '%s\n' "$@" | grep -c -- '-only-testing:' || true)
-if [ "$n" -gt 1 ]; then
-  echo "full" >> "$INVOCATION_LOG"
-  sleep 300
-  exit 0
-fi
-cls=$(printf '%s\n' "$@" | grep 'only-testing:' | head -1 | sed 's|.*/||')
-echo "iso:$cls" >> "$INVOCATION_LOG"
-case "$cls" in
-  BetaTests) sleep 300; exit 0 ;;
-  *) exit 0 ;;
-esac
-EOF
-chmod +x "$STUBS/xcodebuild"
-INVOCATION_LOG="$WORK/c7-invocations.log"
+begin_case "unit malformed batches json rejected" "$WORK/b8"
 : > "$INVOCATION_LOG"
-export INVOCATION_LOG
-export ISOLATION_BUDGET_S=200 CLASS_TIMEOUT_MIN_S=1 CLASS_TIMEOUT_MULTIPLIER=0.1
-run_lane "AlphaTests,BetaTests,GammaTests" 3 hang-second 1
-assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
-assert_eq "verdict" "$(lane_field "['status']")" "timeout"
-assert_eq "hung class" "$(lane_field "['hung_class']")" "BetaTests"
-assert_eq "full lane run once" "$(grep -c '^full$' "$INVOCATION_LOG")" "1"
-assert_eq "isolation statuses" "$(isolation_statuses)" "['pass', 'timeout', 'not_diagnosed']"
-assert_eq "AlphaTests invoked once" "$(grep -c '^iso:AlphaTests$' "$INVOCATION_LOG")" "1"
-assert_eq "BetaTests invoked once" "$(grep -c '^iso:BetaTests$' "$INVOCATION_LOG")" "1"
-assert_eq "GammaTests never invoked" "$(grep -c '^iso:GammaTests$' "$INVOCATION_LOG")" "0"
+reset_unit_stub_vars
+# The batches carry fewer classes than the lane: a silent desync would run
+# BetaTests with no plan record, so the runner must refuse BEFORE anything.
+run_lane_raw "AlphaTests,BetaTests" '[{"classes":["AlphaTests"],"timeout_s":300}]'
+assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "2"
+assert_eq "no xcodebuild invocation" "$(wc -l < "$INVOCATION_LOG" | tr -d ' ')" "0"
+if [ -f "$WORKCASE/lane-result.json" ]; then
+  bad "a rejected layout must not produce a lane result"
+else
+  ok "lane never started with a desynced batch layout"
+fi
+if grep -q "batches do not reproduce the lane class list" "$WORKCASE/stdout.log"; then
+  ok "layout desync named as the reason"
+else
+  bad "layout desync must be named loudly"
+fi
+# Not even valid JSON is accepted.
+run_lane_raw "AlphaTests" 'not json at all'
+assert_eq "invalid json rejected" "$(cat "$WORKCASE/exit-code")" "2"
+# A non-positive integer watchdog is rejected.
+run_lane_raw "AlphaTests" '[{"classes":["AlphaTests"],"timeout_s":0}]'
+assert_eq "non-positive batch watchdog rejected" "$(cat "$WORKCASE/exit-code")" "2"
 
-# --- case 8: finished session survives its budget via finalize grace ----------
+# --- unit case 9: missing --batches-json refuses to start ----------------------
+end_case
+begin_case "unit missing batches json rejected" "$WORK/b9"
+: > "$INVOCATION_LOG"
+run_lane_missing_batches "AlphaTests"
+assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "2"
+assert_eq "no xcodebuild invocation" "$(wc -l < "$INVOCATION_LOG" | tr -d ' ')" "0"
+if grep -q -- "--batches-json is required" "$WORKCASE/stdout.log"; then
+  ok "missing batch table rejected loudly"
+else
+  bad "missing --batches-json must be rejected loudly"
+fi
+
+# --- unit case 12: stall WITH known failures is a test failure, no retry ------
+# The batch retry is only for watchdog stalls with ZERO known failures: a
+# batch whose killed xcresult still records surviving test failures must fail
+# the lane exactly like an ordinary failure (real failures never convert into
+# infrastructure recovery).
+end_case
+begin_case "unit stall with known failures never retried" "$WORK/b12"
+: > "$INVOCATION_LOG"
+reset_unit_stub_vars
+FAKE_UNIT_B2_A1="hangfail" run_lane "AlphaTests,BetaTests,GammaTests" 3 1
+assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
+assert_eq "verdict" "$(lane_field "['status']")" "fail"
+assert_eq "attempts" "$(attempts_statuses)" "['passed', 'test-failures']"
+assert_eq "batch statuses" "$(batch_statuses)" "['pass', 'test-failures', 'not_run']"
+assert_eq "no batch retry for a failure-carrying stall" "$(batch_invocations "batch-2-a2")" "0"
+assert_eq "later batches never ran" "$(batch_invocations "batch-3-a1")" "0"
+assert_eq "failures attributed, not hidden" "$(lane_field "['failures'][0]['class']")" "BetaTests"
+
+# --- unit case 13: exit-0 batch without a class record fails the lane ---------
+# Defense in depth: an exit-0 batch whose parseable xcresult has no record of
+# an assigned class must not finish as a clean pass (an -only-testing filter
+# silently matching nothing), and there is no per-class diagnosis for units -
+# the lane fails closed. Beta and Gamma share batch 2 so the omit leaves a
+# VALID document that is merely missing one assigned class.
+end_case
+begin_case "unit pass with unrecorded class fails closed" "$WORK/b13"
+: > "$INVOCATION_LOG"
+reset_unit_stub_vars
+FAKE_UNIT_OMIT="BetaTests" \
+  run_lane_raw "AlphaTests,BetaTests,GammaTests" \
+  '[{"classes":["AlphaTests"],"timeout_s":300},{"classes":["BetaTests","GammaTests"],"timeout_s":300}]'
+assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
+assert_eq "verdict" "$(lane_field "['status']")" "fail"
+assert_eq "attempts" "$(attempts_statuses)" "['passed', 'incomplete']"
+assert_eq "batch statuses" "$(batch_statuses)" "['pass', 'incomplete']"
+assert_eq "no retry for an unaccountable batch" "$(batch_invocations "batch-2-a2")" "0"
+assert_eq "later batches never ran" "$(batch_invocations "batch-3-a1")" "0"
+if grep -q "exited 0 but the xcresult has no record" "$WORKCASE/stdout.log"; then
+  ok "exit-0 pass with a missing class record announced"
+else
+  bad "an exit-0 batch with an unrecorded class must not pass silently"
+fi
+
+# --- unit case 10: finished session survives its budget via finalize grace -----
 # Run #500 regression: xcodebuild printed its terminal result and was only
 # finalizing the xcresult when the watchdog expired. The deadline must be
 # extended ONCE (bounded grace) so the finished session can exit with its
 # real status; success still comes from the exit status, never the marker.
 end_case
-begin_case "finalize grace lets a finished invocation pass" "$WORK/c8"
+begin_case "finalize grace lets a finished batch pass" "$WORK/b10"
+: > "$INVOCATION_LOG"
 cat > "$STUBS/xcodebuild" <<'EOF'
 #!/bin/bash
+prev=""
+for a in "$@"; do
+  case "$prev" in -resultBundlePath) echo "$(basename "$a" .xcresult)" >> "$INVOCATION_LOG" ;; esac
+  prev="$a"
+done
 echo "running tests (stub)"
 sleep 4
 echo "** TEST EXECUTE SUCCEEDED **"
@@ -474,7 +680,7 @@ EOF
 chmod +x "$STUBS/xcodebuild"
 export XCODEBUILD_FINALIZE_GRACE_S=30
 write_canned "$WORK/canned-grace.json" "AlphaTests" "Passed"
-run_lane "AlphaTests" 5 pass 1
+run_lane "AlphaTests" 5 1
 assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "0"
 assert_eq "verdict" "$(lane_field "['status']")" "pass"
 assert_eq "attempts" "$(attempts_statuses)" "['passed']"
@@ -484,11 +690,17 @@ else
   bad "finalize grace must be reported when it fires"
 fi
 
-# --- case 9: grace is bounded - a wedged finalize is still a timeout ----------
+# --- unit case 11: grace is bounded - a wedged finalize is still a timeout -----
 end_case
-begin_case "finalize grace expiry kills and isolates" "$WORK/c9"
+begin_case "finalize grace expiry kills, retry stalls, lane fails" "$WORK/b11"
+: > "$INVOCATION_LOG"
 cat > "$STUBS/xcodebuild" <<'EOF'
 #!/bin/bash
+prev=""
+for a in "$@"; do
+  case "$prev" in -resultBundlePath) echo "$(basename "$a" .xcresult)" >> "$INVOCATION_LOG" ;; esac
+  prev="$a"
+done
 echo "** TEST EXECUTE SUCCEEDED **"
 echo "wedged finalization (stub)"
 sleep 300
@@ -496,62 +708,20 @@ exit 0
 EOF
 chmod +x "$STUBS/xcodebuild"
 export XCODEBUILD_FINALIZE_GRACE_S=3
-export ISOLATION_BUDGET_S=200 CLASS_TIMEOUT_MIN_S=1 CLASS_TIMEOUT_MULTIPLIER=0.1
-run_lane "AlphaTests" 3 pass 1
+run_lane "AlphaTests" 3 1
 assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
 assert_eq "verdict" "$(lane_field "['status']")" "timeout"
-assert_eq "first attempt" "$(attempts_statuses | grep -o 'timeout' | head -1)" "timeout"
+assert_eq "attempt chain" "$(attempts_statuses)" "['timeout', 'timeout']"
+assert_eq "batch invoked exactly twice" "$(batch_invocations "batch-1-a1")$(batch_invocations "batch-1-a2")" "11"
 if grep -q "finalize grace" "$WORKCASE/stdout.log"; then
   ok "grace was granted before the kill"
 else
   bad "grace must be attempted before killing a finalized session"
 fi
 
-# --- case 10: infra failure recovers on the single post-reset retry -----------
-end_case
-begin_case "infra retry recovers to green" "$WORK/c10"
-cat > "$STUBS/xcodebuild" <<'EOF'
-#!/bin/bash
-n=$(cat "$COUNT_FILE" 2>/dev/null || echo 0)
-n=$((n + 1))
-echo "$n" > "$COUNT_FILE"
-if [ "$n" -eq 1 ]; then
-  echo "simulator crashed once (stub)"
-  exit 70
-fi
-exit 0
-EOF
-chmod +x "$STUBS/xcodebuild"
-export COUNT_FILE="$WORK/c10-count"
-: > "$COUNT_FILE"
-write_canned "$WORK/canned-c10.json" "AlphaTests" "Passed"
-run_lane "AlphaTests" 300 infra-once 1
-assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "0"
-assert_eq "verdict" "$(lane_field "['status']")" "pass"
-assert_eq "attempts" "$(attempts_statuses)" "['infra-recovered', 'passed']"
-
-# --- case 11: class failure during isolation fails the lane --------------------
-end_case
-begin_case "class failure during isolation" "$WORK/c11"
-cat > "$STUBS/xcodebuild" <<'EOF'
-#!/bin/bash
-n=$(printf '%s\n' "$@" | grep -c -- '-only-testing:' || true)
-if [ "$n" -gt 1 ]; then
-  sleep 300
-  exit 0
-fi
-exit 65
-EOF
-chmod +x "$STUBS/xcodebuild"
-export ISOLATION_BUDGET_S=200 CLASS_TIMEOUT_MIN_S=1 CLASS_TIMEOUT_MULTIPLIER=0.1
-run_lane "AlphaTests,BetaTests" 3 fail65 1
-assert_eq "exit code" "$(cat "$WORKCASE/exit-code")" "1"
-assert_eq "verdict" "$(lane_field "['status']")" "fail"
-assert_eq "isolation statuses" "$(isolation_statuses)" "['fail', 'fail']"
-
 echo ""
 end_case
-echo "unit+isolation state machine: $pass_count passed, $fail_count failed so far"
+echo "unit batch state machine: $pass_count passed, $fail_count failed so far"
 
 # ===========================================================================
 # UI lane mode: one batched shard invocation on the healthy path, per-class
