@@ -65,7 +65,9 @@ final class AppStateDecisionFenceTests: XCTestCase {
         )
     }
 
-    private func makeAppState() -> AppState {
+    private func makeAppState(
+        chatResumeLifecycleOperations: ChatResumeLifecycleOperations = .live
+    ) -> AppState {
         let suite = "AppStateDecisionFenceTests.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suite) else {
             fatalError("Failed to create test UserDefaults suite")
@@ -78,6 +80,7 @@ final class AppStateDecisionFenceTests: XCTestCase {
             defaults: defaults,
             loadSavedConnection: false,
             clearSessionPresentationCache: {},
+            chatResumeLifecycleOperations: chatResumeLifecycleOperations,
             sessionPresentationCache: cache
         )
     }
@@ -779,6 +782,184 @@ final class AppStateDecisionFenceTests: XCTestCase {
             "Gateway connection is unavailable.",
             "The relay branch must be reachable without any HermesClient"
         )
+    }
+
+    // MARK: - Legacy Approval Submitting & Bot Chat Recovery
+
+    func testAuthoritativeLegacyApprovalReplayDuringSubmissionPreservesSubmittingState() async throws {
+        let appState = makeAppState()
+        let legacyApproval = approvalFixture(status: .pending, requestId: nil)
+        appState.messages = [legacyApproval]
+        appState.activeSessionId = "default"
+
+        let transport = ClarifyFakeTransport()
+        let socket = ClarifyFakeSocket()
+        _ = try await installConnectedClient(appState, socket: socket, transport: transport)
+
+        // User submits decision -> status becomes .submitting
+        let parked = try await parkApprovalRespond(appState: appState, socket: socket, choice: "approve")
+        XCTAssertEqual(appState.messages.first?.approval?.status, .submitting)
+        XCTAssertEqual(appState.messages.count, 1)
+
+        // Authoritative legacy replay arrives while approval.respond is still in flight
+        let authoritativeLegacy = ApprovalActivity(
+            sessionId: "default",
+            requestId: nil,
+            command: "deploy",
+            description: "Run the deploy?",
+            choices: nil,
+            allowPermanent: false,
+            smartDenied: false,
+            status: .pending,
+            choice: nil,
+            error: nil
+        )
+        appState.handleStreamEvent(.approval(sessionId: "default", activity: authoritativeLegacy))
+
+        // Card must NOT be re-armed to .pending, must not duplicate
+        XCTAssertEqual(appState.messages.count, 1, "Must not create a duplicate card")
+        let inFlightCard = try XCTUnwrap(appState.messages.first?.approval)
+        XCTAssertEqual(inFlightCard.status, .submitting, "Authoritative replay must not overwrite in-flight .submitting status")
+        XCTAssertEqual(inFlightCard.choice, "approve", "User's pending choice must be retained")
+
+        // Now deliver response from gateway
+        deliverResult(socket, rpcID: parked.rpcID, result: ["resolved": 1])
+        await parked.task.value
+
+        // Settle into .approved
+        let settledCard = try XCTUnwrap(appState.messages.first?.approval)
+        XCTAssertEqual(settledCard.status, .approved)
+        XCTAssertEqual(settledCard.choice, "approve")
+    }
+
+    func testBotChatApprovalEvictionAndRecoveryUnderBotProfileNamespace() async throws {
+        let suite = "testBotChatApproval.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
+        let cache = SessionPresentationCache(defaults: defaults)
+        let appState = AppState(
+            defaults: defaults,
+            loadSavedConnection: false,
+            clearSessionPresentationCache: {},
+            sessionPresentationCache: cache
+        )
+        let botSessionID = "bot-session-approval"
+        let botProfile = "bot-profile-approval"
+        let dashboardProfile = "dashboard-main"
+
+        appState.setActiveProfileForTesting(dashboardProfile)
+        appState.activeSessionId = botSessionID
+        appState.noteBotChatSessionForTesting(botSessionID, profile: botProfile)
+
+        // 1. Record a legacy pending approval in Bot Chat
+        let legacyApproval = ApprovalActivity(
+            sessionId: botSessionID,
+            requestId: nil,
+            command: "restart_bot",
+            description: "Restart bot service?",
+            choices: nil,
+            allowPermanent: false,
+            smartDenied: false,
+            status: .pending,
+            choice: nil,
+            error: nil
+        )
+        let legacyMessage = ChatMessage(
+            id: "legacy-msg",
+            role: .approval,
+            content: "Restart bot service?",
+            timestamp: "1",
+            approval: legacyApproval
+        )
+        cache.recordPendingDecision(legacyMessage, profile: botProfile, sessionIDs: [botSessionID])
+
+        // Verify stored under botProfile, NOT dashboardProfile
+        let botStoredKeys = cache.storedPendingDecisionKeys(profile: botProfile, sessionIDs: [botSessionID])
+        let dashboardStoredKeys = cache.storedPendingDecisionKeys(profile: dashboardProfile, sessionIDs: [botSessionID])
+        XCTAssertTrue(botStoredKeys.contains("approval:\(botSessionID)"), "Approval must be stored under the bot presentation profile")
+        XCTAssertTrue(dashboardStoredKeys.isEmpty, "Dashboard profile must have no pending approval entry")
+
+        // 2. Authoritative approval refresh/eviction occurs with an identified approval
+        let resumeResult = SessionResumeResult(
+            sessionId: botSessionID,
+            messages: [],
+            snapshot: SessionRuntimeSnapshot(
+                object: [
+                    "running": .bool(true),
+                    "pending_approval": .object([
+                        "request_id": .string("req-identified-1"),
+                        "command": .string("restart_bot"),
+                        "description": .string("Restart bot service?")
+                    ])
+                ]
+            )
+        )
+        _ = appState.applyChatResume(resumeResult)
+
+        // 3. Verify the correct Bot Chat cache entry is removed
+        let updatedBotKeys = cache.storedPendingDecisionKeys(profile: botProfile, sessionIDs: [botSessionID])
+        XCTAssertFalse(updatedBotKeys.contains("approval:\(botSessionID)"), "The legacy approval under botProfile must be evicted")
+
+        // 4. Simulate another resume without pending approvals: no stale legacy approval can reappear
+        let resumeClean = SessionResumeResult(
+            sessionId: botSessionID,
+            messages: [],
+            snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+        )
+        _ = appState.applyChatResume(resumeClean)
+        XCTAssertFalse(appState.messages.contains(where: { $0.approval?.requestId == nil && $0.approval?.status == .pending }), "Stale legacy approval must not reappear after eviction")
+    }
+
+    func testDelayedPendingApprovalsRefreshFencedAgainstProfileSwitch() async throws {
+        let botSessionID = "bot-session-fenced"
+        let botProfile = "bot-profile-fenced"
+        let dashboardProfile = "dashboard-main"
+
+        let gate = ClarifyGate()
+        var refreshInvoked = false
+        let lifecycleOps = ChatResumeLifecycleOperations(
+            connectClient: { _ in },
+            loadCatalog: { _, _ in [] },
+            openSession: { _, _, _ in SessionResumeResult(sessionId: botSessionID, messages: [], snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])) },
+            pendingApprovals: { _, _ in
+                gate.signal()
+                try? await Task.sleep(nanoseconds: 50_000_000)
+                refreshInvoked = true
+                return [
+                    ApprovalActivity(
+                        sessionId: botSessionID,
+                        requestId: "delayed-req",
+                        command: "test",
+                        description: "Delayed approval",
+                        choices: nil,
+                        allowPermanent: false,
+                        smartDenied: false,
+                        status: .pending,
+                        choice: nil,
+                        error: nil
+                    )
+                ]
+            }
+        )
+
+        let appState = makeAppState(chatResumeLifecycleOperations: lifecycleOps)
+        appState.setActiveProfileForTesting(dashboardProfile)
+        appState.activeSessionId = botSessionID
+        appState.noteBotChatSessionForTesting(botSessionID, profile: botProfile)
+
+        let transport = ClarifyFakeTransport()
+        let socket = ClarifyFakeSocket()
+        let client = try await installConnectedClient(appState, socket: socket, transport: transport)
+
+        let refreshTask = appState.schedulePendingApprovalsRefresh(sessionId: botSessionID, using: client)
+        try await gate.wait("pendingApprovals to be called")
+
+        // Switch active session / presentation profile before refresh completes
+        appState.activeSessionId = "other-session"
+
+        await refreshTask.value
+        XCTAssertTrue(refreshInvoked)
+        XCTAssertFalse(appState.messages.contains { $0.approval?.requestId == "delayed-req" }, "Delayed approval must not land in an abandoned or switched session")
     }
 }
 

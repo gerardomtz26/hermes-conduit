@@ -4900,7 +4900,7 @@ final class AppState: ObservableObject {
     ) -> Task<Void, Never> {
         pendingApprovalsRequestGeneration &+= 1
         let generation = pendingApprovalsRequestGeneration
-        let profile = activeProfile
+        let profile = presentationProfile(for: sessionId)
         let viewportGeneration = chatViewportTransitionGeneration
         let reconciliationGeneration = reconciliationToken
         let acceptedSessionIDs = activeChatScrollSessionIdentity.equivalentSessionIDs
@@ -4922,7 +4922,7 @@ final class AppState: ObservableObject {
             }
             guard let self,
                   generation == self.pendingApprovalsRequestGeneration,
-                  profile == self.activeProfile,
+                  profile == self.presentationProfile(for: sessionId),
                   self.client === client,
                   viewportGeneration == self.chatViewportTransitionGeneration,
                   reconciliationGeneration == self.reconciliationToken,
@@ -5174,7 +5174,7 @@ final class AppState: ObservableObject {
         messages = mergeCachedReviews(into: restored, sessionId: result.sessionId)
         if result.snapshot.running == false {
             sessionPresentationCache.removePendingTools(
-                profile: activeProfile,
+                profile: presentationProfile(for: result.sessionId),
                 sessionIDs: presentationCacheSessionIDs(for: result.sessionId)
             )
         }
@@ -8447,6 +8447,10 @@ final class AppState: ObservableObject {
         guard let sessionID,
               !sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         botChatSessionProfiles[sessionID] = profile
+    }
+
+    func noteBotChatSessionForTesting(_ sessionID: String, profile: String) {
+        noteBotChatSession(sessionID, profile: profile)
     }
 
     /// The bot profile an in-flight or active conversation belongs to, when
@@ -14753,7 +14757,7 @@ final class AppState: ObservableObject {
             messages.append(message)
             sessionPresentationCache.recordPendingToolStart(
                 message,
-                profile: activeProfile,
+                profile: presentationProfile(for: streamSessionId),
                 sessionIDs: presentationCacheSessionIDs(for: streamSessionId)
             )
 
@@ -14802,7 +14806,7 @@ final class AppState: ObservableObject {
             sessionPresentationCache.resolvePendingTool(
                 named: name,
                 toolID: stableToolID,
-                profile: activeProfile,
+                profile: presentationProfile(for: streamSessionId),
                 sessionIDs: presentationCacheSessionIDs(for: streamSessionId)
             )
 
@@ -14900,22 +14904,21 @@ final class AppState: ObservableObject {
     ) {
         let equivalentSessionIDs = activeChatScrollSessionIdentity.equivalentSessionIDs
             .union([activity.sessionId])
-        if activity.requestId != nil {
-            // A legacy card has no request identity to correlate with the
-            // authoritative row. While its response is in flight, keep its
-            // message id and cache entry stable so the RPC completion can
-            // settle the card it actually owns. Never retain this pre-answer
-            // pending snapshot for replay after success; the fresh pending
-            // refresh below the response owns any still-queued request.
-            if messages.contains(where: { message in
-                guard let existing = message.approval else { return false }
-                return equivalentSessionIDs.contains(existing.sessionId)
-                    && existing.requestId == nil
-                    && existing.status == .submitting
-            }) {
-                return
-            }
+        let targetKey = activity.requestId.map { "approval-request:\($0)" }
+            ?? "approval:\(activity.sessionId)"
+
+        // While a legacy submission is in flight, keep the card stable so
+        // approval.respond can settle it. Never let an authoritative snapshot
+        // (whether identified or legacy) overwrite a card that is submitting.
+        if messages.contains(where: { message in
+            guard let existing = message.approval else { return false }
+            return equivalentSessionIDs.contains(existing.sessionId)
+                && existing.requestId == nil
+                && existing.status == .submitting
+        }) {
+            return
         }
+
         if authoritative, activity.requestId != nil {
             messages.removeAll { message in
                 guard let existing = message.approval,
@@ -14927,14 +14930,11 @@ final class AppState: ObservableObject {
             for sessionID in equivalentSessionIDs {
                 sessionPresentationCache.removePendingDecision(
                     key: "approval:\(sessionID)",
-                    profile: activeProfile,
+                    profile: presentationProfile(for: activity.sessionId),
                     sessionIDs: cacheSessionIDs
                 )
             }
         }
-
-        let targetKey = activity.requestId.map { "approval-request:\($0)" }
-            ?? "approval:\(activity.sessionId)"
         if let index = messages.lastIndex(where: {
             SessionPresentationCache.decisionKey(for: $0) == targetKey
                 && $0.approval != nil

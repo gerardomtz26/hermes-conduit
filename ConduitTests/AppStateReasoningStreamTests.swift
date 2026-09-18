@@ -704,4 +704,86 @@ final class AppStateReasoningStreamTests: XCTestCase {
         XCTAssertNil(state.liveReasoningSegment)
         XCTAssertEqual(state.messages, replacementMessages)
     }
+
+    func testBotChatToolRecoveryAndCleanupUnderBotProfileNamespace() async {
+        let suite = "testBotChatToolRecovery.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
+        let cache = SessionPresentationCache(defaults: defaults)
+        let state = AppState(
+            defaults: defaults,
+            loadSavedConnection: false,
+            sessionPresentationCache: cache
+        )
+
+        let botSessionID = "bot-session-1"
+        let botProfile = "my-bot-profile"
+        let dashboardProfile = "dashboard-default"
+
+        state.setActiveProfileForTesting(dashboardProfile)
+        installActiveSession(state, id: botSessionID)
+        state.noteBotChatSessionForTesting(botSessionID, profile: botProfile)
+
+        // 1. Begin a tool call in the bot chat
+        state.handleStreamEvent(.toolStart(
+            sessionId: botSessionID,
+            toolName: "calculator",
+            toolInput: "40 + 2",
+            toolID: "call-calc-1"
+        ))
+
+        let toolInFlight = state.messages.compactMap(\.tool)
+        XCTAssertEqual(toolInFlight.count, 1)
+        XCTAssertEqual(toolInFlight.first?.status, .running)
+
+        // Verify pending tool is stored under botProfile, NOT dashboardProfile
+        let botPending = cache.merge([], profile: botProfile, sessionIDs: [botSessionID], includePendingTools: true)
+        let dashboardPending = cache.merge([], profile: dashboardProfile, sessionIDs: [botSessionID], includePendingTools: true)
+        XCTAssertEqual(botPending.compactMap(\.tool).map(\.id), ["call-calc-1"], "Pending tool must be persisted under the bot profile namespace")
+        XCTAssertTrue(dashboardPending.isEmpty, "No pending tool entry should exist under the dashboard profile")
+
+        // 2. Simulate reopen/recovery with running == true
+        let recoverState = AppState(
+            defaults: defaults,
+            loadSavedConnection: false,
+            sessionPresentationCache: cache
+        )
+        recoverState.setActiveProfileForTesting(dashboardProfile)
+        installActiveSession(recoverState, id: botSessionID)
+        recoverState.noteBotChatSessionForTesting(botSessionID, profile: botProfile)
+
+        let resumeResultRunning = SessionResumeResult(
+            sessionId: botSessionID,
+            messages: [],
+            snapshot: SessionRuntimeSnapshot(object: ["running": .bool(true)])
+        )
+        let restored = recoverState.applyChatResume(resumeResultRunning)
+        XCTAssertTrue(restored)
+        let restoredTools = recoverState.messages.compactMap(\.tool)
+        XCTAssertEqual(restoredTools.count, 1, "The running tool card must be restored from the bot profile cache")
+        XCTAssertEqual(restoredTools.first?.id, "call-calc-1")
+        XCTAssertEqual(restoredTools.first?.status, .running)
+
+        // 3. Simulate completion/clean it up with running == false
+        let resumeResultIdle = SessionResumeResult(
+            sessionId: botSessionID,
+            messages: [
+                ChatMessage(
+                    id: "tool-complete-gw",
+                    role: .tool,
+                    content: "",
+                    timestamp: "now",
+                    tool: ToolActivity(id: "call-calc-1", name: "calculator", input: "40 + 2", output: "42", status: .complete)
+                )
+            ],
+            snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+        )
+        _ = recoverState.applyChatResume(resumeResultIdle)
+
+        // Verify no stale dashboard-profile entry remains and bot-profile entry is cleared
+        let updatedDashboardPending = cache.merge([], profile: dashboardProfile, sessionIDs: [botSessionID], includePendingTools: true)
+        let updatedBotPending = cache.merge([], profile: botProfile, sessionIDs: [botSessionID], includePendingTools: true)
+        XCTAssertTrue(updatedDashboardPending.isEmpty)
+        XCTAssertTrue(updatedBotPending.filter { $0.tool?.status == .running }.isEmpty, "Pending tool side store must be cleaned up when running == false")
+    }
 }

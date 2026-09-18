@@ -387,18 +387,13 @@ final class SessionPresentationCache {
         for cached: CachedMessage,
         gatewayMessages: [ChatMessage]
     ) -> Bool {
-        // Legacy rows without a stable tool id can only match by message id.
-        // If Hermes regenerates that id, a missed completion may temporarily
-        // render beside the recovered running card. Matching by name/input
-        // would be unsafe when same-name calls overlap or history is compact.
-        gatewayMessages.contains { message in
+        let cachedToolID = stableToolID(cached.toolID)
+        return gatewayMessages.contains { message in
             guard message.role == .tool,
-                  let tool = message.tool,
-                  normalized(tool.name) == cached.toolName else {
+                  let tool = message.tool else {
                 return false
             }
             if message.id == cached.id { return true }
-            let cachedToolID = stableToolID(cached.toolID)
             let gatewayToolID = stableToolID(tool.id)
             if let cachedToolID, let gatewayToolID {
                 return cachedToolID == gatewayToolID
@@ -1097,16 +1092,28 @@ final class SessionPresentationCache {
                 // Absolute maximum; no later candidate can outrank it.
                 return index
             } else if let tool = message.tool {
-                guard candidate.toolName == normalized(tool.name) else { continue }
-                // A locally recorded start belongs after the cached history.
-                // Do not let any generic same-name gateway row consume it:
-                // without a shared row or tool id, it can be a distinct
-                // invocation that happens to have the same input.
-                if candidate.toolStatus == .running,
-                   !hasSameStableToolIdentity(candidate, tool) {
+                let cachedToolID = stableToolID(candidate.toolID)
+                let gatewayToolID = stableToolID(tool.id)
+                let hasStableMatch: Bool
+                if let cachedToolID, let gatewayToolID {
+                    guard cachedToolID == gatewayToolID else { continue }
+                    hasStableMatch = true
+                } else if cachedToolID != nil || gatewayToolID != nil {
+                    // ID-bearing tools must not fall back to name matching.
                     continue
+                } else {
+                    guard candidate.toolName == normalized(tool.name) else { continue }
+                    // A locally recorded start belongs after the cached history.
+                    // Do not let any generic same-name gateway row consume it:
+                    // without a shared row or tool id, it can be a distinct
+                    // invocation that happens to have the same input.
+                    if candidate.toolStatus == .running {
+                        continue
+                    }
+                    hasStableMatch = false
                 }
-                score = 50
+                score = hasStableMatch ? 80 : 50
+                if candidate.toolName == normalized(tool.name) { score += 10 }
                 if let input = tool.input, candidate.toolInputSignature == Self.fingerprint(input) { score += 30 }
                 if let output = tool.output, candidate.toolOutputSignature == Self.fingerprint(output) { score += 30 }
                 if (tool.input ?? "").isEmpty, candidate.toolPreview?.isEmpty == false { score += 5 }
@@ -1135,16 +1142,6 @@ final class SessionPresentationCache {
         return bestIndex
     }
 
-    private func hasSameStableToolIdentity(
-        _ cached: CachedMessage,
-        _ gateway: ToolActivity
-    ) -> Bool {
-        guard let cachedID = stableToolID(cached.toolID),
-              let gatewayID = stableToolID(gateway.id) else {
-            return false
-        }
-        return cachedID == gatewayID
-    }
 
     /// Never replace a cached timestamp/preview with a newer history record
     /// that simply omits it. Exact content wins; matching row position is only

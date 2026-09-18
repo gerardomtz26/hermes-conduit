@@ -1245,6 +1245,64 @@ final class SessionPresentationCacheTests: XCTestCase {
         XCTAssertEqual(merged.count, 2)
     }
 
+    func testToolResolutionMatchesSameStableIDWithDifferentNames() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "stable-id-rename"
+        let sessionID = "sess-" + UUID().uuidString
+
+        let running = ChatMessage(
+            id: "msg-start",
+            role: .tool,
+            content: "",
+            timestamp: "start-ts",
+            tool: ToolActivity(id: "call-123", name: "bash", input: "echo hi", output: nil, status: .running)
+        )
+        cache.recordPendingToolStart(running, profile: profile, sessionIDs: [sessionID])
+
+        // Gateway completion reports a different tool name (e.g. terminal vs bash), but same stable call ID
+        let completed = ChatMessage(
+            id: "msg-complete",
+            role: .tool,
+            content: "",
+            timestamp: "complete-ts",
+            tool: ToolActivity(id: "call-123", name: "terminal", input: "echo hi", output: "hi\n", status: .complete)
+        )
+
+        let merged = cache.merge([completed], profile: profile, sessionIDs: [sessionID], includePendingTools: true)
+        XCTAssertEqual(merged.count, 1, "Completed ID-bearing tool must resolve the running card despite renamed tool")
+        XCTAssertEqual(merged.first?.tool?.status, .complete)
+        XCTAssertEqual(merged.first?.tool?.id, "call-123")
+    }
+
+    func testToolResolutionKeepsDifferentStableIDsDistinctEvenWithSameName() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "distinct-stable-ids"
+        let sessionID = "sess-" + UUID().uuidString
+
+        let running = ChatMessage(
+            id: "msg-start-1",
+            role: .tool,
+            content: "",
+            timestamp: "start-ts-1",
+            tool: ToolActivity(id: "call-alpha", name: "search", input: "query1", output: nil, status: .running)
+        )
+        cache.recordPendingToolStart(running, profile: profile, sessionIDs: [sessionID])
+
+        // Completion has a DIFFERENT stable ID with the same tool name
+        let completed = ChatMessage(
+            id: "msg-complete-2",
+            role: .tool,
+            content: "",
+            timestamp: "complete-ts-2",
+            tool: ToolActivity(id: "call-beta", name: "search", input: "query2", output: "result2", status: .complete)
+        )
+
+        let merged = cache.merge([completed], profile: profile, sessionIDs: [sessionID], includePendingTools: true)
+        XCTAssertEqual(merged.count, 2, "Different stable tool IDs must remain distinct even with identical names")
+        let runningCards = merged.filter { $0.tool?.status == .running }
+        XCTAssertEqual(runningCards.map { $0.tool?.id }, ["call-alpha"])
+    }
+
     /// Duplicate STRINGS inside sessionIDs behave like any other
     /// multi-alias lookup rather than a doubled pool.
     func testDuplicateStringsInsideSessionIDsDoNotDuplicateCandidates() throws {
