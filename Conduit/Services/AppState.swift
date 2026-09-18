@@ -6047,10 +6047,12 @@ final class AppState: ObservableObject {
         guard connection != nil else { return }
         // A cycle scheduled while the scene is inactive can never run, so
         // don't arm a timer or consume the queued reconnect purpose just to
-        // discard them when it fires. handleScenePhase(.active) establishes
-        // the transport on return instead — and intentionally recovers with
-        // .automaticReturn, upgrading the drop-time purpose, since resuming
-        // the saved session on foreground is the expected outcome.
+        // discard them when it fires. When reconnect work is deferred while
+        // the scene is inactive, handleScenePhase(.active) owns recovery when
+        // the app returns: if a visible conversation identity exists, foreground
+        // recovery repairs that same conversation using .preserveCurrent;
+        // .automaticReturn is used only when there is no current visible session
+        // identity to preserve.
         guard isSceneActive else { return }
         if reconnectTask == nil {
             recoverySequence.clearQueuedReconnect()
@@ -13484,9 +13486,7 @@ final class AppState: ObservableObject {
                 messages[updatedIndex].approval?.error = AppLocalization.string("This approval is no longer active — Hermes timed it out and continued.")
             }
             cacheMessagePresentation()
-            if let activeSessionId {
-                schedulePendingApprovalsRefresh(sessionId: activeSessionId, using: client)
-            }
+            schedulePendingApprovalsRefresh(sessionId: current.sessionId, using: client)
         } catch {
             guard profile == activeProfile, self.client === client else { return }
             guard let updatedIndex = messages.firstIndex(where: { $0.id == messageId }),
@@ -13501,11 +13501,11 @@ final class AppState: ObservableObject {
                 errorMessage = error.localizedDescription
             }
             cacheMessagePresentation()
-            if current.requestId == nil, let activeSessionId {
+            if current.requestId == nil {
                 switch messages[updatedIndex].approval?.status {
                 case .error:
                     schedulePendingApprovalsRefresh(
-                        sessionId: activeSessionId,
+                        sessionId: current.sessionId,
                         using: client,
                         replacingLegacyErrorMessageID: messageId
                     )
@@ -13514,7 +13514,7 @@ final class AppState: ObservableObject {
                     // identified queued rows can be added without replacing
                     // or re-arming its expired presentation.
                     schedulePendingApprovalsRefresh(
-                        sessionId: activeSessionId,
+                        sessionId: current.sessionId,
                         using: client
                     )
                 default:

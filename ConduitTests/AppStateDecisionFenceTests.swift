@@ -1483,7 +1483,8 @@ final class AppStateDecisionFenceTests: XCTestCase {
         XCTAssertEqual(appState.messages.first?.approval?.status, .submitting)
 
         // Queue refresh returns empty queue while submission is in-flight
-        let refreshTask = appState.schedulePendingApprovalsRefresh(sessionId: "default", using: appState.client!)
+        let client = try XCTUnwrap(appState.client)
+        let refreshTask = appState.schedulePendingApprovalsRefresh(sessionId: "default", using: client)
         await refreshTask.value
 
         // Card must NOT be retired because of active in-process live submission
@@ -1996,6 +1997,215 @@ final class AppStateDecisionFenceTests: XCTestCase {
         XCTAssertEqual(second.command, "cmd_b")
         XCTAssertNil(second.choice)
         XCTAssertNil(second.error)
+    }
+
+    func testApprovalRespondSuccessRefreshesApprovalSessionNotActiveSession() async throws {
+        let approvalSessionID = "session-A"
+        let activeSessionID = "session-B"
+        let approvalProfile = "profile-for-A"
+        let defaultProfile = "default-profile"
+
+        var refreshedSessionID: String? = nil
+        var refreshedProfile: String? = nil
+        let gate = Gate()
+
+        let lifecycleOps = ChatResumeLifecycleOperations(
+            pendingApprovalsWithProfile: { _, sessionId, profile in
+                refreshedSessionID = sessionId
+                refreshedProfile = profile
+                gate.signal()
+                return []
+            },
+            respondToApproval: { _, sessionId, requestId, choice, profile in
+                return true
+            }
+        )
+
+        let appState = makeAppState(chatResumeLifecycleOperations: lifecycleOps)
+        appState.setActiveProfileForTesting(defaultProfile)
+        appState.activeSessionId = activeSessionID
+        appState.noteBotChatSessionForTesting(approvalSessionID, profile: approvalProfile)
+
+        let card = ChatMessage(
+            id: "msg-approval-A",
+            role: .approval,
+            content: "Approve action",
+            timestamp: "1",
+            approval: ApprovalActivity(
+                sessionId: approvalSessionID,
+                requestId: "req-A-1",
+                command: "cmd_a",
+                description: "Approve action",
+                choices: ["allow", "deny"],
+                allowPermanent: false,
+                smartDenied: false,
+                status: .pending,
+                choice: nil,
+                error: nil
+            )
+        )
+        appState.messages = [card]
+
+        let transport = ClarifyFakeTransport()
+        let socket = ClarifyFakeSocket()
+        _ = try await installConnectedClient(appState, socket: socket, transport: transport)
+
+        await appState.respondToApproval(messageId: "msg-approval-A", choice: "allow")
+        try await gate.wait("pending approvals refresh")
+
+        XCTAssertEqual(
+            refreshedSessionID, approvalSessionID,
+            "Follow-up queue refresh after approval response must target the card's session, not activeSessionId"
+        )
+        XCTAssertEqual(
+            refreshedProfile, approvalProfile,
+            "Follow-up queue refresh must use the approval session's presentation profile"
+        )
+        XCTAssertEqual(appState.messages.first?.approval?.status, .approved)
+    }
+
+    func testLegacyApprovalRespondErrorRefreshesApprovalSessionWithReplacementID() async throws {
+        let approvalSessionID = "session-A"
+        let activeSessionID = "session-B"
+        let approvalProfile = "profile-for-A"
+        let defaultProfile = "default-profile"
+
+        var refreshedSessionID: String? = nil
+        var refreshedProfile: String? = nil
+        let gate = Gate()
+
+        let freshIdentifiedApproval = ApprovalActivity(
+            sessionId: approvalSessionID,
+            requestId: "req-fresh-1",
+            command: "cmd_fresh",
+            description: "Fresh command",
+            choices: ["once", "deny"],
+            allowPermanent: false,
+            smartDenied: false,
+            status: .pending,
+            choice: nil,
+            error: nil
+        )
+
+        let lifecycleOps = ChatResumeLifecycleOperations(
+            pendingApprovalsWithProfile: { _, sessionId, profile in
+                refreshedSessionID = sessionId
+                refreshedProfile = profile
+                gate.signal()
+                return [freshIdentifiedApproval]
+            },
+            respondToApproval: { _, sessionId, requestId, choice, profile in
+                throw HermesError.invalidResponse
+            }
+        )
+
+        let appState = makeAppState(chatResumeLifecycleOperations: lifecycleOps)
+        appState.setActiveProfileForTesting(defaultProfile)
+        appState.activeSessionId = activeSessionID
+        appState.noteBotChatSessionForTesting(approvalSessionID, profile: approvalProfile)
+
+        let card = ChatMessage(
+            id: "msg-legacy-A",
+            role: .approval,
+            content: "Legacy action",
+            timestamp: "1",
+            approval: ApprovalActivity(
+                sessionId: approvalSessionID,
+                requestId: nil,
+                command: "cmd_legacy",
+                description: "Legacy action",
+                choices: ["allow", "deny"],
+                allowPermanent: false,
+                smartDenied: false,
+                status: .pending,
+                choice: nil,
+                error: nil
+            )
+        )
+        appState.messages = [card]
+
+        let transport = ClarifyFakeTransport()
+        let socket = ClarifyFakeSocket()
+        _ = try await installConnectedClient(appState, socket: socket, transport: transport)
+
+        await appState.respondToApproval(messageId: "msg-legacy-A", choice: "allow")
+        try await gate.wait("pending approvals refresh")
+
+        XCTAssertEqual(
+            refreshedSessionID, approvalSessionID,
+            "Legacy error follow-up refresh must target the approval card's session, not activeSessionId"
+        )
+        XCTAssertEqual(
+            refreshedProfile, approvalProfile,
+            "Legacy error follow-up refresh must use the approval session's presentation profile"
+        )
+        XCTAssertEqual(appState.messages.count, 1)
+        XCTAssertEqual(appState.messages.first?.approval?.requestId, "req-fresh-1")
+    }
+
+    func testLegacyApprovalRespondExpiredRefreshesApprovalSession() async throws {
+        let approvalSessionID = "session-A"
+        let activeSessionID = "session-B"
+        let approvalProfile = "profile-for-A"
+        let defaultProfile = "default-profile"
+
+        var refreshedSessionID: String? = nil
+        var refreshedProfile: String? = nil
+        let gate = Gate()
+
+        let lifecycleOps = ChatResumeLifecycleOperations(
+            pendingApprovalsWithProfile: { _, sessionId, profile in
+                refreshedSessionID = sessionId
+                refreshedProfile = profile
+                gate.signal()
+                return []
+            },
+            respondToApproval: { _, sessionId, requestId, choice, profile in
+                throw RpcError(code: 4009, message: "no pending approval request")
+            }
+        )
+
+        let appState = makeAppState(chatResumeLifecycleOperations: lifecycleOps)
+        appState.setActiveProfileForTesting(defaultProfile)
+        appState.activeSessionId = activeSessionID
+        appState.noteBotChatSessionForTesting(approvalSessionID, profile: approvalProfile)
+
+        let card = ChatMessage(
+            id: "msg-legacy-expired",
+            role: .approval,
+            content: "Legacy action",
+            timestamp: "1",
+            approval: ApprovalActivity(
+                sessionId: approvalSessionID,
+                requestId: nil,
+                command: "cmd_legacy",
+                description: "Legacy action",
+                choices: ["allow", "deny"],
+                allowPermanent: false,
+                smartDenied: false,
+                status: .pending,
+                choice: nil,
+                error: nil
+            )
+        )
+        appState.messages = [card]
+
+        let transport = ClarifyFakeTransport()
+        let socket = ClarifyFakeSocket()
+        _ = try await installConnectedClient(appState, socket: socket, transport: transport)
+
+        await appState.respondToApproval(messageId: "msg-legacy-expired", choice: "allow")
+        try await gate.wait("pending approvals refresh")
+
+        XCTAssertEqual(
+            refreshedSessionID, approvalSessionID,
+            "Legacy expired follow-up refresh must target the approval card's session, not activeSessionId"
+        )
+        XCTAssertEqual(
+            refreshedProfile, approvalProfile,
+            "Legacy expired follow-up refresh must use the approval session's presentation profile"
+        )
+        XCTAssertEqual(appState.messages.first?.approval?.status, .expired)
     }
 }
 

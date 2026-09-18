@@ -7860,30 +7860,102 @@ final class AppStateForegroundLifecycleTests: XCTestCase {
         box.client.disconnect()
     }
 
-    // MARK: - Composer user-edit ownership
+    // MARK: - Foreground recovery purpose
 
-    /// The slow/flaky health-check window: the foreground attempt suspends
-    /// inside the transport liveness check, the user starts typing into the
-    /// visible conversation, and the health check then fails. The edit keeps
-    /// its existing ownership guarantee while the foreground recovery repairs
-    /// the same visible session.
-    func testForegroundHealthCheckFailureRespectsComposerUserEditOwnership() async throws {
-        try await assertForegroundHealthCheckFailureFallback(
-            userEditsDuringHealthCheck: true
+    /// When no visible conversation identity exists on foreground, transport
+    /// recovery falls back to .automaticReturn and selects the saved session.
+    func testForegroundHealthCheckFailureWithoutVisibleSessionRestoresSavedSession() async throws {
+        let savedOlder = session("stored-b")
+        let healthGate = LifecycleSuspension()
+        var mintCount = 0
+        var openedSessionIDs: [String] = []
+        var recoveryPurposeDuringReconnect: ChatResumeSyncPurpose? = nil
+        var captureRecoveryPurpose: (() -> Void)? = nil
+        let harness = makeHarness(
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                connectClient: { _ in },
+                loadCatalog: { _, _ in [savedOlder] },
+                mintTicket: { _ in
+                    mintCount += 1
+                    captureRecoveryPurpose?()
+                    return "reconnect-ticket"
+                },
+                openSession: { _, sessionID, _ in
+                    openedSessionIDs.append(sessionID)
+                    return SessionResumeResult(
+                        sessionId: sessionID,
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                persistedTranscript: { _, _, _ in
+                    .payload([
+                        "messages": [
+                            ["id": "user", "role": "user", "content": "Question", "timestamp": "1"]
+                        ],
+                        "pagination": ["limit": 120, "offset": 0, "order": "latest", "returned": 1]
+                    ])
+                },
+                refreshContext: { _, _ in },
+                verifyTransportHealth: { _ in
+                    await healthGate.suspend()
+                    throw URLError(.networkConnectionLost)
+                },
+                probeActiveSessions: { _ in [] },
+                loadProfiles: {},
+                loadBusyInputMode: { _ in },
+                loadProfileDisplayPreferences: {},
+                loadSlashCommands: {}
+            )
         )
+        captureRecoveryPurpose = {
+            recoveryPurposeDuringReconnect = harness.recoverySequence.currentPurpose
+        }
+        let box = await installConnectedClient(into: harness)
+        harness.appState.sessions = [savedOlder]
+        harness.appState.activeSessionId = nil
+        harness.coordinator.rememberSessionID(savedOlder.id, for: "default")
+
+        harness.appState.handleScenePhase(.background)
+        let activation = harness.appState.handleScenePhase(.active)
+        await healthGate.waitUntilSuspended()
+
+        healthGate.resume()
+        if let activation {
+            await activation.value
+        }
+
+        XCTAssertEqual(
+            mintCount, 1,
+            "The foreground attempt must reconnect exactly once"
+        )
+        XCTAssertEqual(
+            recoveryPurposeDuringReconnect, .automaticReturn,
+            "Foreground transport recovery without a visible session must proceed with .automaticReturn"
+        )
+        XCTAssertEqual(
+            openedSessionIDs, [savedOlder.id],
+            "Transport recovery without a visible session must resume the saved session"
+        )
+        XCTAssertEqual(harness.appState.activeSessionId, savedOlder.id)
+        XCTAssertEqual(
+            harness.recoverySequence.currentPurpose, .preserveCurrent,
+            "Recovery sequence must settle back to baseline"
+        )
+        XCTAssertTrue(harness.appState.isConnected)
+        XCTAssertFalse(harness.appState.isConnecting)
+        XCTAssertEqual(harness.appState.turnState, .idle)
+        box.client.disconnect()
     }
 
     /// A transport failure is not navigation authority. Even before the
     /// composer is edited, reconnecting must repair the visible conversation
     /// rather than applying the saved-session fallback to an older chat.
     func testForegroundHealthCheckFailurePreservesVisibleSession() async throws {
-        try await assertForegroundHealthCheckFailureFallback(
-            userEditsDuringHealthCheck: false
-        )
+        try await assertForegroundHealthCheckFailureFallback()
     }
 
     private func assertForegroundHealthCheckFailureFallback(
-        userEditsDuringHealthCheck: Bool,
         file: StaticString = #filePath,
         line: UInt = #line
     ) async throws {
@@ -7942,10 +8014,6 @@ final class AppStateForegroundLifecycleTests: XCTestCase {
         harness.appState.handleScenePhase(.background)
         let activation = harness.appState.handleScenePhase(.active)
         await healthGate.waitUntilSuspended()
-
-        if userEditsDuringHealthCheck {
-            harness.appState.noteComposerUserEdit()
-        }
 
         healthGate.resume()
         if let activation {
