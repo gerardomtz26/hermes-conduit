@@ -1431,6 +1431,127 @@ final class SessionPresentationCacheTests: XCTestCase {
         XCTAssertEqual(runningCards.map { $0.tool?.id }, ["call-alpha"])
     }
 
+    func testRelaunchUniqueIdlessStartResolvesAgainstIdentifiedCompletion() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "unique-idless"
+        let sessionID = "sess-" + UUID().uuidString
+
+        let running = ChatMessage(
+            id: "msg-idless-start",
+            role: .tool,
+            content: "",
+            timestamp: "start-ts",
+            tool: ToolActivity(id: nil, name: "read_file", input: "path.txt", output: nil, status: .running)
+        )
+        cache.recordPendingToolStart(running, profile: profile, sessionIDs: [sessionID])
+
+        let completed = ChatMessage(
+            id: "msg-completed",
+            role: .tool,
+            content: "",
+            timestamp: "complete-ts",
+            tool: ToolActivity(id: "call-complete-1", name: "read_file", input: "path.txt", output: "file contents", status: .complete)
+        )
+
+        let merged = cache.merge([completed], profile: profile, sessionIDs: [sessionID], includePendingTools: true)
+        XCTAssertEqual(merged.count, 1, "Unique ID-less running start must resolve against identified completion")
+        XCTAssertEqual(merged.first?.tool?.status, .complete)
+        XCTAssertEqual(merged.first?.tool?.id, "call-complete-1")
+    }
+
+    func testRelaunchAmbiguousIdlessStartsRemainConservative() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "ambiguous-idless"
+        let sessionID = "sess-" + UUID().uuidString
+
+        let running1 = ChatMessage(
+            id: "msg-idless-1",
+            role: .tool,
+            content: "",
+            timestamp: "start-ts-1",
+            tool: ToolActivity(id: nil, name: "search", input: "q1", output: nil, status: .running)
+        )
+        let running2 = ChatMessage(
+            id: "msg-idless-2",
+            role: .tool,
+            content: "",
+            timestamp: "start-ts-2",
+            tool: ToolActivity(id: nil, name: "search", input: "q2", output: nil, status: .running)
+        )
+        cache.recordPendingToolStart(running1, profile: profile, sessionIDs: [sessionID])
+        cache.recordPendingToolStart(running2, profile: profile, sessionIDs: [sessionID])
+
+        let completed = ChatMessage(
+            id: "msg-completed",
+            role: .tool,
+            content: "",
+            timestamp: "complete-ts",
+            tool: ToolActivity(id: "call-search-done", name: "search", input: "q1", output: "done", status: .complete)
+        )
+
+        let merged = cache.merge([completed], profile: profile, sessionIDs: [sessionID], includePendingTools: true)
+        // With 2 ambiguous ID-less running starts for "search", cache must refuse to guess which resolved
+        XCTAssertTrue(merged.contains { $0.id == "msg-idless-1" && $0.tool?.status == .running })
+        XCTAssertTrue(merged.contains { $0.id == "msg-idless-2" && $0.tool?.status == .running })
+        XCTAssertEqual(merged.count, 3, "Ambiguous ID-less running starts must be conservatively preserved")
+    }
+
+    func testRelaunchStableIdExactMatchResolvesDespiteAmbiguity() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "stable-id-exact"
+        let sessionID = "sess-" + UUID().uuidString
+
+        let running = ChatMessage(
+            id: "msg-running-exact",
+            role: .tool,
+            content: "",
+            timestamp: "start-ts",
+            tool: ToolActivity(id: "call-exact-42", name: "bash", input: "echo hi", output: nil, status: .running)
+        )
+        cache.recordPendingToolStart(running, profile: profile, sessionIDs: [sessionID])
+
+        let completed = ChatMessage(
+            id: "msg-completed-exact",
+            role: .tool,
+            content: "",
+            timestamp: "complete-ts",
+            tool: ToolActivity(id: "call-exact-42", name: "bash", input: "echo hi", output: "hi\n", status: .complete)
+        )
+
+        let merged = cache.merge([completed], profile: profile, sessionIDs: [sessionID], includePendingTools: true)
+        XCTAssertEqual(merged.count, 1, "Stable-ID exact match resolves the running tool card")
+        XCTAssertEqual(merged.first?.tool?.status, .complete)
+        XCTAssertEqual(merged.first?.tool?.id, "call-exact-42")
+    }
+
+    func testRelaunchStableIdConflictRemainsConservative() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "stable-id-conflict"
+        let sessionID = "sess-" + UUID().uuidString
+
+        let running = ChatMessage(
+            id: "msg-running-x",
+            role: .tool,
+            content: "",
+            timestamp: "start-ts",
+            tool: ToolActivity(id: "call-X", name: "bash", input: "ls", output: nil, status: .running)
+        )
+        cache.recordPendingToolStart(running, profile: profile, sessionIDs: [sessionID])
+
+        let completed = ChatMessage(
+            id: "msg-completed-y",
+            role: .tool,
+            content: "",
+            timestamp: "complete-ts",
+            tool: ToolActivity(id: "call-Y", name: "bash", input: "ls", output: "file.txt", status: .complete)
+        )
+
+        let merged = cache.merge([completed], profile: profile, sessionIDs: [sessionID], includePendingTools: true)
+        XCTAssertEqual(merged.count, 2, "Conflicting stable IDs must not collapse by tool name")
+        XCTAssertTrue(merged.contains { $0.tool?.id == "call-X" && $0.tool?.status == .running })
+        XCTAssertTrue(merged.contains { $0.tool?.id == "call-Y" && $0.tool?.status == .complete })
+    }
+
     /// Duplicate STRINGS inside sessionIDs behave like any other
     /// multi-alias lookup rather than a doubled pool.
     func testDuplicateStringsInsideSessionIDsDoNotDuplicateCandidates() throws {

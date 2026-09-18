@@ -2394,6 +2394,7 @@ struct ApprovalCard: View {
                     } else if approval.status == .expired {
                         Image(systemName: "clock.badge.xmark")
                             .foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
                     }
                     MessageTimestampLabel(timestamp: message.timestamp, tone: .supporting)
                 }
@@ -2416,7 +2417,10 @@ struct ApprovalCard: View {
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(statusColor(for: approval.status))
                 } else if approval.status == .expired {
-                    Text(AppLocalization.string("No longer active"))
+                    let explanation = approval.error?.isEmpty == false
+                        ? approval.error!
+                        : AppLocalization.string("This approval is no longer active — Hermes timed it out and continued.")
+                    Text(explanation)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
@@ -2456,7 +2460,7 @@ struct ApprovalCard: View {
                     .font(.subheadline.weight(.medium))
                 }
 
-                if let error = approval.error, !error.isEmpty {
+                if approval.status != .expired, let error = approval.error, !error.isEmpty {
                     Label(error, systemImage: "exclamationmark.circle")
                         .font(.caption)
                         .foregroundStyle(.red)

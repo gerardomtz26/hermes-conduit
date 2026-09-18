@@ -281,13 +281,31 @@ final class SessionPresentationCache {
         }
 
         if includePendingTools {
+            var eligibleIDLessRunningByName: [String: Set<String>] = [:]
+            for index in remaining {
+                let presentation = cached[index]
+                guard presentation.role == .tool,
+                      presentation.toolStatus == .running,
+                      stableToolID(presentation.toolID) == nil,
+                      let name = normalizedToolName(name: presentation.toolName, displayName: presentation.toolDisplayName) else {
+                    continue
+                }
+                eligibleIDLessRunningByName[name, default: []].insert(presentation.id)
+            }
+            let uniqueIDLessRunningNames = Set(
+                eligibleIDLessRunningByName.compactMap { name, ids in
+                    ids.count == 1 ? name : nil
+                }
+            )
+
             for index in remaining.sorted() {
                 let presentation = cached[index]
                 guard presentation.role == .tool,
                       presentation.toolStatus == .running,
                       !containsResolvedTool(
                           for: presentation,
-                          gatewayMessages: messages
+                          gatewayMessages: messages,
+                          uniqueIDLessRunningNames: uniqueIDLessRunningNames
                       ) else {
                     continue
                 }
@@ -385,9 +403,11 @@ final class SessionPresentationCache {
 
     private func containsResolvedTool(
         for cached: CachedMessage,
-        gatewayMessages: [ChatMessage]
+        gatewayMessages: [ChatMessage],
+        uniqueIDLessRunningNames: Set<String> = []
     ) -> Bool {
         let cachedToolID = stableToolID(cached.toolID)
+        let cachedNormalizedName = normalizedToolName(name: cached.toolName, displayName: cached.toolDisplayName)
         return gatewayMessages.contains { message in
             guard message.role == .tool,
                   let tool = message.tool else {
@@ -398,8 +418,28 @@ final class SessionPresentationCache {
             if let cachedToolID, let gatewayToolID {
                 return cachedToolID == gatewayToolID
             }
+            if cachedToolID == nil,
+               gatewayToolID != nil,
+               tool.status == .complete,
+               let cachedNormalizedName,
+               uniqueIDLessRunningNames.contains(cachedNormalizedName),
+               normalizedToolName(name: tool.name, displayName: nil) == cachedNormalizedName {
+                return true
+            }
             return false
         }
+    }
+
+    private func normalizedToolName(name: String?, displayName: String?) -> String? {
+        if let name {
+            let trimmed = normalized(name)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        if let displayName {
+            let trimmed = normalized(displayName)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return nil
     }
 
     private func stableToolID(_ id: String?) -> String? {
