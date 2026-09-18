@@ -1402,10 +1402,13 @@ final class HermesClient: ObservableObject {
         let result = try await rpc("approval.respond", params: params)
         // Current Hermes reports the number of queue entries resolved. Older
         // gateways omitted the field after a successful response.
-        guard let rawResolved = result.objectValue?["resolved"] else {
+        guard let object = result.objectValue else {
+            throw HermesError.invalidResponse
+        }
+        guard let rawResolved = object["resolved"] else {
             return true
         }
-        guard let resolved = Self.exactIntValue(rawResolved) else {
+        guard let resolved = Self.exactIntValue(rawResolved), resolved >= 0 else {
             throw HermesError.invalidResponse
         }
         return resolved > 0

@@ -13334,6 +13334,13 @@ final class AppState: ObservableObject {
               current.status == .pending || current.status == .error else { return }
         let decisionKey = SessionPresentationCache.decisionKey(for: messages[index])
 
+        let submissionIdentity = current.requestId.map { ApprovalSubmissionIdentity.identified($0) }
+            ?? ApprovalSubmissionIdentity.legacy(current.sessionId)
+        liveApprovalSubmissions.insert(submissionIdentity)
+        defer {
+            liveApprovalSubmissions.remove(submissionIdentity)
+        }
+
         messages[index].approval?.status = .submitting
         messages[index].approval?.choice = choice
         messages[index].approval?.error = nil
@@ -14769,22 +14776,44 @@ final class AppState: ObservableObject {
             resetReasoningSegment()
             let toolID = eventToolID?.trimmingCharacters(in: .whitespacesAndNewlines)
             let stableToolID = toolID?.isEmpty == false ? toolID : nil
+            let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             // Update the matching running tool card in place instead of
             // appending a duplicate. This keeps input + output together in
             // one chronological entry, matching how the HTTP API returns
             // stored messages on reload.
             let matchingIndex: Int?
+            var resolvedCacheToolID = stableToolID
             if let stableToolID {
-                // An ID-bearing completion must never fall back to the tool
-                // name: an unknown ID is a distinct call, not a license to
-                // complete the newest same-name card.
-                matchingIndex = messages.lastIndex(where: {
-                    $0.role == .tool
-                        && $0.tool?.id == stableToolID
-                })
+                if let exactIndex = messages.lastIndex(where: {
+                    $0.role == .tool && $0.tool?.id == stableToolID
+                }) {
+                    matchingIndex = exactIndex
+                } else {
+                    // Check if there is an unambiguous ID-less running card for the same tool.
+                    // If exactly one exists, adopt it rather than leaving a zombie running card.
+                    // If multiple exist (or none), do not guess.
+                    let candidates = messages.indices.filter { idx in
+                        guard messages[idx].role == .tool,
+                              let tool = messages[idx].tool,
+                              tool.status == .running,
+                              tool.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedName else {
+                            return false
+                        }
+                        let existingID = tool.id?.trimmingCharacters(in: .whitespacesAndNewlines)
+                        return existingID == nil || existingID?.isEmpty == true
+                    }
+                    if candidates.count == 1 {
+                        matchingIndex = candidates[0]
+                        resolvedCacheToolID = nil
+                    } else {
+                        matchingIndex = nil
+                    }
+                }
             } else {
                 matchingIndex = messages.lastIndex(where: {
-                    $0.role == .tool && $0.tool?.name == name && $0.tool?.status == .running
+                    $0.role == .tool
+                        && $0.tool?.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedName
+                        && $0.tool?.status == .running
                 })
             }
             if let index = matchingIndex {
@@ -14807,7 +14836,7 @@ final class AppState: ObservableObject {
             }
             sessionPresentationCache.resolvePendingTool(
                 named: name,
-                toolID: stableToolID,
+                toolID: resolvedCacheToolID,
                 profile: presentationProfile(for: streamSessionId),
                 sessionIDs: presentationCacheSessionIDs(for: streamSessionId)
             )
@@ -14896,13 +14925,46 @@ final class AppState: ObservableObject {
             )
         }
 
+    private enum ApprovalSubmissionIdentity: Hashable {
+        case identified(String)
+        case legacy(String)
+    }
+
+    /// In-memory tokens for approvals currently submitting an RPC on this device.
+    /// This state is ephemeral and never persisted. Restored approval cards
+    /// from disk without an active RPC in flight yield to authoritative replays.
+    private var liveApprovalSubmissions = Set<ApprovalSubmissionIdentity>()
+
+    private func hasLiveApprovalSubmission(
+        for activity: ApprovalActivity,
+        equivalentSessionIDs: Set<String>? = nil
+    ) -> Bool {
+        if let requestId = activity.requestId {
+            return liveApprovalSubmissions.contains(.identified(requestId))
+        }
+        if liveApprovalSubmissions.contains(.legacy(activity.sessionId)) {
+            return true
+        }
+        if let equivalentSessionIDs {
+            return liveApprovalSubmissions.contains(where: {
+                if case .legacy(let sid) = $0 {
+                    return equivalentSessionIDs.contains(sid)
+                }
+                return false
+            })
+        }
+        return false
+    }
+
     private func shouldPreserveLocalApprovalState(
         existing: ApprovalActivity,
-        incoming: ApprovalActivity,
-        authoritative: Bool
+        authoritative: Bool,
+        hasLiveSubmission: Bool
     ) -> Bool {
         switch existing.status {
-        case .submitting, .approved, .rejected, .expired:
+        case .submitting:
+            return hasLiveSubmission || !authoritative
+        case .approved, .rejected, .expired:
             return true
         case .error:
             return !authoritative
@@ -14921,20 +14983,6 @@ final class AppState: ObservableObject {
     ) {
         let equivalentSessionIDs = activeChatScrollSessionIdentity.equivalentSessionIDs
             .union([activity.sessionId])
-        let targetKey = activity.requestId.map { "approval-request:\($0)" }
-            ?? "approval:\(activity.sessionId)"
-
-        // While a legacy submission is in flight, keep the card stable so
-        // approval.respond can settle it. Never let an authoritative snapshot
-        // (whether identified or legacy) overwrite a card that is submitting.
-        if messages.contains(where: { message in
-            guard let existing = message.approval else { return false }
-            return equivalentSessionIDs.contains(existing.sessionId)
-                && existing.requestId == nil
-                && existing.status == .submitting
-        }) {
-            return
-        }
 
         if authoritative, activity.requestId != nil {
             messages.removeAll { message in
@@ -14953,14 +15001,35 @@ final class AppState: ObservableObject {
                 )
             }
         }
-        if let index = messages.lastIndex(where: {
-            SessionPresentationCache.decisionKey(for: $0) == targetKey
-                && $0.approval != nil
-        }), let existing = messages[index].approval {
+
+        let matchingIndex: Int?
+        if let requestId = activity.requestId {
+            matchingIndex = messages.lastIndex(where: {
+                $0.approval?.requestId == requestId
+            })
+        } else {
+            // Legacy approvals share the session namespace, but multiple
+            // sequential commands in the same session each produce a legacy
+            // approval. A terminal card (.approved, .rejected, .expired) from an
+            // earlier command must not swallow a subsequent legacy approval.
+            // An incoming legacy event matches only an active existing card.
+            matchingIndex = messages.lastIndex(where: {
+                guard let existing = $0.approval else { return false }
+                return existing.requestId == nil
+                    && equivalentSessionIDs.contains(existing.sessionId)
+                    && (existing.status == .pending || existing.status == .submitting || existing.status == .error)
+            })
+        }
+
+        if let index = matchingIndex, let existing = messages[index].approval {
+            let hasLiveSubmission = hasLiveApprovalSubmission(
+                for: existing,
+                equivalentSessionIDs: equivalentSessionIDs
+            )
             if shouldPreserveLocalApprovalState(
                 existing: existing,
-                incoming: activity,
-                authoritative: authoritative
+                authoritative: authoritative,
+                hasLiveSubmission: hasLiveSubmission
             ) {
                 var replay = activity
                 replay.status = existing.status

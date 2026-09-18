@@ -1616,7 +1616,7 @@ final class SessionPresentationCacheTests: XCTestCase {
         XCTAssertEqual(card.status, .pending)
     }
 
-    func testAuthoritativeApprovalPreservesSameCachedSubmittingRequestAndDropsLegacyAmbiguity() throws {
+    func testAuthoritativeApprovalResetsSameCachedSubmittingRequestAndDropsLegacyAmbiguity() throws {
         let suiteName = "conduit.tests.pending-approval-authority-\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
         let cache = SessionPresentationCache(defaults: defaults)
@@ -1652,7 +1652,7 @@ final class SessionPresentationCacheTests: XCTestCase {
         XCTAssertEqual(approvals.count, 1)
         XCTAssertEqual(approvals[0].requestId, "req-current")
         XCTAssertEqual(approvals[0].description, "Current text")
-        XCTAssertEqual(approvals[0].status, .submitting)
+        XCTAssertEqual(approvals[0].status, .pending)
     }
 
     func testCacheKeepsTwoRequestIdentifiedApprovalsForOneSessionDistinct() throws {

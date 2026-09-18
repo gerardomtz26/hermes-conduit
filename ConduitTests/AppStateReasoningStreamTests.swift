@@ -540,6 +540,36 @@ final class AppStateReasoningStreamTests: XCTestCase {
         XCTAssertEqual(tools[1].output, "done")
     }
 
+    func testIdentifiedCompletionAdoptsUniqueIdlessRunningTool() {
+        let state = makeAppState()
+        installActiveSession(state, id: "stored-a")
+        state.handleStreamEvent(.toolStart(sessionId: "stored-a", toolName: "terminal", toolInput: "git status", toolID: nil))
+        state.handleStreamEvent(.toolComplete(sessionId: "stored-a", toolName: "terminal", toolOutput: "clean", toolID: "call-xyz"))
+
+        let tools = state.messages.compactMap(\.tool)
+        XCTAssertEqual(tools.count, 1, "An identified completion should adopt a unique ID-less running card")
+        XCTAssertEqual(tools[0].id, "call-xyz")
+        XCTAssertEqual(tools[0].status, .complete)
+        XCTAssertEqual(tools[0].input, "git status")
+        XCTAssertEqual(tools[0].output, "clean")
+    }
+
+    func testIdentifiedCompletionDoesNotAdoptAmbiguousIdlessRunningTools() {
+        let state = makeAppState()
+        installActiveSession(state, id: "stored-a")
+        state.handleStreamEvent(.toolStart(sessionId: "stored-a", toolName: "terminal", toolInput: "first", toolID: nil))
+        state.handleStreamEvent(.toolStart(sessionId: "stored-a", toolName: "terminal", toolInput: "second", toolID: nil))
+        state.handleStreamEvent(.toolComplete(sessionId: "stored-a", toolName: "terminal", toolOutput: "done", toolID: "call-xyz"))
+
+        let tools = state.messages.compactMap(\.tool)
+        XCTAssertEqual(tools.count, 3, "An identified completion must not guess when multiple ID-less running cards exist")
+        XCTAssertEqual(tools[0].status, .running)
+        XCTAssertEqual(tools[1].status, .running)
+        XCTAssertEqual(tools[2].status, .complete)
+        XCTAssertEqual(tools[2].id, "call-xyz")
+        XCTAssertEqual(tools[2].output, "done")
+    }
+
     func testMultiSegmentTurnKeepsBothSegmentsAndSkipsCompletionTrace() {
         let state = makeAppState()
         installActiveSession(state, id: "stored-a")

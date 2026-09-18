@@ -511,19 +511,20 @@ final class AppStateDecisionFenceTests: XCTestCase {
             ])
         ))
 
-        XCTAssertEqual(appState.messages.count, 1)
+        // Finding 3: Identified approval must coexist rather than being dropped
+        XCTAssertEqual(appState.messages.count, 2)
         XCTAssertEqual(appState.messages[0].id, originalMessageID)
         XCTAssertEqual(appState.messages[0].approval?.status, .submitting)
+        XCTAssertEqual(appState.messages[1].approval?.requestId, "approval-next")
+        XCTAssertEqual(appState.messages[1].approval?.status, .pending)
 
         deliverResult(socket, rpcID: parked.rpcID, result: ["resolved": 1])
         await parked.task.value
 
         XCTAssertEqual(appState.messages.first?.id, originalMessageID)
         XCTAssertEqual(appState.messages.first?.approval?.status, .approved)
-        XCTAssertNil(
-            appState.messages.first(where: { $0.approval?.requestId == "approval-next" }),
-            "The pre-response snapshot must not re-arm the decision that just settled"
-        )
+        XCTAssertEqual(appState.messages.last?.approval?.requestId, "approval-next")
+        XCTAssertEqual(appState.messages.last?.approval?.status, .pending)
 
         for _ in 0..<1_000 where socket.sentTexts.count < 2 { await Task.yield() }
         let freshRefresh = appState.schedulePendingApprovalsRefresh(
@@ -537,6 +538,7 @@ final class AppStateDecisionFenceTests: XCTestCase {
         ]])
         await freshRefresh.value
 
+        XCTAssertEqual(appState.messages.count, 2)
         XCTAssertEqual(appState.messages.first?.approval?.status, .approved)
         XCTAssertEqual(appState.messages.last?.approval?.requestId, "approval-next")
         XCTAssertEqual(appState.messages.last?.approval?.status, .pending)
@@ -572,10 +574,13 @@ final class AppStateDecisionFenceTests: XCTestCase {
         deliverError(socket, rpcID: parked.rpcID, code: 4002, message: "denied by policy")
         await parked.task.value
 
-        XCTAssertEqual(appState.messages.count, 1)
+        // Legacy approval fails, identified card coexists as pending
+        XCTAssertEqual(appState.messages.count, 2)
         XCTAssertEqual(appState.messages[0].id, originalMessageID)
         XCTAssertEqual(appState.messages[0].approval?.status, .error)
         XCTAssertNil(appState.messages[0].approval?.requestId)
+        XCTAssertEqual(appState.messages[1].approval?.requestId, "approval-stale")
+        XCTAssertEqual(appState.messages[1].approval?.status, .pending)
     }
 
     func testLegacySubmissionFailureFreshPendingSnapshotReplacesErrorWithoutDuplicate() async throws {
@@ -1001,6 +1006,156 @@ final class AppStateDecisionFenceTests: XCTestCase {
         deliverResult(socket, rpcID: rpcID, result: ["resolved": 1])
         await task.value
         XCTAssertEqual(appState.messages.first(where: { $0.id == "approval-1" })?.approval?.status, .approved)
+    }
+
+    func testSequentialLegacyApprovalsDoNotSwallowSubsequentApprovals() {
+        for terminalStatus in [ApprovalActivity.Status.approved, .rejected, .expired] {
+            let appState = makeAppState()
+            appState.activeSessionId = "default"
+            let terminalApproval = ChatMessage(
+                id: "approval-legacy-prior-\(terminalStatus)",
+                role: .approval,
+                content: "First command approval",
+                timestamp: "1",
+                approval: ApprovalActivity(
+                    sessionId: "default",
+                    requestId: nil,
+                    command: "make build",
+                    description: "First command approval",
+                    choices: ["approve", "deny"],
+                    allowPermanent: false,
+                    smartDenied: false,
+                    status: terminalStatus,
+                    choice: terminalStatus == .approved ? "approve" : (terminalStatus == .rejected ? "deny" : nil),
+                    error: terminalStatus == .expired ? "Expired" : nil
+                )
+            )
+            appState.messages = [terminalApproval]
+
+            // Subsequent legacy approval arrives for a new command in the same session
+            let nextLegacyApproval = ApprovalActivity(
+                sessionId: "default",
+                requestId: nil,
+                command: "make test",
+                description: "Second command approval",
+                choices: ["approve", "deny"],
+                allowPermanent: false,
+                smartDenied: false,
+                status: .pending,
+                choice: nil,
+                error: nil
+            )
+            appState.handleStreamEvent(.approval(sessionId: "default", activity: nextLegacyApproval))
+
+            // The terminal legacy card must NOT swallow the new approval
+            XCTAssertEqual(appState.messages.count, 2, "A new legacy approval must append after a terminal legacy card")
+            XCTAssertEqual(appState.messages[0].approval?.status, terminalStatus)
+            XCTAssertEqual(appState.messages[0].approval?.command, "make build")
+            XCTAssertEqual(appState.messages[1].approval?.status, .pending)
+            XCTAssertEqual(appState.messages[1].approval?.command, "make test")
+            XCTAssertEqual(appState.messages[1].approval?.description, "Second command approval")
+        }
+    }
+
+    func testAuthoritativeReplayResetsRestoredSubmittingCardWhenNoLiveSubmission() {
+        // Test both identified and legacy restored cards
+        let testCases: [(name: String, requestId: String?)] = [
+            ("identified", "req-restored-1"),
+            ("legacy", nil)
+        ]
+        for testCase in testCases {
+            let appState = makeAppState()
+            appState.activeSessionId = "default"
+            // Simulate a card that was persisted as .submitting before an app restart
+            let restoredCard = ChatMessage(
+                id: "approval-\(testCase.name)",
+                role: .approval,
+                content: "Deploy command",
+                timestamp: "1",
+                approval: ApprovalActivity(
+                    sessionId: "default",
+                    requestId: testCase.requestId,
+                    command: "deploy",
+                    description: "Deploy command",
+                    choices: ["approve", "deny"],
+                    allowPermanent: false,
+                    smartDenied: false,
+                    status: .submitting,
+                    choice: "approve",
+                    error: nil
+                )
+            )
+            appState.messages = [restoredCard]
+
+            // Authoritative replay arrives from gateway with .pending
+            if let reqId = testCase.requestId {
+                let snapshot = SessionRuntimeSnapshot(object: [
+                    "pending_approval": .object([
+                        "request_id": .string(reqId),
+                        "command": .string("deploy"),
+                        "description": .string("Deploy command")
+                    ])
+                ])
+                appState.handleStreamEvent(.sessionInfo(sessionId: "default", snapshot: snapshot))
+            } else {
+                let snapshot = SessionRuntimeSnapshot(object: [
+                    "pending_approval": .object([
+                        "command": .string("deploy"),
+                        "description": .string("Deploy command")
+                    ])
+                ])
+                appState.handleStreamEvent(.sessionInfo(sessionId: "default", snapshot: snapshot))
+            }
+
+            XCTAssertEqual(appState.messages.count, 1)
+            let updated = try! XCTUnwrap(appState.messages.first?.approval)
+            XCTAssertEqual(updated.status, .pending, "Authoritative replay must reset a restored .submitting card with no live RPC token")
+            XCTAssertNil(updated.choice, "Pending choice should be cleared so user can interact again")
+        }
+    }
+
+    func testLegacySubmittingDoesNotDropQueuedIdentifiedApproval() async throws {
+        let appState = makeAppState()
+        let legacyApproval = approvalFixture(status: .pending, requestId: nil)
+        appState.messages = [legacyApproval]
+        appState.activeSessionId = "default"
+
+        let transport = ClarifyFakeTransport()
+        let socket = ClarifyFakeSocket()
+        _ = try await installConnectedClient(appState, socket: socket, transport: transport)
+
+        // Legacy card begins submitting
+        let parked = try await parkApprovalRespond(appState: appState, socket: socket, choice: "approve")
+        XCTAssertEqual(appState.messages.first?.approval?.status, .submitting)
+        XCTAssertEqual(appState.messages.count, 1)
+
+        // While legacy is submitting, an unrelated identified approval arrives via stream event
+        let identifiedApproval = ApprovalActivity(
+            sessionId: "default",
+            requestId: "req-identified-queued",
+            command: "delete-db",
+            description: "Delete the database?",
+            choices: ["approve", "deny"],
+            allowPermanent: false,
+            smartDenied: false,
+            status: .pending,
+            choice: nil,
+            error: nil
+        )
+        appState.handleStreamEvent(.approval(sessionId: "default", activity: identifiedApproval))
+
+        // Both cards must coexist: legacy submitting is not dropped, identified pending is appended
+        XCTAssertEqual(appState.messages.count, 2, "Identified approval must not be dropped while legacy is submitting")
+        let legacyCard = try XCTUnwrap(appState.messages.first(where: { $0.approval?.requestId == nil })?.approval)
+        XCTAssertEqual(legacyCard.status, .submitting)
+        let identifiedCard = try XCTUnwrap(appState.messages.first(where: { $0.approval?.requestId == "req-identified-queued" })?.approval)
+        XCTAssertEqual(identifiedCard.status, .pending)
+
+        // Settle legacy card
+        deliverResult(socket, rpcID: parked.rpcID, result: ["resolved": 1])
+        await parked.task.value
+        XCTAssertEqual(appState.messages.first(where: { $0.approval?.requestId == nil })?.approval?.status, .approved)
+        XCTAssertEqual(appState.messages.first(where: { $0.approval?.requestId == "req-identified-queued" })?.approval?.status, .pending)
     }
 
     func testBotChatApprovalEvictionAndRecoveryUnderBotProfileNamespace() async throws {

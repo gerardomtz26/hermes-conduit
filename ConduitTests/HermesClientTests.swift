@@ -1102,7 +1102,7 @@ final class HermesClientTests: XCTestCase {
     }
 
     func testApprovalRespondRejectsMalformedAndOutOfRangeResolved() async throws {
-        for rawResolved in ["1e300", "-1e300", "1.5", "\"true\"", "9223372036854775808"] {
+        for rawResolved in ["1e300", "-1e300", "1.5", "\"true\"", "9223372036854775808", "-1", "-100"] {
             let transport = FakeTransport()
             let socket = FakeSocket()
             transport.nextSocket = { socket }
@@ -1134,6 +1134,46 @@ final class HermesClientTests: XCTestCase {
             } catch let error as HermesError {
                 guard case .invalidResponse = error else {
                     XCTFail("Expected .invalidResponse error for resolved=\(rawResolved), but got \(error)")
+                    continue
+                }
+            }
+            client.disconnect()
+        }
+    }
+
+    func testApprovalRespondRejectsNonObjectRoots() async throws {
+        for rawResult in ["\"ok\"", "42", "true", "null", "[]", "[{\"resolved\": 1}]"] {
+            let transport = FakeTransport()
+            let socket = FakeSocket()
+            transport.nextSocket = { socket }
+            let client = makeClient(transport: transport)
+            let connectTask = Task { try? await client.connect() }
+            transport.open(socket)
+            try await awaitCompletion(of: connectTask, "connect() to complete")
+
+            let sent = Gate()
+            socket.onSend = { sent.signal() }
+            let respondTask = Task<Bool, Error> {
+                try await client.respondToApproval(
+                    sessionId: "runtime-1",
+                    requestId: "approval-non-object",
+                    choice: "once"
+                )
+            }
+            try await sent.wait("the approval.respond request to be sent")
+            let request = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(try XCTUnwrap(socket.sentTexts.last).utf8)) as? [String: Any]
+            )
+            let id = try XCTUnwrap(request["id"] as? Int)
+            socket.deliver("""
+            {"jsonrpc": "2.0", "id": \(id), "result": \(rawResult)}
+            """)
+            do {
+                _ = try await awaitResult(of: respondTask, "the approval.respond response")
+                XCTFail("Expected invalidResponse error for non-object result=\(rawResult)")
+            } catch let error as HermesError {
+                guard case .invalidResponse = error else {
+                    XCTFail("Expected .invalidResponse error for non-object result=\(rawResult), but got \(error)")
                     continue
                 }
             }
