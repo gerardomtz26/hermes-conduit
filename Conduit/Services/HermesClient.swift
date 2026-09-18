@@ -1422,10 +1422,14 @@ final class HermesClient: ObservableObject {
     /// Returns every unresolved approval for one live Hermes session. Current
     /// Hermes scopes this method through `session_id`; bind payloads to that
     /// requested identity rather than trusting optional fields inside a row.
-    func pendingApprovals(sessionId: String) async throws -> [ApprovalActivity] {
+    func pendingApprovals(sessionId: String, profile: String? = nil) async throws -> [ApprovalActivity] {
+        var params: [String: Any] = ["session_id": sessionId]
+        if let profile, !profile.isEmpty {
+            params["profile"] = profile
+        }
         let result = try await rpc(
             "approval.pending",
-            params: ["session_id": sessionId],
+            params: params,
             timeout: Self.pendingApprovalsTimeout
         )
         return (result.objectValue?["approvals"]?.arrayValue ?? []).compactMap { value in

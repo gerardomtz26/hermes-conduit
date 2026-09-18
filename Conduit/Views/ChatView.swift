@@ -2391,6 +2391,9 @@ struct ApprovalCard: View {
                     } else if approval.status == .approved || approval.status == .rejected {
                         Image(systemName: approval.status == .approved ? "checkmark.circle.fill" : "xmark.circle.fill")
                             .foregroundStyle(statusColor(for: approval.status))
+                    } else if approval.status == .expired {
+                        Image(systemName: "clock.badge.xmark")
+                            .foregroundStyle(.secondary)
                     }
                     MessageTimestampLabel(timestamp: message.timestamp, tone: .supporting)
                 }
@@ -2407,11 +2410,15 @@ struct ApprovalCard: View {
                         .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
 
-                if let choice = approval.choice,
-                   approval.status == .approved || approval.status == .rejected {
-                    Label(decisionTitle(choice), systemImage: approval.status == .approved ? "checkmark" : "xmark")
+                if approval.status == .approved || approval.status == .rejected {
+                    let text = approval.choice.map { decisionTitle($0) } ?? statusTitle(for: approval.status)
+                    Label(text, systemImage: approval.status == .approved ? "checkmark" : "xmark")
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(statusColor(for: approval.status))
+                } else if approval.status == .expired {
+                    Text("No longer active")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 } else {
                     HStack(spacing: 8) {
                         Button {

@@ -586,6 +586,38 @@ final class AppStateReasoningStreamTests: XCTestCase {
         XCTAssertEqual(tools[2].output, "done")
     }
 
+    func testIdlessCompletionAdoptsUniqueIdentifiedRunningToolPreservingToolID() {
+        let state = makeAppState()
+        installActiveSession(state, id: "stored-a")
+        state.handleStreamEvent(.toolStart(sessionId: "stored-a", toolName: "terminal", toolInput: "git pull", toolID: "call-start-123"))
+        state.handleStreamEvent(.toolComplete(sessionId: "stored-a", toolName: "terminal", toolOutput: "up to date", toolID: nil))
+
+        let tools = state.messages.compactMap(\.tool)
+        XCTAssertEqual(tools.count, 1, "An ID-less completion should adopt a unique identified running card")
+        XCTAssertEqual(tools[0].id, "call-start-123", "Preserves the existing tool ID from the start event")
+        XCTAssertEqual(tools[0].status, .complete)
+        XCTAssertEqual(tools[0].input, "git pull")
+        XCTAssertEqual(tools[0].output, "up to date")
+    }
+
+    func testIdlessCompletionDoesNotAdoptAmbiguousIdentifiedRunningTools() {
+        let state = makeAppState()
+        installActiveSession(state, id: "stored-a")
+        state.handleStreamEvent(.toolStart(sessionId: "stored-a", toolName: "terminal", toolInput: "cmd 1", toolID: "call-1"))
+        state.handleStreamEvent(.toolStart(sessionId: "stored-a", toolName: "terminal", toolInput: "cmd 2", toolID: "call-2"))
+        state.handleStreamEvent(.toolComplete(sessionId: "stored-a", toolName: "terminal", toolOutput: "done", toolID: nil))
+
+        let tools = state.messages.compactMap(\.tool)
+        XCTAssertEqual(tools.count, 3, "An ID-less completion must not guess when multiple identified running cards exist")
+        XCTAssertEqual(tools[0].status, .running)
+        XCTAssertEqual(tools[0].id, "call-1")
+        XCTAssertEqual(tools[1].status, .running)
+        XCTAssertEqual(tools[1].id, "call-2")
+        XCTAssertEqual(tools[2].status, .complete)
+        XCTAssertNil(tools[2].id)
+        XCTAssertEqual(tools[2].output, "done")
+    }
+
     func testMultiSegmentTurnKeepsBothSegmentsAndSkipsCompletionTrace() {
         let state = makeAppState()
         installActiveSession(state, id: "stored-a")
@@ -753,7 +785,10 @@ final class AppStateReasoningStreamTests: XCTestCase {
 
     func testBotChatToolRecoveryAndCleanupUnderBotProfileNamespace() async {
         let suite = "testBotChatToolRecovery.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            XCTFail("Failed to initialize UserDefaults suite")
+            return
+        }
         addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
         let cache = SessionPresentationCache(defaults: defaults)
         let state = AppState(

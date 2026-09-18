@@ -1251,6 +1251,37 @@ final class HermesClientTests: XCTestCase {
         client.disconnect()
     }
 
+    func testPendingApprovalsSendsExplicitProfileInParameters() async throws {
+        let transport = FakeTransport()
+        let socket = FakeSocket()
+        transport.nextSocket = { socket }
+        let client = makeClient(transport: transport)
+        let connectTask = Task { try? await client.connect() }
+        transport.open(socket)
+        try await awaitCompletion(of: connectTask, "connect() to complete")
+
+        let sent = Gate()
+        socket.onSend = { sent.signal() }
+        let pendingTask = Task { try await client.pendingApprovals(sessionId: "bot-chat-1", profile: "custom-bot") }
+        try await sent.wait("the approval.pending request to be sent")
+        let request = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(try XCTUnwrap(socket.sentTexts.last).utf8)) as? [String: Any]
+        )
+        XCTAssertEqual(request["method"] as? String, "approval.pending")
+        let params = try XCTUnwrap(request["params"] as? [String: Any])
+        XCTAssertEqual(params["session_id"] as? String, "bot-chat-1")
+        XCTAssertEqual(params["profile"] as? String, "custom-bot")
+        let id = try XCTUnwrap(request["id"] as? Int)
+        let payload = try XCTUnwrap(String(data: try JSONSerialization.data(withJSONObject: [
+            "jsonrpc": "2.0", "id": id, "result": ["approvals": []]
+        ]), encoding: .utf8))
+        socket.deliver(payload)
+
+        let approvals = try await awaitResult(of: pendingTask, "the approval.pending response")
+        XCTAssertTrue(approvals.isEmpty)
+        client.disconnect()
+    }
+
     // MARK: - pending_clarify restore
 
     func testResumeSnapshotParsesPendingClarifyBatchWithLockedAnswers() throws {

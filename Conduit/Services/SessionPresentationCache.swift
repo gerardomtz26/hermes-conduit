@@ -453,78 +453,151 @@ final class SessionPresentationCache {
         let stableToolID = trimmedToolID.isEmpty ? nil : trimmedToolID
         let trimmedMessageID = messageID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let stableMessageID = trimmedMessageID.isEmpty ? nil : trimmedMessageID
+
+        // Exact-identity paths (messageID or stableToolID) are deterministic
+        // and handle each store independently — the first match wins.
+        // The ID-less fallback must inspect BOTH stores before mutating
+        // either, deduplicating by message ID, and only resolve when the
+        // combined logical candidate count is exactly one.
+
+        let hasExactIdentity = stableMessageID != nil || stableToolID != nil
+
         var pendingStore = loadPendingTools()
         var pendingChanged = false
         var matchedPendingKeys = Set<String>()
-        for id in ids {
-            let cacheKey = key(profile: profile, sessionID: id)
-            guard var records = pendingStore[cacheKey] else { continue }
-            let index: Int?
-            if let stableMessageID {
-                index = records.lastIndex(where: {
-                    $0.id == stableMessageID && $0.toolStatus == .running
-                })
-            } else if let stableToolID {
-                index = records.lastIndex(where: {
-                    $0.toolStatus == .running && self.stableToolID($0.toolID) == stableToolID
-                })
-            } else {
-                let candidates = records.indices.filter { idx in
-                    let message = records[idx]
-                    return message.toolStatus == .running
-                        && message.toolName == normalizedName
-                        && self.stableToolID(message.toolID) == nil
-                }
-                index = candidates.count == 1 ? candidates[0] : nil
-            }
-            guard let resolvedIndex = index else { continue }
-            records.remove(at: resolvedIndex)
-            pendingStore[cacheKey] = records.isEmpty ? nil : records
-            pendingChanged = true
-            matchedPendingKeys.insert(cacheKey)
-        }
-        if pendingChanged { persistPendingTools(pendingStore) }
 
-        // Common path: if pendingStore resolved the tool for all sessions,
-        // skip decoding the large presentation store on the main thread.
-        let unresolvedIDs = ids.filter { !matchedPendingKeys.contains(key(profile: profile, sessionID: $0)) }
-        guard !unresolvedIDs.isEmpty else { return }
-
-        var store = load()
-        var changed = false
-        for id in unresolvedIDs {
-            let cacheKey = key(profile: profile, sessionID: id)
-            guard var session = store[cacheKey] else { continue }
-            let index: Int?
-            if let stableMessageID {
-                index = session.messages.lastIndex(where: {
-                    $0.role == .tool
-                        && $0.toolStatus == .running
-                        && $0.id == stableMessageID
-                })
-            } else if let stableToolID {
-                index = session.messages.lastIndex(where: {
-                    $0.role == .tool
-                        && $0.toolStatus == .running
-                        && self.stableToolID($0.toolID) == stableToolID
-                })
-            } else {
-                let candidates = session.messages.indices.filter { idx in
-                    let message = session.messages[idx]
-                    return message.role == .tool
-                        && message.toolStatus == .running
-                        && message.toolName == normalizedName
-                        && self.stableToolID(message.toolID) == nil
+        if hasExactIdentity {
+            // --- Exact-identity resolution (unchanged) ---
+            for id in ids {
+                let cacheKey = key(profile: profile, sessionID: id)
+                guard var records = pendingStore[cacheKey] else { continue }
+                let index: Int?
+                if let stableMessageID {
+                    index = records.lastIndex(where: {
+                        $0.id == stableMessageID && $0.toolStatus == .running
+                    })
+                } else {
+                    index = records.lastIndex(where: {
+                        $0.toolStatus == .running && self.stableToolID($0.toolID) == stableToolID
+                    })
                 }
-                index = candidates.count == 1 ? candidates[0] : nil
+                guard let resolvedIndex = index else { continue }
+                records.remove(at: resolvedIndex)
+                pendingStore[cacheKey] = records.isEmpty ? nil : records
+                pendingChanged = true
+                matchedPendingKeys.insert(cacheKey)
             }
-            guard let resolvedIndex = index else { continue }
-            session.messages.remove(at: resolvedIndex)
-            session.updatedAt = now()
-            store[cacheKey] = session
-            changed = true
+            if pendingChanged { persistPendingTools(pendingStore) }
+
+            let unresolvedIDs = ids.filter { !matchedPendingKeys.contains(key(profile: profile, sessionID: $0)) }
+            guard !unresolvedIDs.isEmpty else { return }
+
+            var store = load()
+            var changed = false
+            for id in unresolvedIDs {
+                let cacheKey = key(profile: profile, sessionID: id)
+                guard var session = store[cacheKey] else { continue }
+                let index: Int?
+                if let stableMessageID {
+                    index = session.messages.lastIndex(where: {
+                        $0.role == .tool
+                            && $0.toolStatus == .running
+                            && $0.id == stableMessageID
+                    })
+                } else {
+                    index = session.messages.lastIndex(where: {
+                        $0.role == .tool
+                            && $0.toolStatus == .running
+                            && self.stableToolID($0.toolID) == stableToolID
+                    })
+                }
+                guard let resolvedIndex = index else { continue }
+                session.messages.remove(at: resolvedIndex)
+                session.updatedAt = now()
+                store[cacheKey] = session
+                changed = true
+            }
+            if changed { persist(store) }
+        } else {
+            // --- ID-less fallback: cross-store deduplication ---
+            // Gather ALL running same-name candidates from both stores across
+            // all session aliases, deduplicate by message ID, and only mutate
+            // when the combined logical candidate count is exactly one.
+
+            struct CandidateLocation {
+                enum Store { case pending, full }
+                let store: Store
+                let cacheKey: String
+                let index: Int
+                let messageID: String
+            }
+
+            var allCandidates: [CandidateLocation] = []
+            let store = load()
+
+            for id in ids {
+                let cacheKey = key(profile: profile, sessionID: id)
+
+                if let records = pendingStore[cacheKey] {
+                    for idx in records.indices {
+                        let msg = records[idx]
+                        guard msg.toolStatus == .running,
+                              msg.toolName == normalizedName else { continue }
+                        allCandidates.append(CandidateLocation(
+                            store: .pending, cacheKey: cacheKey, index: idx, messageID: msg.id
+                        ))
+                    }
+                }
+
+                if let session = store[cacheKey] {
+                    for idx in session.messages.indices {
+                        let msg = session.messages[idx]
+                        guard msg.role == .tool,
+                              msg.toolStatus == .running,
+                              msg.toolName == normalizedName else { continue }
+                        allCandidates.append(CandidateLocation(
+                            store: .full, cacheKey: cacheKey, index: idx, messageID: msg.id
+                        ))
+                    }
+                }
+            }
+
+            // Deduplicate by message ID — the same logical record exists under
+            // every session alias and may be mirrored between pending and full.
+            var seenMessageIDs = Set<String>()
+            let uniqueCandidates = allCandidates.filter { seenMessageIDs.insert($0.messageID).inserted }
+
+            guard uniqueCandidates.count == 1, let winner = uniqueCandidates.first else { return }
+
+            // Remove the unique winner from every alias across BOTH stores
+            // (a single logical candidate may be mirrored between pending and full).
+            for id in ids {
+                let cacheKey = key(profile: profile, sessionID: id)
+                guard var records = pendingStore[cacheKey] else { continue }
+                if let idx = records.lastIndex(where: { $0.id == winner.messageID && $0.toolStatus == .running }) {
+                    records.remove(at: idx)
+                    pendingStore[cacheKey] = records.isEmpty ? nil : records
+                    pendingChanged = true
+                }
+            }
+            if pendingChanged { persistPendingTools(pendingStore) }
+
+            var mutableStore = store
+            var changed = false
+            for id in ids {
+                let cacheKey = key(profile: profile, sessionID: id)
+                guard var session = mutableStore[cacheKey] else { continue }
+                if let idx = session.messages.lastIndex(where: {
+                    $0.role == .tool && $0.toolStatus == .running && $0.id == winner.messageID
+                }) {
+                    session.messages.remove(at: idx)
+                    session.updatedAt = now()
+                    mutableStore[cacheKey] = session
+                    changed = true
+                }
+            }
+            if changed { persist(mutableStore) }
         }
-        if changed { persist(store) }
     }
 
     /// An explicitly idle resume is authoritative: any local tool-start

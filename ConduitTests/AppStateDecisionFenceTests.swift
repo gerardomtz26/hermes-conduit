@@ -1237,7 +1237,7 @@ final class AppStateDecisionFenceTests: XCTestCase {
 
     func testBotChatApprovalEvictionAndRecoveryUnderBotProfileNamespace() async throws {
         let suite = "testBotChatApproval.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
         let cache = SessionPresentationCache(defaults: defaults)
         let appState = AppState(
@@ -1363,6 +1363,164 @@ final class AppStateDecisionFenceTests: XCTestCase {
         await refreshTask.value
         XCTAssertTrue(refreshInvoked)
         XCTAssertFalse(appState.messages.contains { $0.approval?.requestId == "delayed-req" }, "Delayed approval must not land in an abandoned or switched session")
+    }
+
+    func testApprovalArrivingDuringPendingApprovalsRPCSurvivesRetirement() async throws {
+        let gate = ClarifyGate()
+        let resumeGate = ClarifyGate()
+        let lifecycleOps = ChatResumeLifecycleOperations(
+            pendingApprovals: { _, _ in
+                gate.signal()
+                try await resumeGate.wait("resume after new approval arrives")
+                return [
+                    ApprovalActivity(
+                        sessionId: "default",
+                        requestId: "req-a",
+                        command: "deploy",
+                        description: "Deploy A",
+                        choices: nil,
+                        allowPermanent: false,
+                        smartDenied: false,
+                        status: .pending,
+                        choice: nil,
+                        error: nil
+                    )
+                ]
+            }
+        )
+        let appState = makeAppState(chatResumeLifecycleOperations: lifecycleOps)
+        appState.activeSessionId = "default"
+        let cardA = approvalFixture(id: "msg-a", status: .pending, requestId: "req-a")
+        appState.messages = [cardA]
+
+        let transport = ClarifyFakeTransport()
+        let socket = ClarifyFakeSocket()
+        let client = try await installConnectedClient(appState, socket: socket, transport: transport)
+
+        let refreshTask = appState.schedulePendingApprovalsRefresh(sessionId: "default", using: client)
+        try await gate.wait("pendingApprovals to start")
+
+        // Approval B arrives via stream event while pendingApprovals RPC is in flight
+        let cardB = ApprovalActivity(
+            sessionId: "default",
+            requestId: "req-b",
+            command: "migrate",
+            description: "Migrate B",
+            choices: nil,
+            allowPermanent: false,
+            smartDenied: false,
+            status: .pending,
+            choice: nil,
+            error: nil
+        )
+        appState.handleStreamEvent(.approval(sessionId: "default", activity: cardB))
+        XCTAssertEqual(appState.messages.count, 2)
+
+        // Allow pendingApprovals to return queue containing only A
+        resumeGate.signal()
+        await refreshTask.value
+
+        // Card B must NOT be retired because it was not in the pre-fetch snapshot
+        XCTAssertEqual(appState.messages.count, 2)
+        XCTAssertTrue(appState.messages.contains { $0.approval?.requestId == "req-a" })
+        XCTAssertTrue(appState.messages.contains { $0.approval?.requestId == "req-b" })
+    }
+
+    func testPreExistingStaleApprovalRetiresWhenOmittedFromPendingApprovalsRPC() async throws {
+        let lifecycleOps = ChatResumeLifecycleOperations(
+            pendingApprovals: { _, _ in
+                return [
+                    ApprovalActivity(
+                        sessionId: "default",
+                        requestId: "req-a",
+                        command: "deploy",
+                        description: "Deploy A",
+                        choices: nil,
+                        allowPermanent: false,
+                        smartDenied: false,
+                        status: .pending,
+                        choice: nil,
+                        error: nil
+                    )
+                ]
+            }
+        )
+        let appState = makeAppState(chatResumeLifecycleOperations: lifecycleOps)
+        appState.activeSessionId = "default"
+        let cardA = approvalFixture(id: "msg-a", status: .pending, requestId: "req-a")
+        let cardB = approvalFixture(id: "msg-b", status: .pending, requestId: "req-b")
+        appState.messages = [cardA, cardB]
+
+        let transport = ClarifyFakeTransport()
+        let socket = ClarifyFakeSocket()
+        let client = try await installConnectedClient(appState, socket: socket, transport: transport)
+
+        let refreshTask = appState.schedulePendingApprovalsRefresh(sessionId: "default", using: client)
+        await refreshTask.value
+
+        // Card B was pre-existing and omitted from authoritative queue -> retired
+        XCTAssertEqual(appState.messages.count, 1)
+        XCTAssertEqual(appState.messages.first?.approval?.requestId, "req-a")
+    }
+
+    func testLiveSubmissionProtectedFromRetirementDuringPendingApprovalsRPC() async throws {
+        let appState = makeAppState(chatResumeLifecycleOperations: ChatResumeLifecycleOperations(
+            pendingApprovals: { _, _ in
+                return []
+            }
+        ))
+        let card = approvalFixture(id: "approval-msg", status: .pending, requestId: "req-submitting")
+        appState.messages = [card]
+        appState.activeSessionId = "default"
+
+        let transport = ClarifyFakeTransport()
+        let socket = ClarifyFakeSocket()
+        _ = try await installConnectedClient(appState, socket: socket, transport: transport)
+
+        // Card begins live submission (parked)
+        let parked = try await parkApprovalRespond(appState: appState, socket: socket, choice: "once")
+        XCTAssertEqual(appState.messages.first?.approval?.status, .submitting)
+
+        // Queue refresh returns empty queue while submission is in-flight
+        let refreshTask = appState.schedulePendingApprovalsRefresh(sessionId: "default", using: appState.client!)
+        await refreshTask.value
+
+        // Card must NOT be retired because of active in-process live submission
+        XCTAssertEqual(appState.messages.count, 1)
+        XCTAssertEqual(appState.messages.first?.approval?.status, .submitting)
+
+        // Complete the submission
+        deliverResult(socket, rpcID: parked.rpcID, result: ["resolved": 1])
+        await parked.task.value
+        XCTAssertEqual(appState.messages.first?.approval?.status, .approved)
+    }
+
+    func testBotChatPendingApprovalsQueriesBotPresentationProfile() async throws {
+        let botSessionID = "bot-session-profile-test"
+        let botProfile = "bot-custom-profile"
+        let dashboardProfile = "dashboard-main"
+
+        var queriedProfile: String? = nil
+        let lifecycleOps = ChatResumeLifecycleOperations(
+            pendingApprovalsWithProfile: { _, _, profile in
+                queriedProfile = profile
+                return []
+            }
+        )
+
+        let appState = makeAppState(chatResumeLifecycleOperations: lifecycleOps)
+        appState.setActiveProfileForTesting(dashboardProfile)
+        appState.activeSessionId = botSessionID
+        appState.noteBotChatSessionForTesting(botSessionID, profile: botProfile)
+
+        let transport = ClarifyFakeTransport()
+        let socket = ClarifyFakeSocket()
+        let client = try await installConnectedClient(appState, socket: socket, transport: transport)
+
+        let refreshTask = appState.schedulePendingApprovalsRefresh(sessionId: botSessionID, using: client)
+        await refreshTask.value
+
+        XCTAssertEqual(queriedProfile, botProfile, "Bot Chat pending approvals refresh must use the bot's presentation profile")
     }
 }
 

@@ -948,6 +948,79 @@ final class SessionPresentationCacheTests: XCTestCase {
         )
     }
 
+    func testIdlessCompletionResolvesMirroredCandidateAcrossPendingAndFullStores() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "mirrored-cross-store"
+        let sessionID = "mirrored-" + UUID().uuidString
+        let message = ChatMessage(
+            id: "msg-shared", role: .tool, content: "", timestamp: "1",
+            tool: ToolActivity(id: nil, name: "terminal", input: "pwd", output: nil, status: .running)
+        )
+        // Saved in full store
+        cache.save([message], profile: profile, sessionIDs: [sessionID])
+        // Also recorded in pending side-store
+        cache.recordPendingToolStart(message, profile: profile, sessionIDs: [sessionID])
+
+        cache.resolvePendingTool(named: "terminal", profile: profile, sessionIDs: [sessionID])
+
+        XCTAssertEqual(
+            cache.merge([], profile: profile, sessionIDs: [sessionID], includePendingTools: true).map(\.id),
+            [],
+            "A mirrored candidate across both stores has a single logical message ID and resolves cleanly"
+        )
+    }
+
+    func testCrossStoreAmbiguityPreventsIdlessResolution() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "cross-store-ambiguous"
+        let sessionID = "ambiguous-" + UUID().uuidString
+        let savedMessage = ChatMessage(
+            id: "msg-saved", role: .tool, content: "", timestamp: "1",
+            tool: ToolActivity(id: nil, name: "terminal", input: "pwd", output: nil, status: .running)
+        )
+        let pendingMessage = ChatMessage(
+            id: "msg-pending", role: .tool, content: "", timestamp: "2",
+            tool: ToolActivity(id: nil, name: "terminal", input: "git status", output: nil, status: .running)
+        )
+        // One in full store, one in pending side-store
+        cache.save([savedMessage], profile: profile, sessionIDs: [sessionID])
+        cache.recordPendingToolStart(pendingMessage, profile: profile, sessionIDs: [sessionID])
+
+        // ID-less completion must inspect both stores and refuse to resolve either because there are 2 distinct candidates
+        cache.resolvePendingTool(named: "terminal", profile: profile, sessionIDs: [sessionID])
+
+        let remainingIDs = Set(cache.merge([], profile: profile, sessionIDs: [sessionID], includePendingTools: true).map(\.id))
+        XCTAssertTrue(remainingIDs.contains("msg-saved"))
+        XCTAssertTrue(remainingIDs.contains("msg-pending"))
+    }
+
+    func testExactMessageIDResolvesAcrossStoresWithoutIdlessAmbiguity() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "exact-cross-store"
+        let sessionID = "exact-" + UUID().uuidString
+        let savedMessage = ChatMessage(
+            id: "msg-saved", role: .tool, content: "", timestamp: "1",
+            tool: ToolActivity(id: nil, name: "terminal", input: "pwd", output: nil, status: .running)
+        )
+        let pendingMessage = ChatMessage(
+            id: "msg-pending", role: .tool, content: "", timestamp: "2",
+            tool: ToolActivity(id: nil, name: "terminal", input: "git status", output: nil, status: .running)
+        )
+        cache.save([savedMessage], profile: profile, sessionIDs: [sessionID])
+        cache.recordPendingToolStart(pendingMessage, profile: profile, sessionIDs: [sessionID])
+
+        // Exact messageID resolution targets msg-pending and ignores ambiguity
+        cache.resolvePendingTool(
+            named: "terminal",
+            messageID: "msg-pending",
+            profile: profile,
+            sessionIDs: [sessionID]
+        )
+
+        let remainingIDs = cache.merge([], profile: profile, sessionIDs: [sessionID], includePendingTools: true).map(\.id)
+        XCTAssertEqual(remainingIDs, ["msg-saved"])
+    }
+
     func testFullSaveDoesNotFoldPendingMarkerSupersededByStableCompletion() throws {
         let (cache, defaults, _, _) = try makeIsolatedCache()
         let profile = "pending-completed-before-flush"
@@ -995,7 +1068,7 @@ final class SessionPresentationCacheTests: XCTestCase {
         XCTAssertTrue(cache.merge([], profile: profile, sessionIDs: [durableID], includePendingTools: true).isEmpty)
     }
 
-    func testLegacyIDLessResolutionRemovesNewerSideRecordButKeepsOlderFullRecord() throws {
+    func testLegacyIDLessResolutionKeepsBothDistinctRecordsOnCrossStoreAmbiguity() throws {
         let (cache, _, _, _) = try makeIsolatedCache()
         let profile = "legacy-split-store"
         let sessionID = "legacy-split-" + UUID().uuidString
@@ -1012,10 +1085,11 @@ final class SessionPresentationCacheTests: XCTestCase {
 
         cache.resolvePendingTool(named: "terminal", profile: profile, sessionIDs: [sessionID])
 
+        let remaining = Set(cache.merge([], profile: profile, sessionIDs: [sessionID], includePendingTools: true).map(\.id))
         XCTAssertEqual(
-            cache.merge([], profile: profile, sessionIDs: [sessionID], includePendingTools: true).map(\.id),
-            [older.id],
-            "One ambiguous completion must not remove distinct calls from both persistence layers"
+            remaining,
+            [older.id, newer.id],
+            "Cross-store ambiguity must not guess or remove distinct calls from either persistence layer"
         )
     }
 

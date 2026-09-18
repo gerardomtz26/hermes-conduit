@@ -68,6 +68,10 @@ struct ChatResumeLifecycleOperations {
     var setSessionTitle: (@MainActor (HermesClient, String, String) async throws -> Void)?
     var refreshContext: (@MainActor (HermesClient, String) async -> Void)?
     var pendingApprovals: (@MainActor (HermesClient, String) async throws -> [ApprovalActivity])?
+    /// Profile-aware variant of `pendingApprovals`. Preferred over the 2-argument
+    /// seam when set, so tests can pin WHICH Hermes profile a pending approvals
+    /// query addresses (bot chats query under the bot's presentation profile).
+    var pendingApprovalsWithProfile: (@MainActor (HermesClient, String, String?) async throws -> [ApprovalActivity])?
     var sendPrompt: (@MainActor (HermesClient, String, String) async throws -> PromptSubmissionOutcome)?
     /// Foreground transport verification. Production calls the client's
     /// `session.list` health check; tests substitute a controllable outcome.
@@ -135,6 +139,7 @@ struct ChatResumeLifecycleOperations {
         setSessionTitle: (@MainActor (HermesClient, String, String) async throws -> Void)? = nil,
         refreshContext: (@MainActor (HermesClient, String) async -> Void)? = nil,
         pendingApprovals: (@MainActor (HermesClient, String) async throws -> [ApprovalActivity])? = nil,
+        pendingApprovalsWithProfile: (@MainActor (HermesClient, String, String?) async throws -> [ApprovalActivity])? = nil,
         sendPrompt: (@MainActor (HermesClient, String, String) async throws -> PromptSubmissionOutcome)? = nil,
         verifyTransportHealth: (@MainActor (HermesClient) async throws -> Void)? = nil,
         probeActiveSessions: (@MainActor (HermesClient) async throws -> [LiveSessionStatus])? = nil,
@@ -179,6 +184,7 @@ struct ChatResumeLifecycleOperations {
         self.setSessionTitle = setSessionTitle
         self.refreshContext = refreshContext
         self.pendingApprovals = pendingApprovals
+        self.pendingApprovalsWithProfile = pendingApprovalsWithProfile
         self.sendPrompt = sendPrompt
         self.verifyTransportHealth = verifyTransportHealth
         self.probeActiveSessions = probeActiveSessions
@@ -4906,13 +4912,32 @@ final class AppState: ObservableObject {
         let acceptedSessionIDs = activeChatScrollSessionIdentity.equivalentSessionIDs
             .union([sessionId])
 
+        // Snapshot every locally-known identified pending/submitting request
+        // ID *before* the RPC starts.  After the response returns only IDs
+        // present in this snapshot are eligible for retirement — approvals
+        // that arrived via stream events while the RPC was in flight are
+        // invisible to the snapshot and therefore safe from spurious deletion.
+        let identifiedRequestIDsKnownAtRequestStart: Set<String> = Set(
+            messages.compactMap { message in
+                guard let approval = message.approval,
+                      acceptedSessionIDs.contains(approval.sessionId),
+                      let reqId = approval.requestId,
+                      SessionPresentationCache.isPendingDecision(approval.status) else {
+                    return nil
+                }
+                return reqId
+            }
+        )
+
         return Task { @MainActor [weak self] in
             let approvals: [ApprovalActivity]
             do {
-                if let pendingApprovals = self?.chatResumeLifecycleOperations.pendingApprovals {
+                if let pendingApprovalsWithProfile = self?.chatResumeLifecycleOperations.pendingApprovalsWithProfile {
+                    approvals = try await pendingApprovalsWithProfile(client, sessionId, profile)
+                } else if let pendingApprovals = self?.chatResumeLifecycleOperations.pendingApprovals {
                     approvals = try await pendingApprovals(client, sessionId)
                 } else {
-                    approvals = try await client.pendingApprovals(sessionId: sessionId)
+                    approvals = try await client.pendingApprovals(sessionId: sessionId, profile: profile)
                 }
             } catch {
                 // Older gateways do not expose approval.pending, and this
@@ -4959,6 +4984,12 @@ final class AppState: ObservableObject {
                           acceptedSessionIDs.contains(existing.sessionId),
                           let reqId = existing.requestId,
                           SessionPresentationCache.isPendingDecision(existing.status) else {
+                        return false
+                    }
+                    // Only IDs that existed locally before the RPC started are
+                    // eligible — anything that arrived via a stream event while
+                    // the RPC was in flight must survive.
+                    guard identifiedRequestIDsKnownAtRequestStart.contains(reqId) else {
                         return false
                     }
                     if self.hasLiveApprovalSubmission(for: existing, equivalentSessionIDs: acceptedSessionIDs) {
@@ -14831,9 +14862,10 @@ final class AppState: ObservableObject {
                     matchingIndex = exactIndex
                     adoptedMessageID = messages[exactIndex].id
                 } else {
-                    // Check if there is an unambiguous ID-less running card for the same tool.
-                    // If exactly one exists, adopt it rather than leaving a zombie running card.
-                    // If multiple exist (or none), do not guess.
+                    // No exact tool-ID match. Check if there is an unambiguous
+                    // running card for the same tool name — regardless of whether
+                    // the card already carries a different stable tool ID or none.
+                    // If exactly one exists, adopt it; if multiple, do not guess.
                     let candidates = messages.indices.filter { idx in
                         guard messages[idx].role == .tool,
                               let tool = messages[idx].tool,
@@ -14841,20 +14873,23 @@ final class AppState: ObservableObject {
                               tool.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedName else {
                             return false
                         }
-                        let existingID = tool.id?.trimmingCharacters(in: .whitespacesAndNewlines)
-                        return existingID == nil || existingID?.isEmpty == true
+                        return true
                     }
                     if candidates.count == 1 {
                         matchingIndex = candidates[0]
                         adoptedMessageID = messages[candidates[0]].id
-                        resolvedCacheToolID = nil
+                        // Preserve the card's existing tool ID when the
+                        // completion's stableToolID didn't match any card.
+                        resolvedCacheToolID = messages[candidates[0]].tool?.id
                     } else {
                         matchingIndex = nil
                     }
                 }
             } else {
-                // Check if there is an unambiguous ID-less running card for the same tool.
-                // If exactly one exists, adopt it. If multiple exist (or none), do not guess.
+                // ID-less completion: gather ALL running same-name transcript
+                // candidates regardless of whether they carry a stable tool ID.
+                // If exactly one exists, adopt it (preserving its existing tool
+                // ID). If multiple exist (or none), do not guess.
                 let candidates = messages.indices.filter { idx in
                     guard messages[idx].role == .tool,
                           let tool = messages[idx].tool,
@@ -14862,8 +14897,7 @@ final class AppState: ObservableObject {
                           tool.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedName else {
                         return false
                     }
-                    let existingID = tool.id?.trimmingCharacters(in: .whitespacesAndNewlines)
-                    return existingID == nil || existingID?.isEmpty == true
+                    return true
                 }
                 if candidates.count == 1 {
                     matchingIndex = candidates[0]
