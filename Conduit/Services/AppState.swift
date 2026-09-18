@@ -5296,16 +5296,30 @@ final class AppState: ObservableObject {
         let restoredPendingDecisionKeys = SessionPresentationCache
             .pendingDecisionKeys(in: messages)
             .subtracting(gatewayPendingDecisionKeys)
+        let liveSubmittingApprovalKeys = Set(
+            messages.compactMap { message -> String? in
+                guard let approval = message.approval, approval.status == .submitting else { return nil }
+                let equivalentSessionIDs = activeChatScrollSessionIdentity.equivalentSessionIDs
+                    .union([approval.sessionId])
+                guard hasLiveApprovalSubmission(
+                    for: approval,
+                    equivalentSessionIDs: equivalentSessionIDs
+                ) else { return nil }
+                return SessionPresentationCache.decisionKey(for: message)
+            }
+        )
+        let resettableRestoredDecisionKeys = restoredPendingDecisionKeys
+            .subtracting(liveSubmittingApprovalKeys)
         let gatewayHasPendingDecision = !gatewayPendingDecisionKeys.isEmpty
         var restoredMessagesAwaitingConfirmation: [ChatMessage] = []
-        if result.snapshot.running != true && !restoredPendingDecisionKeys.isEmpty {
+        if result.snapshot.running != true && !resettableRestoredDecisionKeys.isEmpty {
             Self.resetSubmittingRestoredDecisions(
                 in: &messages,
-                matching: restoredPendingDecisionKeys
+                matching: resettableRestoredDecisionKeys
             )
             restoredMessagesAwaitingConfirmation = messages.filter {
                 guard let key = SessionPresentationCache.decisionKey(for: $0),
-                      restoredPendingDecisionKeys.contains(key) else {
+                      resettableRestoredDecisionKeys.contains(key) else {
                     return false
                 }
                 return SessionPresentationCache.pendingDecisionKey(for: $0) != nil
@@ -5343,7 +5357,7 @@ final class AppState: ObservableObject {
             preservePendingDecisionCards: gatewayConfirmsActiveTurn || !unconfirmedPendingDecisionKeys.isEmpty,
             unconfirmedPendingDecisionKeys: unconfirmedPendingDecisionKeys
         )
-        if result.snapshot.running != true && !restoredPendingDecisionKeys.isEmpty {
+        if result.snapshot.running != true && !resettableRestoredDecisionKeys.isEmpty {
             let restoredAt = sessionPresentationCache.unconfirmedPendingDecisionDate(
                 profile: presentationProfile(for: result.sessionId),
                 sessionIDs: sessionIDs
@@ -5351,7 +5365,7 @@ final class AppState: ObservableObject {
             restoredPendingDecisionCardsAwaitingConfirmation = PendingDecisionRestorationGuard(
                 profile: presentationProfile(for: result.sessionId),
                 sessionID: result.sessionId,
-                pendingDecisionKeys: restoredPendingDecisionKeys,
+                pendingDecisionKeys: resettableRestoredDecisionKeys,
                 restoredAt: restoredAt,
                 messages: restoredMessagesAwaitingConfirmation
             )
@@ -15066,8 +15080,22 @@ final class AppState: ObservableObject {
         return false
     }
 
+    private static func sameLegacyApprovalRequest(
+        _ lhs: ApprovalActivity,
+        _ rhs: ApprovalActivity
+    ) -> Bool {
+        lhs.requestId == nil
+            && rhs.requestId == nil
+            && lhs.command == rhs.command
+            && lhs.description == rhs.description
+            && lhs.choices == rhs.choices
+            && lhs.allowPermanent == rhs.allowPermanent
+            && lhs.smartDenied == rhs.smartDenied
+    }
+
     private func shouldPreserveLocalApprovalState(
         existing: ApprovalActivity,
+        incoming: ApprovalActivity,
         authoritative: Bool,
         hasLiveSubmission: Bool
     ) -> Bool {
@@ -15077,6 +15105,9 @@ final class AppState: ObservableObject {
         case .approved, .rejected, .expired:
             return true
         case .error:
+            if existing.requestId == nil, incoming.requestId == nil {
+                return !authoritative && Self.sameLegacyApprovalRequest(existing, incoming)
+            }
             return !authoritative
         case .pending:
             return false
@@ -15138,6 +15169,7 @@ final class AppState: ObservableObject {
             )
             if shouldPreserveLocalApprovalState(
                 existing: existing,
+                incoming: activity,
                 authoritative: authoritative,
                 hasLiveSubmission: hasLiveSubmission
             ) {

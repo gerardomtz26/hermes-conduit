@@ -67,7 +67,8 @@ final class AppStateDecisionFenceTests: XCTestCase {
     }
 
     private func makeAppState(
-        chatResumeLifecycleOperations: ChatResumeLifecycleOperations = .live
+        chatResumeLifecycleOperations: ChatResumeLifecycleOperations = .live,
+        cache: SessionPresentationCache? = nil
     ) -> AppState {
         let suite = "AppStateDecisionFenceTests.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suite) else {
@@ -76,13 +77,13 @@ final class AppStateDecisionFenceTests: XCTestCase {
         addTeardownBlock {
             defaults.removePersistentDomain(forName: suite)
         }
-        let cache = SessionPresentationCache(defaults: defaults)
+        let presentationCache = cache ?? SessionPresentationCache(defaults: defaults)
         return AppState(
             defaults: defaults,
             loadSavedConnection: false,
             clearSessionPresentationCache: {},
             chatResumeLifecycleOperations: chatResumeLifecycleOperations,
-            sessionPresentationCache: cache
+            sessionPresentationCache: presentationCache
         )
     }
 
@@ -1636,6 +1637,365 @@ final class AppStateDecisionFenceTests: XCTestCase {
         await respondTask.value
 
         XCTAssertEqual(appState.messages.first?.approval?.status, .approved)
+    }
+
+    // MARK: - Live Legacy Submission & Error State Precedence Tests
+
+    func testLiveLegacySubmissionSurvivesAuthoritativeResumeOmission() async throws {
+        let appState = makeAppState()
+        prepareActiveSession(appState, id: "legacy-session")
+        let card = ChatMessage(
+            id: "legacy-msg",
+            role: .approval,
+            content: "Run legacy deploy?",
+            timestamp: "1",
+            approval: ApprovalActivity(
+                sessionId: "legacy-session",
+                requestId: nil,
+                command: "deploy",
+                description: "Run legacy deploy?",
+                choices: ["once", "deny"],
+                allowPermanent: false,
+                smartDenied: false,
+                status: .pending,
+                choice: nil,
+                error: nil
+            )
+        )
+        appState.messages = [card]
+
+        let transport = ClarifyFakeTransport()
+        let socket = ClarifyFakeSocket()
+        _ = try await installConnectedClient(appState, socket: socket, transport: transport)
+
+        // Begin submission via respondToApproval so liveApprovalSubmissions contains .legacy("legacy-session")
+        let sent = ClarifyGate()
+        socket.onSend = { sent.signal() }
+        let respondTask = Task {
+            await appState.respondToApproval(messageId: "legacy-msg", choice: "once")
+        }
+        try await sent.wait("the approval.respond request to be sent")
+
+        // Card is now .submitting with choice "once" and live token in flight
+        let submittingCard = try XCTUnwrap(appState.messages.first?.approval)
+        XCTAssertEqual(submittingCard.status, .submitting)
+        XCTAssertEqual(submittingCard.choice, "once")
+
+        // Authoritative resume arrives while RPC is still in flight; snapshot has running == false and omits legacy approval
+        let resumeResult = SessionResumeResult(
+            sessionId: "legacy-session",
+            messages: [],
+            snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+        )
+        _ = appState.applyChatResume(resumeResult)
+
+        // A must remain .submitting with choice "once" because live submission token protects it
+        let afterResumeCard = try XCTUnwrap(appState.messages.first?.approval)
+        XCTAssertEqual(afterResumeCard.status, .submitting, "Live in-flight legacy submission must not be reset to .pending by resume")
+        XCTAssertEqual(afterResumeCard.choice, "once")
+
+        // Complete the RPC
+        let rpcID = try rpcID(try XCTUnwrap(socket.sentTexts.last))
+        deliverResult(socket, rpcID: rpcID, result: ["resolved": 1])
+        await respondTask.value
+
+        let finalCard = try XCTUnwrap(appState.messages.first?.approval)
+        XCTAssertEqual(finalCard.status, .approved)
+    }
+
+    func testRestoredLegacySubmissionWithoutLiveTokenResetsToPendingOnResumeOmission() throws {
+        let suite = "AppStateDecisionFenceTests.RestoredLegacy.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
+        let cache = SessionPresentationCache(defaults: defaults)
+        let appState = makeAppState(cache: cache)
+        prepareActiveSession(appState, id: "restored-legacy-session")
+        let card = ChatMessage(
+            id: "restored-legacy-msg",
+            role: .approval,
+            content: "Run legacy deploy?",
+            timestamp: "1",
+            approval: ApprovalActivity(
+                sessionId: "restored-legacy-session",
+                requestId: nil,
+                command: "deploy",
+                description: "Run legacy deploy?",
+                choices: ["once", "deny"],
+                allowPermanent: false,
+                smartDenied: false,
+                status: .submitting,
+                choice: "once",
+                error: "previous error"
+            )
+        )
+        cache.recordPendingDecision(
+            card,
+            profile: "default",
+            sessionIDs: ["restored-legacy-session"]
+        )
+        appState.messages = [card]
+
+        // No live token exists (restored from disk after process restart)
+        // Resume occurs and omits approval
+        let resumeResult = SessionResumeResult(
+            sessionId: "restored-legacy-session",
+            messages: [],
+            snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+        )
+        _ = appState.applyChatResume(resumeResult)
+
+        let afterResumeCard = try XCTUnwrap(appState.messages.first?.approval)
+        XCTAssertEqual(afterResumeCard.status, .pending, "Restored legacy .submitting card without live token must reset to .pending")
+        XCTAssertNil(afterResumeCard.choice, "Reset card must clear choice")
+        XCTAssertNil(afterResumeCard.error, "Reset card must clear error")
+    }
+
+    func testIdentifiedLiveSubmissionSurvivesAuthoritativeResumeOmission() async throws {
+        let appState = makeAppState()
+        prepareActiveSession(appState, id: "identified-session")
+        let card = ChatMessage(
+            id: "identified-msg",
+            role: .approval,
+            content: "Run identified deploy?",
+            timestamp: "1",
+            approval: ApprovalActivity(
+                sessionId: "identified-session",
+                requestId: "req-live-1",
+                command: "deploy",
+                description: "Run identified deploy?",
+                choices: ["once", "deny"],
+                allowPermanent: false,
+                smartDenied: false,
+                status: .pending,
+                choice: nil,
+                error: nil
+            )
+        )
+        appState.messages = [card]
+
+        let transport = ClarifyFakeTransport()
+        let socket = ClarifyFakeSocket()
+        _ = try await installConnectedClient(appState, socket: socket, transport: transport)
+
+        // Begin submission via respondToApproval so liveApprovalSubmissions contains .identified("req-live-1")
+        let sent = ClarifyGate()
+        socket.onSend = { sent.signal() }
+        let respondTask = Task {
+            await appState.respondToApproval(messageId: "identified-msg", choice: "once")
+        }
+        try await sent.wait("the approval.respond request to be sent")
+
+        let submittingCard = try XCTUnwrap(appState.messages.first?.approval)
+        XCTAssertEqual(submittingCard.status, .submitting)
+        XCTAssertEqual(submittingCard.choice, "once")
+
+        // Authoritative resume arrives while RPC is in flight, omitting req-live-1
+        let resumeResult = SessionResumeResult(
+            sessionId: "identified-session",
+            messages: [],
+            snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+        )
+        _ = appState.applyChatResume(resumeResult)
+
+        let afterResumeCard = try XCTUnwrap(appState.messages.first?.approval)
+        XCTAssertEqual(afterResumeCard.status, .submitting, "Live in-flight identified submission must survive resume")
+        XCTAssertEqual(afterResumeCard.choice, "once")
+
+        let rpcID = try rpcID(try XCTUnwrap(socket.sentTexts.last))
+        deliverResult(socket, rpcID: rpcID, result: ["resolved": 1])
+        await respondTask.value
+
+        let finalCard = try XCTUnwrap(appState.messages.first?.approval)
+        XCTAssertEqual(finalCard.status, .approved)
+    }
+
+    func testSameLegacyRequestReplayPreservesError() throws {
+        let appState = makeAppState()
+        prepareActiveSession(appState, id: "sess-error-replay")
+        let existing = ChatMessage(
+            id: "card-1",
+            role: .approval,
+            content: "Deploy command A",
+            timestamp: "1",
+            approval: ApprovalActivity(
+                sessionId: "sess-error-replay",
+                requestId: nil,
+                command: "cmd_a",
+                description: "Deploy command A",
+                choices: ["allow", "deny"],
+                allowPermanent: false,
+                smartDenied: false,
+                status: .error,
+                choice: "allow",
+                error: "Network failed"
+            )
+        )
+        appState.messages = [existing]
+
+        // Replay of same legacy request
+        let replayedActivity = ApprovalActivity(
+            sessionId: "sess-error-replay",
+            requestId: nil,
+            command: "cmd_a",
+            description: "Deploy command A",
+            choices: ["allow", "deny"],
+            allowPermanent: false,
+            smartDenied: false,
+            status: .pending,
+            choice: nil,
+            error: nil
+        )
+        appState.handleStreamEvent(.approval(sessionId: "sess-error-replay", activity: replayedActivity))
+
+        XCTAssertEqual(appState.messages.count, 1)
+        let card = try XCTUnwrap(appState.messages.first?.approval)
+        XCTAssertEqual(card.status, .error, "Replaying the same legacy request must preserve local .error")
+        XCTAssertEqual(card.error, "Network failed")
+        XCTAssertEqual(card.choice, "allow")
+        XCTAssertEqual(card.command, "cmd_a")
+    }
+
+    func testDifferentLegacyRequestReplacesStaleError() throws {
+        let appState = makeAppState()
+        prepareActiveSession(appState, id: "sess-error-replace")
+        let existing = ChatMessage(
+            id: "card-1",
+            role: .approval,
+            content: "Deploy command A",
+            timestamp: "1",
+            approval: ApprovalActivity(
+                sessionId: "sess-error-replace",
+                requestId: nil,
+                command: "cmd_a",
+                description: "Deploy command A",
+                choices: ["allow", "deny"],
+                allowPermanent: false,
+                smartDenied: false,
+                status: .error,
+                choice: "allow",
+                error: "Network failed"
+            )
+        )
+        appState.messages = [existing]
+
+        // Different legacy request arrives in the same session
+        let newActivity = ApprovalActivity(
+            sessionId: "sess-error-replace",
+            requestId: nil,
+            command: "cmd_b",
+            description: "Deploy command B",
+            choices: ["once", "deny"],
+            allowPermanent: false,
+            smartDenied: false,
+            status: .pending,
+            choice: nil,
+            error: nil
+        )
+        appState.handleStreamEvent(.approval(sessionId: "sess-error-replace", activity: newActivity))
+
+        XCTAssertEqual(appState.messages.count, 1, "Must not append a second retryable legacy card")
+        let card = try XCTUnwrap(appState.messages.first?.approval)
+        XCTAssertEqual(card.status, .pending, "Different legacy request must replace stale .error with fresh .pending")
+        XCTAssertNil(card.choice, "Stale choice must be cleared")
+        XCTAssertNil(card.error, "Stale error must be cleared")
+        XCTAssertEqual(card.command, "cmd_b")
+        XCTAssertEqual(card.description, "Deploy command B")
+        XCTAssertEqual(card.choices, ["once", "deny"])
+    }
+
+    func testIdentifiedApprovalReplayPreservesError() throws {
+        let appState = makeAppState()
+        prepareActiveSession(appState, id: "sess-identified-error")
+        let existing = ChatMessage(
+            id: "card-identified-1",
+            role: .approval,
+            content: "Deploy X",
+            timestamp: "1",
+            approval: ApprovalActivity(
+                sessionId: "sess-identified-error",
+                requestId: "req-err-1",
+                command: "cmd_x",
+                description: "Deploy X",
+                choices: ["once", "deny"],
+                allowPermanent: false,
+                smartDenied: false,
+                status: .error,
+                choice: "once",
+                error: "Timeout"
+            )
+        )
+        appState.messages = [existing]
+
+        // Stream replay of same identified approval
+        let replayedActivity = ApprovalActivity(
+            sessionId: "sess-identified-error",
+            requestId: "req-err-1",
+            command: "cmd_x",
+            description: "Deploy X",
+            choices: ["once", "deny"],
+            allowPermanent: false,
+            smartDenied: false,
+            status: .pending,
+            choice: nil,
+            error: nil
+        )
+        appState.handleStreamEvent(.approval(sessionId: "sess-identified-error", activity: replayedActivity))
+
+        XCTAssertEqual(appState.messages.count, 1)
+        let card = try XCTUnwrap(appState.messages.first?.approval)
+        XCTAssertEqual(card.status, .error, "Identified approval replay must preserve local .error")
+        XCTAssertEqual(card.error, "Timeout")
+        XCTAssertEqual(card.choice, "once")
+    }
+
+    func testSequentialLegacyTerminalCardDoesNotSwallowSubsequentLegacyApproval() throws {
+        let appState = makeAppState()
+        prepareActiveSession(appState, id: "sess-terminal-seq")
+        let terminalCard = ChatMessage(
+            id: "card-terminal-1",
+            role: .approval,
+            content: "Deploy command A",
+            timestamp: "1",
+            approval: ApprovalActivity(
+                sessionId: "sess-terminal-seq",
+                requestId: nil,
+                command: "cmd_a",
+                description: "Deploy command A",
+                choices: ["allow", "deny"],
+                allowPermanent: false,
+                smartDenied: false,
+                status: .approved,
+                choice: "allow",
+                error: nil
+            )
+        )
+        appState.messages = [terminalCard]
+
+        // Subsequent legacy request arrives
+        let nextActivity = ApprovalActivity(
+            sessionId: "sess-terminal-seq",
+            requestId: nil,
+            command: "cmd_b",
+            description: "Deploy command B",
+            choices: ["once", "deny"],
+            allowPermanent: false,
+            smartDenied: false,
+            status: .pending,
+            choice: nil,
+            error: nil
+        )
+        appState.handleStreamEvent(.approval(sessionId: "sess-terminal-seq", activity: nextActivity))
+
+        XCTAssertEqual(appState.messages.count, 2, "A terminal legacy card must not swallow a subsequent legacy approval")
+        let first = try XCTUnwrap(appState.messages[0].approval)
+        XCTAssertEqual(first.status, .approved)
+        XCTAssertEqual(first.command, "cmd_a")
+
+        let second = try XCTUnwrap(appState.messages[1].approval)
+        XCTAssertEqual(second.status, .pending)
+        XCTAssertEqual(second.command, "cmd_b")
+        XCTAssertNil(second.choice)
+        XCTAssertNil(second.error)
     }
 }
 
