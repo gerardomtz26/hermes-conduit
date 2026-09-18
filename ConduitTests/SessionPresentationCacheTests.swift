@@ -842,6 +842,716 @@ final class SessionPresentationCacheTests: XCTestCase {
         cache.clear(profile: profile)
     }
 
+    // MARK: - Merge: pending tool restoration
+
+    func testPendingToolStartUsesSideRecordUntilFullSave() throws {
+        let (cache, defaults, _, _) = try makeIsolatedCache()
+        let profile = "pending-side-record"
+        let sessionID = "pending-side-" + UUID().uuidString
+        cache.save(
+            [ChatMessage(id: "history", role: .assistant, content: "History", timestamp: "old")],
+            profile: profile,
+            sessionIDs: [sessionID]
+        )
+        let fullStoreBefore = defaults.data(forKey: "conduit.sessionPresentation.v1")
+        let pending = ChatMessage(
+            id: "pending", role: .tool, content: "", timestamp: "now",
+            tool: ToolActivity(id: "call-1", name: "terminal", input: "pwd", output: nil, status: .running)
+        )
+
+        cache.recordPendingToolStart(pending, profile: profile, sessionIDs: [sessionID])
+
+        XCTAssertEqual(defaults.data(forKey: "conduit.sessionPresentation.v1"), fullStoreBefore)
+        XCTAssertNotNil(defaults.data(forKey: "conduit.sessionPresentation.pendingTools.v1"))
+        XCTAssertEqual(cache.merge([], profile: profile, sessionIDs: [sessionID], includePendingTools: true).map(\.id), [pending.id])
+
+        cache.save([pending], profile: profile, sessionIDs: [sessionID])
+        XCTAssertNil(defaults.data(forKey: "conduit.sessionPresentation.pendingTools.v1"))
+        XCTAssertEqual(cache.merge([], profile: profile, sessionIDs: [sessionID], includePendingTools: true).map(\.id), [pending.id])
+    }
+
+    func testAmbiguousIdlessCompletionDoesNotRemovePendingCalls() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "legacy-idless-pending"
+        let sessionID = "legacy-idless-" + UUID().uuidString
+        for (id, input) in [("first", "pwd"), ("second", "git status")] {
+            cache.recordPendingToolStart(
+                ChatMessage(
+                    id: id, role: .tool, content: "", timestamp: id,
+                    tool: ToolActivity(id: nil, name: "terminal", input: input, output: nil, status: .running)
+                ),
+                profile: profile,
+                sessionIDs: [sessionID]
+            )
+        }
+
+        cache.resolvePendingTool(named: "terminal", profile: profile, sessionIDs: [sessionID])
+
+        XCTAssertEqual(
+            cache.merge([], profile: profile, sessionIDs: [sessionID], includePendingTools: true).map(\.id),
+            ["first", "second"],
+            "Ambiguous ID-less completions without an exact message ID must not guess or remove either candidate"
+        )
+    }
+
+    func testUniqueIdlessCompletionRemovesSinglePendingCall() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "legacy-idless-unique"
+        let sessionID = "legacy-idless-unique-" + UUID().uuidString
+        cache.recordPendingToolStart(
+            ChatMessage(
+                id: "only", role: .tool, content: "", timestamp: "only",
+                tool: ToolActivity(id: nil, name: "terminal", input: "pwd", output: nil, status: .running)
+            ),
+            profile: profile,
+            sessionIDs: [sessionID]
+        )
+
+        cache.resolvePendingTool(named: "terminal", profile: profile, sessionIDs: [sessionID])
+
+        XCTAssertEqual(
+            cache.merge([], profile: profile, sessionIDs: [sessionID], includePendingTools: true).map(\.id),
+            [],
+            "A unique ID-less completion safely resolves the single running candidate"
+        )
+    }
+
+    func testResolvingSpecificMessageDoesNotEvictSubsequentIdentifiedCall() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "mixed-tool-order"
+        let sessionID = "mixed-" + UUID().uuidString
+        let idless = ChatMessage(
+            id: "msg-1", role: .tool, content: "", timestamp: "1",
+            tool: ToolActivity(id: nil, name: "terminal", input: "pwd", output: nil, status: .running)
+        )
+        let identified = ChatMessage(
+            id: "msg-2", role: .tool, content: "", timestamp: "2",
+            tool: ToolActivity(id: "call-b", name: "terminal", input: "git status", output: nil, status: .running)
+        )
+        cache.recordPendingToolStart(idless, profile: profile, sessionIDs: [sessionID])
+        cache.recordPendingToolStart(identified, profile: profile, sessionIDs: [sessionID])
+
+        // Resolve the ID-less card by its exact message ID
+        cache.resolvePendingTool(
+            named: "terminal",
+            toolID: nil,
+            messageID: "msg-1",
+            profile: profile,
+            sessionIDs: [sessionID]
+        )
+
+        // msg-1 is resolved, msg-2 remains in side-store
+        XCTAssertEqual(
+            cache.merge([], profile: profile, sessionIDs: [sessionID], includePendingTools: true).map(\.id),
+            ["msg-2"],
+            "Resolving an ID-less card by message ID must never evict subsequent identified tool calls"
+        )
+    }
+
+    func testIdlessCompletionResolvesMirroredCandidateAcrossPendingAndFullStores() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "mirrored-cross-store"
+        let sessionID = "mirrored-" + UUID().uuidString
+        let message = ChatMessage(
+            id: "msg-shared", role: .tool, content: "", timestamp: "1",
+            tool: ToolActivity(id: nil, name: "terminal", input: "pwd", output: nil, status: .running)
+        )
+        // Saved in full store
+        cache.save([message], profile: profile, sessionIDs: [sessionID])
+        // Also recorded in pending side-store
+        cache.recordPendingToolStart(message, profile: profile, sessionIDs: [sessionID])
+
+        cache.resolvePendingTool(named: "terminal", profile: profile, sessionIDs: [sessionID])
+
+        XCTAssertEqual(
+            cache.merge([], profile: profile, sessionIDs: [sessionID], includePendingTools: true).map(\.id),
+            [],
+            "A mirrored candidate across both stores has a single logical message ID and resolves cleanly"
+        )
+    }
+
+    func testCrossStoreAmbiguityPreventsIdlessResolution() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "cross-store-ambiguous"
+        let sessionID = "ambiguous-" + UUID().uuidString
+        let savedMessage = ChatMessage(
+            id: "msg-saved", role: .tool, content: "", timestamp: "1",
+            tool: ToolActivity(id: nil, name: "terminal", input: "pwd", output: nil, status: .running)
+        )
+        let pendingMessage = ChatMessage(
+            id: "msg-pending", role: .tool, content: "", timestamp: "2",
+            tool: ToolActivity(id: nil, name: "terminal", input: "git status", output: nil, status: .running)
+        )
+        // One in full store, one in pending side-store
+        cache.save([savedMessage], profile: profile, sessionIDs: [sessionID])
+        cache.recordPendingToolStart(pendingMessage, profile: profile, sessionIDs: [sessionID])
+
+        // ID-less completion must inspect both stores and refuse to resolve either because there are 2 distinct candidates
+        cache.resolvePendingTool(named: "terminal", profile: profile, sessionIDs: [sessionID])
+
+        let remainingIDs = Set(cache.merge([], profile: profile, sessionIDs: [sessionID], includePendingTools: true).map(\.id))
+        XCTAssertTrue(remainingIDs.contains("msg-saved"))
+        XCTAssertTrue(remainingIDs.contains("msg-pending"))
+    }
+
+    func testExactMessageIDResolvesAcrossStoresWithoutIdlessAmbiguity() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "exact-cross-store"
+        let sessionID = "exact-" + UUID().uuidString
+        let savedMessage = ChatMessage(
+            id: "msg-saved", role: .tool, content: "", timestamp: "1",
+            tool: ToolActivity(id: nil, name: "terminal", input: "pwd", output: nil, status: .running)
+        )
+        let pendingMessage = ChatMessage(
+            id: "msg-pending", role: .tool, content: "", timestamp: "2",
+            tool: ToolActivity(id: nil, name: "terminal", input: "git status", output: nil, status: .running)
+        )
+        cache.save([savedMessage], profile: profile, sessionIDs: [sessionID])
+        cache.recordPendingToolStart(pendingMessage, profile: profile, sessionIDs: [sessionID])
+
+        // Exact messageID resolution targets msg-pending and ignores ambiguity
+        cache.resolvePendingTool(
+            named: "terminal",
+            messageID: "msg-pending",
+            profile: profile,
+            sessionIDs: [sessionID]
+        )
+
+        let remainingIDs = cache.merge([], profile: profile, sessionIDs: [sessionID], includePendingTools: true).map(\.id)
+        XCTAssertEqual(remainingIDs, ["msg-saved"])
+    }
+
+    func testFullSaveDoesNotFoldPendingMarkerSupersededByStableCompletion() throws {
+        let (cache, defaults, _, _) = try makeIsolatedCache()
+        let profile = "pending-completed-before-flush"
+        let sessionID = "pending-completed-" + UUID().uuidString
+        let pending = ChatMessage(
+            id: "local-running", role: .tool, content: "", timestamp: "start",
+            tool: ToolActivity(id: "call-1", name: "terminal", input: "pwd", output: nil, status: .running)
+        )
+        cache.recordPendingToolStart(pending, profile: profile, sessionIDs: [sessionID])
+
+        let completion = ChatMessage(
+            id: "gateway-complete", role: .tool, content: "", timestamp: "done",
+            tool: ToolActivity(id: "call-1", name: "terminal", input: nil, output: "/repo", status: .complete)
+        )
+        cache.save([completion], profile: profile, sessionIDs: [sessionID])
+
+        XCTAssertNil(defaults.data(forKey: "conduit.sessionPresentation.pendingTools.v1"))
+        let restored = cache.merge([], profile: profile, sessionIDs: [sessionID], includePendingTools: true)
+        XCTAssertFalse(restored.contains { $0.tool?.status == .running })
+    }
+
+    func testProfileClearAndAliasConsolidationCoverPendingSideRecords() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "pending-side-lifecycle"
+        let runtimeID = "runtime-" + UUID().uuidString
+        let durableID = "durable-" + UUID().uuidString
+        let pending = ChatMessage(
+            id: "pending", role: .tool, content: "", timestamp: "now",
+            tool: ToolActivity(id: "call-1", name: "terminal", input: "pwd", output: nil, status: .running)
+        )
+        cache.recordPendingToolStart(pending, profile: profile, sessionIDs: [runtimeID])
+
+        cache.consolidateUnderDurableKey(
+            profile: profile,
+            durableSessionID: durableID,
+            runtimeAliases: [runtimeID]
+        )
+
+        XCTAssertTrue(cache.merge([], profile: profile, sessionIDs: [runtimeID], includePendingTools: true).isEmpty)
+        XCTAssertEqual(
+            cache.merge([], profile: profile, sessionIDs: [durableID], includePendingTools: true).map(\.id),
+            [pending.id]
+        )
+        cache.clear(profile: profile)
+        XCTAssertTrue(cache.merge([], profile: profile, sessionIDs: [durableID], includePendingTools: true).isEmpty)
+    }
+
+    func testLegacyIDLessResolutionKeepsBothDistinctRecordsOnCrossStoreAmbiguity() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "legacy-split-store"
+        let sessionID = "legacy-split-" + UUID().uuidString
+        let older = ChatMessage(
+            id: "older-full", role: .tool, content: "", timestamp: "older",
+            tool: ToolActivity(id: nil, name: "terminal", input: "pwd", output: nil, status: .running)
+        )
+        cache.save([older], profile: profile, sessionIDs: [sessionID])
+        let newer = ChatMessage(
+            id: "newer-side", role: .tool, content: "", timestamp: "newer",
+            tool: ToolActivity(id: nil, name: "terminal", input: "git status", output: nil, status: .running)
+        )
+        cache.recordPendingToolStart(newer, profile: profile, sessionIDs: [sessionID])
+
+        cache.resolvePendingTool(named: "terminal", profile: profile, sessionIDs: [sessionID])
+
+        let remaining = Set(cache.merge([], profile: profile, sessionIDs: [sessionID], includePendingTools: true).map(\.id))
+        XCTAssertEqual(
+            remaining,
+            [older.id, newer.id],
+            "Cross-store ambiguity must not guess or remove distinct calls from either persistence layer"
+        )
+    }
+
+    func testMergeRestoresLaterPendingToolAfterHistoricalCompletionWithSameInput() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "pending-tool-same-input"
+        let sessionID = "pending-tool-" + UUID().uuidString
+        let historical = ChatMessage(
+            id: "cached-historical",
+            role: .tool,
+            content: "",
+            timestamp: "older",
+            tool: ToolActivity(id: nil, name: "terminal", input: "git status", output: "clean", status: .complete)
+        )
+        let pending = ChatMessage(
+            id: "cached-pending",
+            role: .tool,
+            content: "",
+            timestamp: "newer",
+            tool: ToolActivity(id: nil, name: "terminal", input: "git status", output: nil, status: .running)
+        )
+        cache.save([historical], profile: profile, sessionIDs: [sessionID])
+        cache.recordPendingToolStart(pending, profile: profile, sessionIDs: [sessionID])
+
+        let gatewayHistorical = ChatMessage(
+            id: "gateway-historical",
+            role: .tool,
+            content: "",
+            timestamp: "",
+            tool: ToolActivity(id: nil, name: "terminal", input: "git status", output: "clean", status: .complete)
+        )
+        let merged = cache.merge(
+            [gatewayHistorical],
+            profile: profile,
+            sessionIDs: [sessionID],
+            includePendingTools: true
+        )
+
+        XCTAssertEqual(merged.count, 2)
+        XCTAssertEqual(merged.last?.id, pending.id)
+        XCTAssertEqual(merged.last?.tool?.status, .running)
+    }
+
+    func testMergeKeepsPendingOnlyCacheWhenGatewayHasHistoricalSameNameCompletion() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "pending-tool-only"
+        let sessionID = "pending-only-" + UUID().uuidString
+        let pending = ChatMessage(
+            id: "cached-pending-only",
+            role: .tool,
+            content: "",
+            timestamp: "newer",
+            tool: ToolActivity(id: nil, name: "terminal", input: "git status", output: nil, status: .running)
+        )
+        cache.recordPendingToolStart(pending, profile: profile, sessionIDs: [sessionID])
+
+        let merged = cache.merge(
+            [
+                ChatMessage(
+                    id: "gateway-historical",
+                    role: .tool,
+                    content: "",
+                    timestamp: "",
+                    tool: ToolActivity(id: nil, name: "terminal", input: "pwd", output: "/repo", status: .complete)
+                ),
+            ],
+            profile: profile,
+            sessionIDs: [sessionID],
+            includePendingTools: true
+        )
+
+        XCTAssertEqual(merged.map(\.id), ["gateway-historical", pending.id])
+        XCTAssertEqual(merged.last?.tool?.status, .running)
+    }
+
+    func testMergeDoesNotResurrectPendingToolWhenCompletionSharesMessageIdentity() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "resolved-pending-tool"
+        let sessionID = "resolved-pending-" + UUID().uuidString
+        let historical = ChatMessage(
+            id: "cached-historical",
+            role: .tool,
+            content: "",
+            timestamp: "older",
+            tool: ToolActivity(id: nil, name: "terminal", input: "pwd", output: "/repo", status: .complete)
+        )
+        let pending = ChatMessage(
+            id: "cached-pending",
+            role: .tool,
+            content: "",
+            timestamp: "newer",
+            tool: ToolActivity(id: nil, name: "terminal", input: "git status", output: nil, status: .running)
+        )
+        cache.save([historical], profile: profile, sessionIDs: [sessionID])
+        cache.recordPendingToolStart(pending, profile: profile, sessionIDs: [sessionID])
+
+        let gatewayMessages = [
+            ChatMessage(
+                id: "gateway-before-cache-window",
+                role: .tool,
+                content: "",
+                timestamp: "",
+                tool: ToolActivity(id: nil, name: "terminal", input: "echo earlier", output: "earlier", status: .complete)
+            ),
+            ChatMessage(
+                id: "gateway-historical",
+                role: .tool,
+                content: "",
+                timestamp: "",
+                tool: ToolActivity(id: nil, name: "terminal", input: "pwd", output: "/repo", status: .complete)
+            ),
+            ChatMessage(
+                id: pending.id,
+                role: .tool,
+                content: "",
+                timestamp: "",
+                tool: ToolActivity(id: nil, name: "terminal", input: "git status", output: "clean", status: .complete)
+            ),
+        ]
+        let merged = cache.merge(
+            gatewayMessages,
+            profile: profile,
+            sessionIDs: [sessionID],
+            includePendingTools: true
+        )
+
+        XCTAssertEqual(merged.count, gatewayMessages.count)
+        XCTAssertEqual(merged.last?.id, pending.id)
+        XCTAssertEqual(merged.last?.tool?.status, .complete)
+        XCTAssertFalse(merged.contains { $0.tool?.status == .running })
+    }
+
+    func testMergeKeepsPendingToolWhenCompletionHasDifferentKnownIdentity() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "ambiguous-completed-tool"
+        let sessionID = "ambiguous-completed-" + UUID().uuidString
+        let pending = ChatMessage(
+            id: "cached-pending",
+            role: .tool,
+            content: "",
+            timestamp: "newer",
+            tool: ToolActivity(id: "cached-tool", name: "terminal", input: "git status", output: nil, status: .running)
+        )
+        cache.recordPendingToolStart(pending, profile: profile, sessionIDs: [sessionID])
+
+        let gatewayCompletion = ChatMessage(
+            id: "gateway-completion",
+            role: .tool,
+            content: "",
+            timestamp: "",
+            tool: ToolActivity(id: "gateway-tool", name: "terminal", input: "git status", output: "clean", status: .complete)
+        )
+        let merged = cache.merge(
+            [gatewayCompletion],
+            profile: profile,
+            sessionIDs: [sessionID],
+            includePendingTools: true
+        )
+
+        XCTAssertEqual(merged.map(\.id), [gatewayCompletion.id, pending.id])
+        XCTAssertEqual(merged.last?.tool?.status, .running)
+    }
+
+    func testMergeKeepsDistinctRunningToolWhenKnownToolIDsConflict() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "ambiguous-running-tool"
+        let sessionID = "ambiguous-running-" + UUID().uuidString
+        let pending = ChatMessage(
+            id: "cached-pending",
+            role: .tool,
+            content: "",
+            timestamp: "newer",
+            tool: ToolActivity(id: "cached-tool", name: "terminal", input: "git status", output: nil, status: .running)
+        )
+        cache.recordPendingToolStart(pending, profile: profile, sessionIDs: [sessionID])
+
+        let gatewayRunning = ChatMessage(
+            id: "gateway-running",
+            role: .tool,
+            content: "",
+            timestamp: "",
+            tool: ToolActivity(id: "gateway-tool", name: "terminal", input: "git status", output: nil, status: .running)
+        )
+        let merged = cache.merge(
+            [gatewayRunning],
+            profile: profile,
+            sessionIDs: [sessionID],
+            includePendingTools: true
+        )
+
+        XCTAssertEqual(merged.map(\.id), [gatewayRunning.id, pending.id])
+        XCTAssertEqual(merged.filter { $0.tool?.status == .running }.count, 2)
+    }
+
+    func testResolvePendingToolByIDKeepsOtherSameNameCallsAndIgnoresUnknownID() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "pending-tool-id-resolution"
+        let sessionID = "pending-tool-id-" + UUID().uuidString
+        let first = ChatMessage(
+            id: "cached-a",
+            role: .tool,
+            content: "",
+            timestamp: "a",
+            tool: ToolActivity(id: "call-a", name: "terminal", input: "git status", output: nil, status: .running)
+        )
+        let second = ChatMessage(
+            id: "cached-b",
+            role: .tool,
+            content: "",
+            timestamp: "b",
+            tool: ToolActivity(id: "call-b", name: "terminal", input: "git status", output: nil, status: .running)
+        )
+        cache.recordPendingToolStart(first, profile: profile, sessionIDs: [sessionID])
+        cache.recordPendingToolStart(second, profile: profile, sessionIDs: [sessionID])
+
+        cache.resolvePendingTool(
+            named: "terminal",
+            toolID: "unknown-call",
+            profile: profile,
+            sessionIDs: [sessionID]
+        )
+        XCTAssertEqual(
+            cache.merge([], profile: profile, sessionIDs: [sessionID], includePendingTools: true)
+                .compactMap(\.tool).compactMap(\.id),
+            ["call-a", "call-b"],
+            "An unmatched stable completion must not fall back to the newest same-name cache record"
+        )
+
+        cache.resolvePendingTool(
+            named: "terminal",
+            toolID: "call-a",
+            profile: profile,
+            sessionIDs: [sessionID]
+        )
+        XCTAssertEqual(
+            cache.merge([], profile: profile, sessionIDs: [sessionID], includePendingTools: true)
+                .compactMap(\.tool).compactMap(\.id),
+            ["call-b"],
+            "An out-of-order completion removes only its exact pending tool"
+        )
+    }
+
+    func testMergeRestoresLaterPendingToolOnceAcrossAliasesAfterDifferentHistoricalInput() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "pending-tool-aliases"
+        let requestedID = "pending-tool-requested-" + UUID().uuidString
+        let resolvedID = "pending-tool-resolved-" + UUID().uuidString
+        let historical = ChatMessage(
+            id: "cached-historical",
+            role: .tool,
+            content: "",
+            timestamp: "older",
+            tool: ToolActivity(id: nil, name: "terminal", input: "pwd", output: "/repo", status: .complete)
+        )
+        let pending = ChatMessage(
+            id: "cached-pending",
+            role: .tool,
+            content: "",
+            timestamp: "newer",
+            tool: ToolActivity(id: nil, name: "terminal", input: "git status", output: nil, status: .running)
+        )
+        cache.save([historical], profile: profile, sessionIDs: [requestedID, resolvedID])
+        cache.recordPendingToolStart(pending, profile: profile, sessionIDs: [requestedID, resolvedID])
+
+        let merged = cache.merge(
+            [
+                ChatMessage(
+                    id: "gateway-historical",
+                    role: .tool,
+                    content: "",
+                    timestamp: "",
+                    tool: ToolActivity(id: nil, name: " TERMINAL ", input: "pwd", output: "/repo", status: .complete)
+                ),
+            ],
+            profile: profile,
+            sessionIDs: [resolvedID, requestedID],
+            includePendingTools: true
+        )
+
+        XCTAssertEqual(merged.filter { $0.tool?.status == .running }.map(\.id), [pending.id])
+        XCTAssertEqual(merged.count, 2)
+    }
+
+    func testToolResolutionMatchesSameStableIDWithDifferentNames() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "stable-id-rename"
+        let sessionID = "sess-" + UUID().uuidString
+
+        let running = ChatMessage(
+            id: "msg-start",
+            role: .tool,
+            content: "",
+            timestamp: "start-ts",
+            tool: ToolActivity(id: "call-123", name: "bash", input: "echo hi", output: nil, status: .running)
+        )
+        cache.recordPendingToolStart(running, profile: profile, sessionIDs: [sessionID])
+
+        // Gateway completion reports a different tool name (e.g. terminal vs bash), but same stable call ID
+        let completed = ChatMessage(
+            id: "msg-complete",
+            role: .tool,
+            content: "",
+            timestamp: "complete-ts",
+            tool: ToolActivity(id: "call-123", name: "terminal", input: "echo hi", output: "hi\n", status: .complete)
+        )
+
+        let merged = cache.merge([completed], profile: profile, sessionIDs: [sessionID], includePendingTools: true)
+        XCTAssertEqual(merged.count, 1, "Completed ID-bearing tool must resolve the running card despite renamed tool")
+        XCTAssertEqual(merged.first?.tool?.status, .complete)
+        XCTAssertEqual(merged.first?.tool?.id, "call-123")
+    }
+
+    func testToolResolutionKeepsDifferentStableIDsDistinctEvenWithSameName() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "distinct-stable-ids"
+        let sessionID = "sess-" + UUID().uuidString
+
+        let running = ChatMessage(
+            id: "msg-start-1",
+            role: .tool,
+            content: "",
+            timestamp: "start-ts-1",
+            tool: ToolActivity(id: "call-alpha", name: "search", input: "query1", output: nil, status: .running)
+        )
+        cache.recordPendingToolStart(running, profile: profile, sessionIDs: [sessionID])
+
+        // Completion has a DIFFERENT stable ID with the same tool name
+        let completed = ChatMessage(
+            id: "msg-complete-2",
+            role: .tool,
+            content: "",
+            timestamp: "complete-ts-2",
+            tool: ToolActivity(id: "call-beta", name: "search", input: "query2", output: "result2", status: .complete)
+        )
+
+        let merged = cache.merge([completed], profile: profile, sessionIDs: [sessionID], includePendingTools: true)
+        XCTAssertEqual(merged.count, 2, "Different stable tool IDs must remain distinct even with identical names")
+        let runningCards = merged.filter { $0.tool?.status == .running }
+        XCTAssertEqual(runningCards.map { $0.tool?.id }, ["call-alpha"])
+    }
+
+    func testRelaunchUniqueIdlessStartResolvesAgainstIdentifiedCompletion() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "unique-idless"
+        let sessionID = "sess-" + UUID().uuidString
+
+        let running = ChatMessage(
+            id: "msg-idless-start",
+            role: .tool,
+            content: "",
+            timestamp: "start-ts",
+            tool: ToolActivity(id: nil, name: "read_file", input: "path.txt", output: nil, status: .running)
+        )
+        cache.recordPendingToolStart(running, profile: profile, sessionIDs: [sessionID])
+
+        let completed = ChatMessage(
+            id: "msg-completed",
+            role: .tool,
+            content: "",
+            timestamp: "complete-ts",
+            tool: ToolActivity(id: "call-complete-1", name: "read_file", input: "path.txt", output: "file contents", status: .complete)
+        )
+
+        let merged = cache.merge([completed], profile: profile, sessionIDs: [sessionID], includePendingTools: true)
+        XCTAssertEqual(merged.count, 1, "Unique ID-less running start must resolve against identified completion")
+        XCTAssertEqual(merged.first?.tool?.status, .complete)
+        XCTAssertEqual(merged.first?.tool?.id, "call-complete-1")
+    }
+
+    func testRelaunchAmbiguousIdlessStartsRemainConservative() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "ambiguous-idless"
+        let sessionID = "sess-" + UUID().uuidString
+
+        let running1 = ChatMessage(
+            id: "msg-idless-1",
+            role: .tool,
+            content: "",
+            timestamp: "start-ts-1",
+            tool: ToolActivity(id: nil, name: "search", input: "q1", output: nil, status: .running)
+        )
+        let running2 = ChatMessage(
+            id: "msg-idless-2",
+            role: .tool,
+            content: "",
+            timestamp: "start-ts-2",
+            tool: ToolActivity(id: nil, name: "search", input: "q2", output: nil, status: .running)
+        )
+        cache.recordPendingToolStart(running1, profile: profile, sessionIDs: [sessionID])
+        cache.recordPendingToolStart(running2, profile: profile, sessionIDs: [sessionID])
+
+        let completed = ChatMessage(
+            id: "msg-completed",
+            role: .tool,
+            content: "",
+            timestamp: "complete-ts",
+            tool: ToolActivity(id: "call-search-done", name: "search", input: "q1", output: "done", status: .complete)
+        )
+
+        let merged = cache.merge([completed], profile: profile, sessionIDs: [sessionID], includePendingTools: true)
+        // With 2 ambiguous ID-less running starts for "search", cache must refuse to guess which resolved
+        XCTAssertTrue(merged.contains { $0.id == "msg-idless-1" && $0.tool?.status == .running })
+        XCTAssertTrue(merged.contains { $0.id == "msg-idless-2" && $0.tool?.status == .running })
+        XCTAssertEqual(merged.count, 3, "Ambiguous ID-less running starts must be conservatively preserved")
+    }
+
+    func testRelaunchStableIdExactMatchResolvesDespiteAmbiguity() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "stable-id-exact"
+        let sessionID = "sess-" + UUID().uuidString
+
+        let running = ChatMessage(
+            id: "msg-running-exact",
+            role: .tool,
+            content: "",
+            timestamp: "start-ts",
+            tool: ToolActivity(id: "call-exact-42", name: "bash", input: "echo hi", output: nil, status: .running)
+        )
+        cache.recordPendingToolStart(running, profile: profile, sessionIDs: [sessionID])
+
+        let completed = ChatMessage(
+            id: "msg-completed-exact",
+            role: .tool,
+            content: "",
+            timestamp: "complete-ts",
+            tool: ToolActivity(id: "call-exact-42", name: "bash", input: "echo hi", output: "hi\n", status: .complete)
+        )
+
+        let merged = cache.merge([completed], profile: profile, sessionIDs: [sessionID], includePendingTools: true)
+        XCTAssertEqual(merged.count, 1, "Stable-ID exact match resolves the running tool card")
+        XCTAssertEqual(merged.first?.tool?.status, .complete)
+        XCTAssertEqual(merged.first?.tool?.id, "call-exact-42")
+    }
+
+    func testRelaunchStableIdConflictRemainsConservative() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "stable-id-conflict"
+        let sessionID = "sess-" + UUID().uuidString
+
+        let running = ChatMessage(
+            id: "msg-running-x",
+            role: .tool,
+            content: "",
+            timestamp: "start-ts",
+            tool: ToolActivity(id: "call-X", name: "bash", input: "ls", output: nil, status: .running)
+        )
+        cache.recordPendingToolStart(running, profile: profile, sessionIDs: [sessionID])
+
+        let completed = ChatMessage(
+            id: "msg-completed-y",
+            role: .tool,
+            content: "",
+            timestamp: "complete-ts",
+            tool: ToolActivity(id: "call-Y", name: "bash", input: "ls", output: "file.txt", status: .complete)
+        )
+
+        let merged = cache.merge([completed], profile: profile, sessionIDs: [sessionID], includePendingTools: true)
+        XCTAssertEqual(merged.count, 2, "Conflicting stable IDs must not collapse by tool name")
+        XCTAssertTrue(merged.contains { $0.tool?.id == "call-X" && $0.tool?.status == .running })
+        XCTAssertTrue(merged.contains { $0.tool?.id == "call-Y" && $0.tool?.status == .complete })
+    }
+
     /// Duplicate STRINGS inside sessionIDs behave like any other
     /// multi-alias lookup rather than a doubled pool.
     func testDuplicateStringsInsideSessionIDsDoNotDuplicateCandidates() throws {
@@ -1122,6 +1832,107 @@ final class SessionPresentationCacheTests: XCTestCase {
     }
 
     // MARK: - Merge: pending approval restoration
+
+    func testApplyChatResumeRestoresAuthoritativePendingApprovalWithoutCache() throws {
+        let suiteName = "conduit.tests.pending-approval-snapshot-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let cache = SessionPresentationCache(defaults: defaults)
+        let appState = AppState(
+            defaults: defaults,
+            loadSavedConnection: false,
+            clearSessionPresentationCache: { cache.clear() },
+            sessionPresentationCache: cache
+        )
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertTrue(appState.applyChatResume(SessionResumeResult(
+            sessionId: "runtime-approval",
+            messages: [],
+            snapshot: SessionRuntimeSnapshot(object: [
+                "running": .bool(true),
+                "pending_approval": .object([
+                    "request_id": .string("approval-42"),
+                    "command": .string("deploy"),
+                    "description": .string("Deploy now?"),
+                    "choices": .array([.string("once"), .string("deny")])
+                ])
+            ])
+        )))
+
+        let card = try XCTUnwrap(appState.messages.first?.approval)
+        XCTAssertEqual(card.requestId, "approval-42")
+        XCTAssertEqual(card.sessionId, "runtime-approval")
+        XCTAssertEqual(card.status, .pending)
+    }
+
+    func testAuthoritativeApprovalResetsSameCachedSubmittingRequestAndDropsLegacyAmbiguity() throws {
+        let suiteName = "conduit.tests.pending-approval-authority-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let cache = SessionPresentationCache(defaults: defaults)
+        let appState = AppState(
+            defaults: defaults,
+            loadSavedConnection: false,
+            clearSessionPresentationCache: { cache.clear() },
+            sessionPresentationCache: cache
+        )
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let sessionId = "approval-authority"
+        let cards = [
+            ApprovalActivity(sessionId: sessionId, requestId: "req-current", command: "old", description: "Old text", choices: nil, allowPermanent: false, smartDenied: false, status: .submitting),
+            ApprovalActivity(sessionId: sessionId, command: "legacy", description: "Legacy card", choices: nil, allowPermanent: false, smartDenied: false, status: .pending)
+        ].enumerated().map { index, approval in
+            ChatMessage(id: "approval-\(index)", role: .approval, content: approval.description, timestamp: "1", approval: approval)
+        }
+        cache.save(cards, profile: appState.activeProfile, sessionIDs: [sessionId])
+
+        XCTAssertTrue(appState.applyChatResume(SessionResumeResult(
+            sessionId: sessionId,
+            messages: [],
+            snapshot: SessionRuntimeSnapshot(object: [
+                "pending_approval": .object([
+                    "request_id": .string("req-current"),
+                    "command": .string("new"),
+                    "description": .string("Current text")
+                ])
+            ])
+        )))
+
+        let approvals = appState.messages.compactMap(\.approval)
+        XCTAssertEqual(approvals.count, 1)
+        XCTAssertEqual(approvals[0].requestId, "req-current")
+        XCTAssertEqual(approvals[0].description, "Current text")
+        XCTAssertEqual(approvals[0].status, .pending)
+    }
+
+    func testCacheKeepsTwoRequestIdentifiedApprovalsForOneSessionDistinct() throws {
+        let suiteName = "conduit.tests.approval-request-identity-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let cache = SessionPresentationCache(defaults: defaults)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let sessionId = "same-session"
+        for requestId in ["req-a", "req-b"] {
+            let approval = ApprovalActivity(
+                sessionId: sessionId,
+                requestId: requestId,
+                command: requestId,
+                description: requestId,
+                choices: nil,
+                allowPermanent: false,
+                smartDenied: false,
+                status: .pending
+            )
+            cache.recordPendingDecision(
+                ChatMessage(id: requestId, role: .approval, content: requestId, timestamp: "1", approval: approval),
+                profile: "default",
+                sessionIDs: [sessionId]
+            )
+        }
+
+        let restored = cache.merge(
+            [], profile: "default", sessionIDs: [sessionId], includePendingApprovals: true
+        ).compactMap(\.approval)
+        XCTAssertEqual(Set(restored.compactMap(\.requestId)), Set(["req-a", "req-b"]))
+    }
 
     func testMergeRestoresPendingApprovalWhenRequested() {
         let cache = SessionPresentationCache.shared
