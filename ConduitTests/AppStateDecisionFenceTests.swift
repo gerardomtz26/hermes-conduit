@@ -832,6 +832,177 @@ final class AppStateDecisionFenceTests: XCTestCase {
         XCTAssertEqual(settledCard.choice, "approve")
     }
 
+    func testAuthoritativeIdentifiedApprovalReplayDuringSubmissionPreservesSubmittingState() async throws {
+        let appState = makeAppState()
+        let identifiedApproval = approvalFixture(status: .pending, requestId: "req-identified-1")
+        appState.messages = [identifiedApproval]
+        appState.activeSessionId = "default"
+
+        let transport = ClarifyFakeTransport()
+        let socket = ClarifyFakeSocket()
+        _ = try await installConnectedClient(appState, socket: socket, transport: transport)
+
+        // User submits decision -> status becomes .submitting
+        let parked = try await parkApprovalRespond(appState: appState, socket: socket, choice: "approve")
+        XCTAssertEqual(appState.messages.first?.approval?.status, .submitting)
+        XCTAssertEqual(appState.messages.count, 1)
+
+        // Authoritative replay arrives via sessionInfo snapshot while approval.respond is still in flight
+        let snapshot = SessionRuntimeSnapshot(object: [
+            "pending_approval": .object([
+                "request_id": .string("req-identified-1"),
+                "command": .string("deploy"),
+                "description": .string("Updated deploy description?")
+            ])
+        ])
+        appState.handleStreamEvent(.sessionInfo(sessionId: "default", snapshot: snapshot))
+
+        // Card must NOT be downgraded to .pending, must not duplicate, choice retained
+        XCTAssertEqual(appState.messages.count, 1, "Must not create a duplicate card")
+        let inFlightCard = try XCTUnwrap(appState.messages.first?.approval)
+        XCTAssertEqual(inFlightCard.status, .submitting, "Authoritative replay must not overwrite in-flight .submitting status")
+        XCTAssertEqual(inFlightCard.choice, "approve", "User's pending choice must be retained")
+
+        // Now deliver response from gateway
+        deliverResult(socket, rpcID: parked.rpcID, result: ["resolved": 1])
+        await parked.task.value
+
+        // Settle into .approved
+        let settledCard = try XCTUnwrap(appState.messages.first?.approval)
+        XCTAssertEqual(settledCard.status, .approved)
+        XCTAssertEqual(settledCard.choice, "approve")
+    }
+
+    func testAuthoritativeReplayDoesNotDowngradeTerminalApprovalStates() {
+        let testCases: [(ApprovalActivity.Status, String?)] = [
+            (.approved, "approve"),
+            (.rejected, "deny"),
+            (.expired, nil)
+        ]
+
+        for (status, choice) in testCases {
+            let appState = makeAppState()
+            appState.activeSessionId = "default"
+            let terminalApproval = ChatMessage(
+                id: "approval-term-\(status)",
+                role: .approval,
+                content: "Run the deploy?",
+                timestamp: "1",
+                approval: ApprovalActivity(
+                    sessionId: "default",
+                    requestId: "req-terminal-1",
+                    command: "deploy",
+                    description: "Run the deploy?",
+                    choices: nil,
+                    allowPermanent: false,
+                    smartDenied: false,
+                    status: status,
+                    choice: choice,
+                    error: status == .expired ? "Expired" : nil
+                )
+            )
+            appState.messages = [terminalApproval]
+
+            // Authoritative replay arrives with .pending payload
+            let snapshot = SessionRuntimeSnapshot(object: [
+                "pending_approval": .object([
+                    "request_id": .string("req-terminal-1"),
+                    "command": .string("deploy"),
+                    "description": .string("Replayed description")
+                ])
+            ])
+            appState.handleStreamEvent(.sessionInfo(sessionId: "default", snapshot: snapshot))
+
+            XCTAssertEqual(appState.messages.count, 1)
+            let result = appState.messages.first?.approval
+            XCTAssertEqual(result?.status, status, "Terminal state \(status) must not be downgraded to .pending")
+            XCTAssertEqual(result?.choice, choice)
+        }
+    }
+
+    func testMultipleIdentifiedApprovalsCoexistAndDoNotInterfere() async throws {
+        let appState = makeAppState()
+        let card1 = ChatMessage(
+            id: "approval-1",
+            role: .approval,
+            content: "Deploy 1?",
+            timestamp: "1",
+            approval: ApprovalActivity(
+                sessionId: "default",
+                requestId: "req-1",
+                command: "deploy1",
+                description: "Deploy 1?",
+                choices: nil,
+                allowPermanent: false,
+                smartDenied: false,
+                status: .pending,
+                choice: nil,
+                error: nil
+            )
+        )
+        let card2 = ChatMessage(
+            id: "approval-2",
+            role: .approval,
+            content: "Deploy 2?",
+            timestamp: "2",
+            approval: ApprovalActivity(
+                sessionId: "default",
+                requestId: "req-2",
+                command: "deploy2",
+                description: "Deploy 2?",
+                choices: nil,
+                allowPermanent: false,
+                smartDenied: false,
+                status: .pending,
+                choice: nil,
+                error: nil
+            )
+        )
+        appState.messages = [card1, card2]
+        appState.activeSessionId = "default"
+
+        let transport = ClarifyFakeTransport()
+        let socket = ClarifyFakeSocket()
+        _ = try await installConnectedClient(appState, socket: socket, transport: transport)
+
+        // Submit card1
+        let sent = ClarifyGate()
+        socket.onSend = { sent.signal() }
+        let task = Task {
+            await appState.respondToApproval(messageId: "approval-1", choice: "once")
+        }
+        try await sent.wait("approval.respond for card1")
+        let request = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(try XCTUnwrap(socket.sentTexts.last).utf8)) as? [String: Any]
+        )
+        let rpcID = try XCTUnwrap(request["id"] as? Int)
+
+        XCTAssertEqual(appState.messages.first(where: { $0.id == "approval-1" })?.approval?.status, .submitting)
+        XCTAssertEqual(appState.messages.first(where: { $0.id == "approval-2" })?.approval?.status, .pending)
+
+        // Authoritative update arrives for req-2
+        let snapshot = SessionRuntimeSnapshot(object: [
+            "pending_approval": .object([
+                "request_id": .string("req-2"),
+                "command": .string("deploy2"),
+                "description": .string("Deploy 2 updated?")
+            ])
+        ])
+        appState.handleStreamEvent(.sessionInfo(sessionId: "default", snapshot: snapshot))
+
+        // req-1 still submitting, req-2 updated
+        XCTAssertEqual(appState.messages.count, 2)
+        XCTAssertEqual(appState.messages.first(where: { $0.id == "approval-1" })?.approval?.status, .submitting)
+        let updatedCard2 = try XCTUnwrap(appState.messages.first(where: { $0.id == "approval-2" })?.approval)
+        XCTAssertEqual(updatedCard2.status, .pending)
+        XCTAssertEqual(updatedCard2.description, "Deploy 2 updated?")
+
+        // Settle req-1
+        deliverResult(socket, rpcID: rpcID, result: ["resolved": 1])
+        await task.value
+        XCTAssertEqual(appState.messages.first(where: { $0.id == "approval-1" })?.approval?.status, .approved)
+    }
+
     func testBotChatApprovalEvictionAndRecoveryUnderBotProfileNamespace() async throws {
         let suite = "testBotChatApproval.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!

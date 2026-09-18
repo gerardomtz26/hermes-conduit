@@ -8449,9 +8449,11 @@ final class AppState: ObservableObject {
         botChatSessionProfiles[sessionID] = profile
     }
 
+    #if DEBUG
     func noteBotChatSessionForTesting(_ sessionID: String, profile: String) {
         noteBotChatSession(sessionID, profile: profile)
     }
+    #endif
 
     /// The bot profile an in-flight or active conversation belongs to, when
     /// that conversation is a canonical Bot Chat. Nil for ordinary sessions —
@@ -14894,6 +14896,21 @@ final class AppState: ObservableObject {
             )
         }
 
+    private func shouldPreserveLocalApprovalState(
+        existing: ApprovalActivity,
+        incoming: ApprovalActivity,
+        authoritative: Bool
+    ) -> Bool {
+        switch existing.status {
+        case .submitting, .approved, .rejected, .expired:
+            return true
+        case .error:
+            return !authoritative
+        case .pending:
+            return false
+        }
+    }
+
     /// Upserts an approval by Hermes request identity. Legacy events without a
     /// request id retain the historical one-card-per-session behavior. A
     /// modern authoritative replay removes only an ambiguous legacy card for
@@ -14924,7 +14941,8 @@ final class AppState: ObservableObject {
                 guard let existing = message.approval,
                       equivalentSessionIDs.contains(existing.sessionId),
                       existing.requestId == nil else { return false }
-                return SessionPresentationCache.isPendingDecision(existing.status)
+                return existing.status != .submitting
+                    && SessionPresentationCache.isPendingDecision(existing.status)
             }
             let cacheSessionIDs = presentationCacheSessionIDs(for: activity.sessionId)
             for sessionID in equivalentSessionIDs {
@@ -14938,9 +14956,12 @@ final class AppState: ObservableObject {
         if let index = messages.lastIndex(where: {
             SessionPresentationCache.decisionKey(for: $0) == targetKey
                 && $0.approval != nil
-        }) {
-            if !authoritative, let existing = messages[index].approval,
-               existing.status != .pending {
+        }), let existing = messages[index].approval {
+            if shouldPreserveLocalApprovalState(
+                existing: existing,
+                incoming: activity,
+                authoritative: authoritative
+            ) {
                 var replay = activity
                 replay.status = existing.status
                 replay.choice = existing.choice
