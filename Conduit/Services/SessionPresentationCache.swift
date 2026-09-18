@@ -433,14 +433,16 @@ final class SessionPresentationCache {
         persistPendingTools(pendingStore)
     }
 
-    /// A completion event makes the local running projection obsolete. A
-    /// stable tool id resolves only its exact record. Legacy id-less events
-    /// are inherently ambiguous when same-name calls overlap; removing the
-    /// latest observed call preserves historical behavior without guessing
-    /// from inputs that Hermes may truncate or omit.
+    /// A completion event makes the local running projection obsolete. An
+    /// exact message id or stable tool id resolves only its exact record.
+    /// Legacy id-less events are inherently ambiguous when same-name calls
+    /// overlap; resolving is only performed when exactly one unambiguous
+    /// running candidate exists, avoiding destructive mis-matches when multiple
+    /// calls are in flight.
     func resolvePendingTool(
         named name: String,
         toolID: String? = nil,
+        messageID: String? = nil,
         profile: String,
         sessionIDs: [String]
     ) {
@@ -449,18 +451,34 @@ final class SessionPresentationCache {
         let normalizedName = normalized(name)
         let trimmedToolID = toolID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let stableToolID = trimmedToolID.isEmpty ? nil : trimmedToolID
+        let trimmedMessageID = messageID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let stableMessageID = trimmedMessageID.isEmpty ? nil : trimmedMessageID
         var pendingStore = loadPendingTools()
         var pendingChanged = false
         var matchedPendingKeys = Set<String>()
         for id in ids {
             let cacheKey = key(profile: profile, sessionID: id)
-            guard var records = pendingStore[cacheKey],
-                  let index = records.lastIndex(where: { message in
-                      message.toolStatus == .running
-                          && (stableToolID.map { message.toolID == $0 }
-                              ?? (message.toolName == normalizedName))
-                  }) else { continue }
-            records.remove(at: index)
+            guard var records = pendingStore[cacheKey] else { continue }
+            let index: Int?
+            if let stableMessageID {
+                index = records.lastIndex(where: {
+                    $0.id == stableMessageID && $0.toolStatus == .running
+                })
+            } else if let stableToolID {
+                index = records.lastIndex(where: {
+                    $0.toolStatus == .running && self.stableToolID($0.toolID) == stableToolID
+                })
+            } else {
+                let candidates = records.indices.filter { idx in
+                    let message = records[idx]
+                    return message.toolStatus == .running
+                        && message.toolName == normalizedName
+                        && self.stableToolID(message.toolID) == nil
+                }
+                index = candidates.count == 1 ? candidates[0] : nil
+            }
+            guard let resolvedIndex = index else { continue }
+            records.remove(at: resolvedIndex)
             pendingStore[cacheKey] = records.isEmpty ? nil : records
             pendingChanged = true
             matchedPendingKeys.insert(cacheKey)
@@ -476,16 +494,32 @@ final class SessionPresentationCache {
         var changed = false
         for id in unresolvedIDs {
             let cacheKey = key(profile: profile, sessionID: id)
-            guard var session = store[cacheKey],
-                  let index = session.messages.lastIndex(where: { message in
-                      message.role == .tool
-                          && message.toolStatus == .running
-                          && (stableToolID.map { toolID in message.toolID == toolID }
-                              ?? (message.toolName == normalizedName))
-                  }) else {
-                continue
+            guard var session = store[cacheKey] else { continue }
+            let index: Int?
+            if let stableMessageID {
+                index = session.messages.lastIndex(where: {
+                    $0.role == .tool
+                        && $0.toolStatus == .running
+                        && $0.id == stableMessageID
+                })
+            } else if let stableToolID {
+                index = session.messages.lastIndex(where: {
+                    $0.role == .tool
+                        && $0.toolStatus == .running
+                        && self.stableToolID($0.toolID) == stableToolID
+                })
+            } else {
+                let candidates = session.messages.indices.filter { idx in
+                    let message = session.messages[idx]
+                    return message.role == .tool
+                        && message.toolStatus == .running
+                        && message.toolName == normalizedName
+                        && self.stableToolID(message.toolID) == nil
+                }
+                index = candidates.count == 1 ? candidates[0] : nil
             }
-            session.messages.remove(at: index)
+            guard let resolvedIndex = index else { continue }
+            session.messages.remove(at: resolvedIndex)
             session.updatedAt = now()
             store[cacheKey] = session
             changed = true

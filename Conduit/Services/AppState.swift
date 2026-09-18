@@ -3940,7 +3940,7 @@ final class AppState: ObservableObject {
                     let handledMissingSessionError = errorMessage
                     chatResumeCoordinator.rememberSessionID(nil, for: profile)
                     if let fallback = selectChatResumeTarget(
-                        in: allSessions,
+                        in: resumeCandidates,
                         profile: profile,
                         purpose: purpose,
                         currentSessionID: nil,
@@ -4933,6 +4933,9 @@ final class AppState: ObservableObject {
             let acceptedApprovals = approvals.filter {
                 acceptedSessionIDs.contains($0.sessionId)
             }
+            let returnedIdentifiedRequestIDs = Set(acceptedApprovals.compactMap { $0.requestId })
+            let cacheSessionIDs = self.presentationCacheSessionIDs(for: sessionId)
+
             if let replacingLegacyErrorMessageID {
                 let identifiedApprovals = acceptedApprovals.filter { $0.requestId != nil }
                 if !identifiedApprovals.isEmpty {
@@ -4945,13 +4948,50 @@ final class AppState: ObservableObject {
                     self.applyApprovalActivity(approval, authoritative: true)
                 }
             } else {
+                // A successful approval.pending read provides the authoritative
+                // unresolved identified queue. Retire any local identified
+                // pending/submitting cards that are absent from the returned
+                // queue, provided they are not actively executing an in-process
+                // submission RPC right now on this device.
+                var retiredRequestIDs = Set<String>()
+                self.messages.removeAll { message in
+                    guard let existing = message.approval,
+                          acceptedSessionIDs.contains(existing.sessionId),
+                          let reqId = existing.requestId,
+                          SessionPresentationCache.isPendingDecision(existing.status) else {
+                        return false
+                    }
+                    if self.hasLiveApprovalSubmission(for: existing, equivalentSessionIDs: acceptedSessionIDs) {
+                        return false
+                    }
+                    if !returnedIdentifiedRequestIDs.contains(reqId) {
+                        retiredRequestIDs.insert(reqId)
+                        return true
+                    }
+                    return false
+                }
+                for reqId in retiredRequestIDs {
+                    self.sessionPresentationCache.removePendingDecision(
+                        key: "approval-request:\(reqId)",
+                        profile: profile,
+                        sessionIDs: cacheSessionIDs
+                    )
+                }
+
                 for approval in acceptedApprovals {
-                    self.applyApprovalActivity(approval, authoritative: false)
+                    if approval.requestId != nil {
+                        // Identified approvals are authoritatively reconciled
+                        // against the gateway's complete pending queue.
+                        self.applyApprovalActivity(approval, authoritative: true)
+                    } else {
+                        // Legacy approvals are session-scoped and FIFO; do not
+                        // destructively overwrite legacy active cards with an
+                        // authoritative replay.
+                        self.applyApprovalActivity(approval, authoritative: false)
+                    }
                 }
             }
-            if !acceptedApprovals.isEmpty {
-                self.cacheMessagePresentation()
-            }
+            self.cacheMessagePresentation()
         }
     }
 
@@ -14783,11 +14823,13 @@ final class AppState: ObservableObject {
             // stored messages on reload.
             let matchingIndex: Int?
             var resolvedCacheToolID = stableToolID
+            var adoptedMessageID: String? = nil
             if let stableToolID {
                 if let exactIndex = messages.lastIndex(where: {
                     $0.role == .tool && $0.tool?.id == stableToolID
                 }) {
                     matchingIndex = exactIndex
+                    adoptedMessageID = messages[exactIndex].id
                 } else {
                     // Check if there is an unambiguous ID-less running card for the same tool.
                     // If exactly one exists, adopt it rather than leaving a zombie running card.
@@ -14804,17 +14846,31 @@ final class AppState: ObservableObject {
                     }
                     if candidates.count == 1 {
                         matchingIndex = candidates[0]
+                        adoptedMessageID = messages[candidates[0]].id
                         resolvedCacheToolID = nil
                     } else {
                         matchingIndex = nil
                     }
                 }
             } else {
-                matchingIndex = messages.lastIndex(where: {
-                    $0.role == .tool
-                        && $0.tool?.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedName
-                        && $0.tool?.status == .running
-                })
+                // Check if there is an unambiguous ID-less running card for the same tool.
+                // If exactly one exists, adopt it. If multiple exist (or none), do not guess.
+                let candidates = messages.indices.filter { idx in
+                    guard messages[idx].role == .tool,
+                          let tool = messages[idx].tool,
+                          tool.status == .running,
+                          tool.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedName else {
+                        return false
+                    }
+                    let existingID = tool.id?.trimmingCharacters(in: .whitespacesAndNewlines)
+                    return existingID == nil || existingID?.isEmpty == true
+                }
+                if candidates.count == 1 {
+                    matchingIndex = candidates[0]
+                    adoptedMessageID = messages[candidates[0]].id
+                } else {
+                    matchingIndex = nil
+                }
             }
             if let index = matchingIndex {
                 let existing = messages[index].tool
@@ -14837,6 +14893,7 @@ final class AppState: ObservableObject {
             sessionPresentationCache.resolvePendingTool(
                 named: name,
                 toolID: resolvedCacheToolID,
+                messageID: adoptedMessageID,
                 profile: presentationProfile(for: streamSessionId),
                 sessionIDs: presentationCacheSessionIDs(for: streamSessionId)
             )

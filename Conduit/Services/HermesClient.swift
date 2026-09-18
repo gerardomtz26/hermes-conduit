@@ -1395,17 +1395,22 @@ final class HermesClient: ObservableObject {
             "choice": choice,
             "session_id": sessionId
         ]
-        if let requestId = requestId?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !requestId.isEmpty {
-            params["request_id"] = requestId
+        let trimmedRequestId = requestId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasRequestId = trimmedRequestId?.isEmpty == false
+        if let trimmedRequestId, hasRequestId {
+            params["request_id"] = trimmedRequestId
         }
         let result = try await rpc("approval.respond", params: params)
         // Current Hermes reports the number of queue entries resolved. Older
-        // gateways omitted the field after a successful response.
+        // gateways omitted the field after a successful response to legacy
+        // requestless approval calls.
         guard let object = result.objectValue else {
             throw HermesError.invalidResponse
         }
         guard let rawResolved = object["resolved"] else {
+            if hasRequestId {
+                throw HermesError.invalidResponse
+            }
             return true
         }
         guard let resolved = Self.exactIntValue(rawResolved), resolved >= 0 else {

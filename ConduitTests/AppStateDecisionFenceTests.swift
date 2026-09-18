@@ -23,11 +23,12 @@ final class AppStateDecisionFenceTests: XCTestCase {
     // MARK: - Fixtures
 
     private func approvalFixture(
+        id: String = "approval-msg",
         status: ApprovalActivity.Status = .pending,
         requestId: String? = nil
     ) -> ChatMessage {
         ChatMessage(
-            id: "approval-msg",
+            id: id,
             role: .approval,
             content: "Run the deploy?",
             timestamp: "1",
@@ -200,9 +201,55 @@ final class AppStateDecisionFenceTests: XCTestCase {
     func testPendingApprovalRefreshAddsQueuedCardsWithoutResettingSubmission() async throws {
         let appState = makeAppState()
         prepareActiveSession(appState)
-        appState.messages = [approvalFixture(status: .submitting, requestId: "approval-a")]
+        let initial = approvalFixture(id: "approval-a-msg", status: .pending, requestId: "approval-a")
+        appState.messages = [initial]
         appState.messages[0].approval?.sessionId = "runtime-queue"
-        appState.messages[0].approval?.choice = "once"
+        let transport = ClarifyFakeTransport()
+        let socket = ClarifyFakeSocket()
+        let client = try await installConnectedClient(appState, socket: socket, transport: transport)
+
+        // Begin in-flight approval submission
+        let sentRespond = Gate()
+        socket.onSend = { sentRespond.signal() }
+        let respondTask = Task {
+            await appState.respondToApproval(messageId: "approval-a-msg", choice: "once")
+        }
+        try await sentRespond.wait("the approval.respond request to be sent")
+        let respondRpcID = try rpcID(try XCTUnwrap(socket.sentTexts.last))
+
+        // A queue refresh arrives while submission is actively in flight
+        let sentRefresh = Gate()
+        socket.onSend = { sentRefresh.signal() }
+        let refresh = appState.schedulePendingApprovalsRefresh(sessionId: "runtime-queue", using: client)
+        try await sentRefresh.wait("the pending approval request to be sent")
+        let refreshRpcID = try rpcID(try XCTUnwrap(socket.sentTexts.last))
+        deliverResult(socket, rpcID: refreshRpcID, result: ["approvals": [
+            ["request_id": "approval-a", "description": "Run A?"],
+            ["request_id": "approval-b", "description": "Run B?"]
+        ]])
+        await refresh.value
+
+        XCTAssertEqual(appState.messages.count, 2)
+        let first = try XCTUnwrap(appState.messages.first(where: { $0.approval?.requestId == "approval-a" })?.approval)
+        XCTAssertEqual(first.status, .submitting, "Live in-memory submission must not be reset by queue refresh")
+        XCTAssertEqual(first.choice, "once")
+        XCTAssertEqual(appState.messages.last?.approval?.requestId, "approval-b")
+
+        // Settle the live submission
+        deliverResult(socket, rpcID: respondRpcID, result: ["resolved": 1])
+        await respondTask.value
+        XCTAssertEqual(appState.messages.first(where: { $0.approval?.requestId == "approval-a" })?.approval?.status, .approved)
+    }
+
+    func testAuthoritativeQueueRefreshResetsRestoredSubmittingCardToPending() async throws {
+        let appState = makeAppState()
+        prepareActiveSession(appState)
+        // Simulated restored card from disk: status .submitting, but no live RPC token
+        var restored = approvalFixture(id: "approval-b-msg", status: .submitting, requestId: "approval-b")
+        restored.approval?.sessionId = "runtime-queue"
+        restored.approval?.choice = "once"
+        appState.messages = [restored]
+
         let transport = ClarifyFakeTransport()
         let socket = ClarifyFakeSocket()
         let client = try await installConnectedClient(appState, socket: socket, transport: transport)
@@ -219,10 +266,40 @@ final class AppStateDecisionFenceTests: XCTestCase {
         await refresh.value
 
         XCTAssertEqual(appState.messages.count, 2)
-        let first = try XCTUnwrap(appState.messages.first(where: { $0.approval?.requestId == "approval-a" })?.approval)
-        XCTAssertEqual(first.status, .submitting)
-        XCTAssertEqual(first.choice, "once")
-        XCTAssertEqual(appState.messages.last?.approval?.requestId, "approval-b")
+        let cardB = try XCTUnwrap(appState.messages.first(where: { $0.approval?.requestId == "approval-b" })?.approval)
+        XCTAssertEqual(cardB.status, .pending, "Dead restored submitting card must be reset to pending on authoritative queue refresh")
+        XCTAssertNil(cardB.choice, "Choice should be reset so user can interact again")
+        let cardA = try XCTUnwrap(appState.messages.first(where: { $0.approval?.requestId == "approval-a" })?.approval)
+        XCTAssertEqual(cardA.status, .pending)
+    }
+
+    func testAuthoritativeQueueRefreshRetiresStaleRestoredApprovalCard() async throws {
+        let appState = makeAppState()
+        prepareActiveSession(appState)
+        // Simulated restored card from disk for approval-b which the server resolved before reconnect
+        var restored = approvalFixture(id: "approval-b-msg", status: .submitting, requestId: "approval-b")
+        restored.approval?.sessionId = "runtime-queue"
+        restored.approval?.choice = "once"
+        appState.messages = [restored]
+
+        let transport = ClarifyFakeTransport()
+        let socket = ClarifyFakeSocket()
+        let client = try await installConnectedClient(appState, socket: socket, transport: transport)
+
+        let sent = Gate()
+        socket.onSend = { sent.signal() }
+        let refresh = appState.schedulePendingApprovalsRefresh(sessionId: "runtime-queue", using: client)
+        try await sent.wait("the pending approval request to be sent")
+        let id = try rpcID(try XCTUnwrap(socket.sentTexts.last))
+        // Server's authoritative queue only returns approval-a; approval-b was resolved
+        deliverResult(socket, rpcID: id, result: ["approvals": [
+            ["request_id": "approval-a", "description": "Run A?"]
+        ]])
+        await refresh.value
+
+        XCTAssertEqual(appState.messages.count, 1)
+        XCTAssertEqual(appState.messages[0].approval?.requestId, "approval-a")
+        XCTAssertFalse(appState.messages.contains(where: { $0.approval?.requestId == "approval-b" }), "Stale restored approval absent from authoritative queue must be retired")
     }
 
     func testOlderPendingApprovalRefreshCannotPopulateAfterNewerGeneration() async throws {
@@ -1057,7 +1134,7 @@ final class AppStateDecisionFenceTests: XCTestCase {
         }
     }
 
-    func testAuthoritativeReplayResetsRestoredSubmittingCardWhenNoLiveSubmission() {
+    func testAuthoritativeReplayResetsRestoredSubmittingCardWhenNoLiveSubmission() throws {
         // Test both identified and legacy restored cards
         let testCases: [(name: String, requestId: String?)] = [
             ("identified", "req-restored-1"),
@@ -1108,7 +1185,7 @@ final class AppStateDecisionFenceTests: XCTestCase {
             }
 
             XCTAssertEqual(appState.messages.count, 1)
-            let updated = try! XCTUnwrap(appState.messages.first?.approval)
+            let updated = try XCTUnwrap(appState.messages.first?.approval)
             XCTAssertEqual(updated.status, .pending, "Authoritative replay must reset a restored .submitting card with no live RPC token")
             XCTAssertNil(updated.choice, "Pending choice should be cleared so user can interact again")
         }

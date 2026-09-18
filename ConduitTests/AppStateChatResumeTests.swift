@@ -630,6 +630,48 @@ final class AppStateChatResumeTests: XCTestCase {
         XCTAssertNil(harness.appState.errorMessage)
     }
 
+    func testAutomaticReturnDeletedMissingSavedSessionDoesNotSelectCanonicalBotChat() async {
+        let scheduler = ControlledReconnectScheduler()
+        var requests: [String] = []
+        let harness = makeHarness(
+            reconnectScheduler: scheduler.schedule(after:operation:),
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in
+                    [
+                        self.session("bot-chat-canonical", title: "Bot Chat"),
+                        self.session("stored-older-ordinary", title: "My Conversation")
+                    ]
+                },
+                openSession: { _, sessionID, _ in
+                    requests.append(sessionID)
+                    if sessionID == "stored-deleted" {
+                        throw RpcError(code: 4007, message: "Session not found")
+                    }
+                    return SessionResumeResult(
+                        sessionId: sessionID,
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in }
+            )
+        )
+        installComposerClient(in: harness)
+        harness.store.setLastSessionID("stored-deleted", for: "default")
+
+        await harness.appState.syncSession(
+            purpose: .automaticReturn,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(requests, ["stored-deleted", "stored-older-ordinary"])
+        XCTAssertEqual(harness.appState.activeSessionId, "stored-older-ordinary")
+        XCTAssertEqual(harness.store.lastSessionID(for: "default"), "stored-older-ordinary")
+        XCTAssertEqual(scheduler.scheduledCount, 0)
+        XCTAssertNil(harness.appState.errorMessage)
+    }
+
     func testAutomaticReturnKeepsMissingSavedSessionAndRetriesTransientResumeFailure() async {
         let scheduler = ControlledReconnectScheduler()
         var requests: [String] = []
@@ -5881,6 +5923,7 @@ final class AppStateChatResumeTests: XCTestCase {
 
     private func session(
         _ id: String,
+        title: String? = nil,
         storedID: String? = nil,
         alternateIDs: [String] = [],
         profile: String = "default"
@@ -5889,7 +5932,7 @@ final class AppStateChatResumeTests: XCTestCase {
             id: id,
             storedSessionId: storedID,
             alternateIds: alternateIDs,
-            title: id,
+            title: title ?? id,
             model: "Hermes",
             updatedLabel: "now",
             profile: profile,

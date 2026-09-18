@@ -526,7 +526,7 @@ final class AppStateReasoningStreamTests: XCTestCase {
         XCTAssertEqual(state.messages.compactMap(\.tool).first { $0.id == "call-c" }?.status, .complete)
     }
 
-    func testLegacyIdlessCompletionStillCompletesLatestSameNameCall() {
+    func testAmbiguousIdlessCompletionDoesNotGuessOrDestroyRunningCards() {
         let state = makeAppState()
         installActiveSession(state, id: "stored-a")
         state.handleStreamEvent(.toolStart(sessionId: "stored-a", toolName: "terminal", toolInput: "first"))
@@ -534,10 +534,26 @@ final class AppStateReasoningStreamTests: XCTestCase {
         state.handleStreamEvent(.toolComplete(sessionId: "stored-a", toolName: "terminal", toolOutput: "done"))
 
         let tools = state.messages.compactMap(\.tool)
-        XCTAssertEqual(tools.count, 2)
+        XCTAssertEqual(tools.count, 3, "An ID-less completion must not guess when multiple ID-less running cards exist")
         XCTAssertEqual(tools[0].status, .running)
-        XCTAssertEqual(tools[1].status, .complete)
-        XCTAssertEqual(tools[1].output, "done")
+        XCTAssertEqual(tools[0].input, "first")
+        XCTAssertEqual(tools[1].status, .running)
+        XCTAssertEqual(tools[1].input, "second")
+        XCTAssertEqual(tools[2].status, .complete)
+        XCTAssertEqual(tools[2].output, "done")
+    }
+
+    func testUniqueIdlessCompletionAdoptsRunningCardInPlace() {
+        let state = makeAppState()
+        installActiveSession(state, id: "stored-a")
+        state.handleStreamEvent(.toolStart(sessionId: "stored-a", toolName: "terminal", toolInput: "first"))
+        state.handleStreamEvent(.toolComplete(sessionId: "stored-a", toolName: "terminal", toolOutput: "done"))
+
+        let tools = state.messages.compactMap(\.tool)
+        XCTAssertEqual(tools.count, 1, "An ID-less completion should adopt the unique running card")
+        XCTAssertEqual(tools[0].status, .complete)
+        XCTAssertEqual(tools[0].input, "first")
+        XCTAssertEqual(tools[0].output, "done")
     }
 
     func testIdentifiedCompletionAdoptsUniqueIdlessRunningTool() {

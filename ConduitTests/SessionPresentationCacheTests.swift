@@ -870,7 +870,7 @@ final class SessionPresentationCacheTests: XCTestCase {
         XCTAssertEqual(cache.merge([], profile: profile, sessionIDs: [sessionID], includePendingTools: true).map(\.id), [pending.id])
     }
 
-    func testLegacyIDLessCompletionRemovesOnlyLatestSameNamePendingCall() throws {
+    func testAmbiguousIdlessCompletionDoesNotRemovePendingCalls() throws {
         let (cache, _, _, _) = try makeIsolatedCache()
         let profile = "legacy-idless-pending"
         let sessionID = "legacy-idless-" + UUID().uuidString
@@ -889,8 +889,62 @@ final class SessionPresentationCacheTests: XCTestCase {
 
         XCTAssertEqual(
             cache.merge([], profile: profile, sessionIDs: [sessionID], includePendingTools: true).map(\.id),
-            ["first"],
-            "Legacy events have no safe identity for duplicate names, so the older candidate remains"
+            ["first", "second"],
+            "Ambiguous ID-less completions without an exact message ID must not guess or remove either candidate"
+        )
+    }
+
+    func testUniqueIdlessCompletionRemovesSinglePendingCall() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "legacy-idless-unique"
+        let sessionID = "legacy-idless-unique-" + UUID().uuidString
+        cache.recordPendingToolStart(
+            ChatMessage(
+                id: "only", role: .tool, content: "", timestamp: "only",
+                tool: ToolActivity(id: nil, name: "terminal", input: "pwd", output: nil, status: .running)
+            ),
+            profile: profile,
+            sessionIDs: [sessionID]
+        )
+
+        cache.resolvePendingTool(named: "terminal", profile: profile, sessionIDs: [sessionID])
+
+        XCTAssertEqual(
+            cache.merge([], profile: profile, sessionIDs: [sessionID], includePendingTools: true).map(\.id),
+            [],
+            "A unique ID-less completion safely resolves the single running candidate"
+        )
+    }
+
+    func testResolvingSpecificMessageDoesNotEvictSubsequentIdentifiedCall() throws {
+        let (cache, _, _, _) = try makeIsolatedCache()
+        let profile = "mixed-tool-order"
+        let sessionID = "mixed-" + UUID().uuidString
+        let idless = ChatMessage(
+            id: "msg-1", role: .tool, content: "", timestamp: "1",
+            tool: ToolActivity(id: nil, name: "terminal", input: "pwd", output: nil, status: .running)
+        )
+        let identified = ChatMessage(
+            id: "msg-2", role: .tool, content: "", timestamp: "2",
+            tool: ToolActivity(id: "call-b", name: "terminal", input: "git status", output: nil, status: .running)
+        )
+        cache.recordPendingToolStart(idless, profile: profile, sessionIDs: [sessionID])
+        cache.recordPendingToolStart(identified, profile: profile, sessionIDs: [sessionID])
+
+        // Resolve the ID-less card by its exact message ID
+        cache.resolvePendingTool(
+            named: "terminal",
+            toolID: nil,
+            messageID: "msg-1",
+            profile: profile,
+            sessionIDs: [sessionID]
+        )
+
+        // msg-1 is resolved, msg-2 remains in side-store
+        XCTAssertEqual(
+            cache.merge([], profile: profile, sessionIDs: [sessionID], includePendingTools: true).map(\.id),
+            ["msg-2"],
+            "Resolving an ID-less card by message ID must never evict subsequent identified tool calls"
         )
     }
 

@@ -1096,9 +1096,28 @@ final class HermesClientTests: XCTestCase {
         XCTAssertTrue(accepted)
     }
 
-    func testApprovalRespondOmittedResolvedDefaultsToTrue() async throws {
-        let (_, accepted) = try await capturedApprovalRespond(requestId: "approval-legacy", resolved: nil)
+    func testLegacyApprovalRespondOmittedResolvedDefaultsToTrue() async throws {
+        let (_, accepted) = try await capturedApprovalRespond(requestId: nil, resolved: nil)
         XCTAssertTrue(accepted, "Omitted resolved field in legacy response defaults to true")
+    }
+
+    func testIdentifiedApprovalRespondRequiresResolvedField() async throws {
+        do {
+            _ = try await capturedApprovalRespond(requestId: "approval-identified", resolved: nil)
+            XCTFail("Expected invalidResponse when identified approval response omits resolved field")
+        } catch let error as HermesError {
+            guard case .invalidResponse = error else {
+                XCTFail("Expected .invalidResponse error, got \(error)")
+                return
+            }
+        }
+    }
+
+    func testIdentifiedApprovalRespondAcceptsPositiveResolved() async throws {
+        let (request, accepted) = try await capturedApprovalRespond(requestId: "approval-3", resolved: 1)
+        let params = try XCTUnwrap(request["params"] as? [String: Any])
+        XCTAssertEqual(params["request_id"] as? String, "approval-3")
+        XCTAssertTrue(accepted)
     }
 
     func testApprovalRespondRejectsMalformedAndOutOfRangeResolved() async throws {
