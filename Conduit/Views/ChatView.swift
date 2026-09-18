@@ -2416,7 +2416,7 @@ struct ApprovalCard: View {
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(statusColor(for: approval.status))
                 } else if approval.status == .expired {
-                    Text("No longer active")
+                    Text(AppLocalization.string("No longer active"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {

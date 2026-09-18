@@ -1025,7 +1025,8 @@ final class HermesClientTests: XCTestCase {
 
     private func capturedApprovalRespond(
         requestId: String?,
-        resultPayload: [String: Any]
+        resultPayload: [String: Any],
+        profile: String? = nil
     ) async throws -> (request: [String: Any], accepted: Bool) {
         let transport = FakeTransport()
         let socket = FakeSocket()
@@ -1041,7 +1042,8 @@ final class HermesClientTests: XCTestCase {
             try await client.respondToApproval(
                 sessionId: "runtime-1",
                 requestId: requestId,
-                choice: "once"
+                choice: "once",
+                profile: profile
             )
         }
         try await sent.wait("the approval.respond request to be sent")
@@ -1060,11 +1062,12 @@ final class HermesClientTests: XCTestCase {
 
     private func capturedApprovalRespond(
         requestId: String?,
-        resolved: Int?
+        resolved: Int?,
+        profile: String? = nil
     ) async throws -> (request: [String: Any], accepted: Bool) {
         var payload: [String: Any] = [:]
         if let resolved { payload["resolved"] = resolved }
-        return try await capturedApprovalRespond(requestId: requestId, resultPayload: payload)
+        return try await capturedApprovalRespond(requestId: requestId, resultPayload: payload, profile: profile)
     }
 
     func testExactIntValueRejectsNonIntegersAndTrappingDoubles() {
@@ -1087,6 +1090,20 @@ final class HermesClientTests: XCTestCase {
         XCTAssertEqual(params["request_id"] as? String, "approval-2")
         XCTAssertEqual(params["session_id"] as? String, "runtime-1")
         XCTAssertFalse(accepted, "A successful RPC that resolved no queue entry is a stale card")
+    }
+
+    func testApprovalRespondSendsExplicitProfile() async throws {
+        let (request, accepted) = try await capturedApprovalRespond(
+            requestId: "approval-profile",
+            resolved: 1,
+            profile: "bot-agent"
+        )
+        let params = try XCTUnwrap(request["params"] as? [String: Any])
+        XCTAssertEqual(params["profile"] as? String, "bot-agent")
+        XCTAssertEqual(params["request_id"] as? String, "approval-profile")
+        XCTAssertEqual(params["session_id"] as? String, "runtime-1")
+        XCTAssertEqual(params["choice"] as? String, "once")
+        XCTAssertTrue(accepted)
     }
 
     func testLegacyApprovalRespondOmitsRequestIdentity() async throws {
@@ -1280,6 +1297,91 @@ final class HermesClientTests: XCTestCase {
         let approvals = try await awaitResult(of: pendingTask, "the approval.pending response")
         XCTAssertTrue(approvals.isEmpty)
         client.disconnect()
+    }
+
+    private func executePendingApprovals(
+        rawResult: String
+    ) async throws -> [ApprovalActivity] {
+        let transport = FakeTransport()
+        let socket = FakeSocket()
+        transport.nextSocket = { socket }
+        let client = makeClient(transport: transport)
+        let connectTask = Task { try? await client.connect() }
+        transport.open(socket)
+        try await awaitCompletion(of: connectTask, "connect() to complete")
+
+        let sent = Gate()
+        socket.onSend = { sent.signal() }
+        let pendingTask = Task { try await client.pendingApprovals(sessionId: "runtime-queue") }
+        try await sent.wait("the approval.pending request to be sent")
+        let request = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(try XCTUnwrap(socket.sentTexts.last).utf8)) as? [String: Any]
+        )
+        let id = try XCTUnwrap(request["id"] as? Int)
+        socket.deliver("""
+        {"jsonrpc": "2.0", "id": \(id), "result": \(rawResult)}
+        """)
+        let approvals = try await awaitResult(of: pendingTask, "the approval.pending response")
+        client.disconnect()
+        return approvals
+    }
+
+    func testPendingApprovalsStructuralValidation() async throws {
+        // Valid empty queue returns empty array
+        let emptyQueue = try await executePendingApprovals(rawResult: "{\"approvals\": []}")
+        XCTAssertTrue(emptyQueue.isEmpty)
+
+        // Valid array with mixed elements tolerantly decodes valid rows
+        let mixedQueue = try await executePendingApprovals(
+            rawResult: "{\"approvals\": [42, \"invalid\", {\"request_id\": \"app-1\", \"description\": \"Valid item\"}, null]}"
+        )
+        XCTAssertEqual(mixedQueue.count, 1)
+        XCTAssertEqual(mixedQueue.first?.requestId, "app-1")
+
+        // Non-object root must throw invalidResponse
+        for nonObject in ["\"ok\"", "42", "true", "null", "[]", "[{\"approvals\": []}]"] {
+            do {
+                _ = try await executePendingApprovals(rawResult: nonObject)
+                XCTFail("Expected invalidResponse for non-object root: \(nonObject)")
+            } catch let error as HermesError {
+                guard case .invalidResponse = error else {
+                    XCTFail("Expected .invalidResponse for \(nonObject), got \(error)")
+                    continue
+                }
+            }
+        }
+
+        // Object missing "approvals" field must throw invalidResponse
+        for missingApprovals in ["{}", "{\"other\": 123}", "{\"status\": \"ok\"}"] {
+            do {
+                _ = try await executePendingApprovals(rawResult: missingApprovals)
+                XCTFail("Expected invalidResponse for missing approvals key: \(missingApprovals)")
+            } catch let error as HermesError {
+                guard case .invalidResponse = error else {
+                    XCTFail("Expected .invalidResponse for \(missingApprovals), got \(error)")
+                    continue
+                }
+            }
+        }
+
+        // Object where "approvals" is not an array (null, scalar, object) must throw invalidResponse
+        for malformedApprovals in [
+            "{\"approvals\": null}",
+            "{\"approvals\": 42}",
+            "{\"approvals\": \"none\"}",
+            "{\"approvals\": true}",
+            "{\"approvals\": {}}"
+        ] {
+            do {
+                _ = try await executePendingApprovals(rawResult: malformedApprovals)
+                XCTFail("Expected invalidResponse for non-array approvals: \(malformedApprovals)")
+            } catch let error as HermesError {
+                guard case .invalidResponse = error else {
+                    XCTFail("Expected .invalidResponse for \(malformedApprovals), got \(error)")
+                    continue
+                }
+            }
+        }
     }
 
     // MARK: - pending_clarify restore

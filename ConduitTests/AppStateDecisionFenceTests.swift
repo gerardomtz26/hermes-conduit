@@ -1522,6 +1522,121 @@ final class AppStateDecisionFenceTests: XCTestCase {
 
         XCTAssertEqual(queriedProfile, botProfile, "Bot Chat pending approvals refresh must use the bot's presentation profile")
     }
+
+    func testBotChatApprovalRespondUsesBotPresentationProfile() async throws {
+        let botSessionID = "bot-session-approval-test"
+        let botProfile = "bot-custom-profile"
+        let dashboardProfile = "dashboard-main"
+
+        var passedProfile: String? = nil
+        var passedSessionId: String? = nil
+        var passedRequestId: String? = nil
+        var passedChoice: String? = nil
+
+        let lifecycleOps = ChatResumeLifecycleOperations(
+            respondToApproval: { _, sessionId, requestId, choice, profile in
+                passedSessionId = sessionId
+                passedRequestId = requestId
+                passedChoice = choice
+                passedProfile = profile
+                return true
+            }
+        )
+
+        let appState = makeAppState(chatResumeLifecycleOperations: lifecycleOps)
+        appState.setActiveProfileForTesting(dashboardProfile)
+        appState.activeSessionId = botSessionID
+        appState.noteBotChatSessionForTesting(botSessionID, profile: botProfile)
+
+        let card = ChatMessage(
+            id: "approval-msg",
+            role: .approval,
+            content: "Please approve",
+            timestamp: "1",
+            approval: ApprovalActivity(
+                sessionId: botSessionID,
+                requestId: "req-bot-1",
+                command: "bot_action",
+                description: "Run bot action?",
+                choices: ["approve", "deny"],
+                allowPermanent: false,
+                smartDenied: false,
+                status: .pending,
+                choice: nil,
+                error: nil
+            )
+        )
+        appState.messages = [card]
+
+        let transport = ClarifyFakeTransport()
+        let socket = ClarifyFakeSocket()
+        _ = try await installConnectedClient(appState, socket: socket, transport: transport)
+
+        await appState.respondToApproval(messageId: "approval-msg", choice: "approve")
+
+        XCTAssertEqual(passedSessionId, botSessionID)
+        XCTAssertEqual(passedRequestId, "req-bot-1")
+        XCTAssertEqual(passedChoice, "approve")
+        XCTAssertEqual(passedProfile, botProfile, "Bot Chat approval respond must use the bot's presentation profile")
+    }
+
+    func testBotChatApprovalRespondSendsBotProfileOverWire() async throws {
+        let botSessionID = "bot-session-wire-test"
+        let botProfile = "bot-custom-profile"
+        let dashboardProfile = "dashboard-main"
+
+        let appState = makeAppState()
+        appState.setActiveProfileForTesting(dashboardProfile)
+        appState.activeSessionId = botSessionID
+        appState.noteBotChatSessionForTesting(botSessionID, profile: botProfile)
+
+        let card = ChatMessage(
+            id: "approval-msg-wire",
+            role: .approval,
+            content: "Please approve",
+            timestamp: "1",
+            approval: ApprovalActivity(
+                sessionId: botSessionID,
+                requestId: "req-wire-1",
+                command: "wire_action",
+                description: "Run bot action?",
+                choices: ["approve", "deny"],
+                allowPermanent: false,
+                smartDenied: false,
+                status: .pending,
+                choice: nil,
+                error: nil
+            )
+        )
+        appState.messages = [card]
+
+        let transport = ClarifyFakeTransport()
+        let socket = ClarifyFakeSocket()
+        _ = try await installConnectedClient(appState, socket: socket, transport: transport)
+
+        let sent = ClarifyGate()
+        socket.onSend = { sent.signal() }
+
+        let respondTask = Task {
+            await appState.respondToApproval(messageId: "approval-msg-wire", choice: "approve")
+        }
+        try await sent.wait("approval.respond to be sent")
+
+        let request = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(try XCTUnwrap(socket.sentTexts.last).utf8)) as? [String: Any]
+        )
+        let params = try XCTUnwrap(request["params"] as? [String: Any])
+        XCTAssertEqual(params["profile"] as? String, botProfile)
+        XCTAssertEqual(params["session_id"] as? String, botSessionID)
+        XCTAssertEqual(params["request_id"] as? String, "req-wire-1")
+        XCTAssertEqual(params["choice"] as? String, "approve")
+
+        let rpcID = try XCTUnwrap(request["id"] as? Int)
+        deliverResult(socket, rpcID: rpcID, result: ["resolved": 1])
+        await respondTask.value
+
+        XCTAssertEqual(appState.messages.first?.approval?.status, .approved)
+    }
 }
 
 private final class Gate: @unchecked Sendable {

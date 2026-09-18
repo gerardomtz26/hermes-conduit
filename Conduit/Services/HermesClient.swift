@@ -1390,7 +1390,12 @@ final class HermesClient: ObservableObject {
         return .accepted(remaining: remaining)
     }
 
-    func respondToApproval(sessionId: String, requestId: String? = nil, choice: String) async throws -> Bool {
+    func respondToApproval(
+        sessionId: String,
+        requestId: String? = nil,
+        choice: String,
+        profile: String? = nil
+    ) async throws -> Bool {
         var params: [String: Any] = [
             "choice": choice,
             "session_id": sessionId
@@ -1399,6 +1404,9 @@ final class HermesClient: ObservableObject {
         let hasRequestId = trimmedRequestId?.isEmpty == false
         if let trimmedRequestId, hasRequestId {
             params["request_id"] = trimmedRequestId
+        }
+        if let profile, !profile.isEmpty {
+            params["profile"] = profile
         }
         let result = try await rpc("approval.respond", params: params)
         // Current Hermes reports the number of queue entries resolved. Older
@@ -1432,7 +1440,12 @@ final class HermesClient: ObservableObject {
             params: params,
             timeout: Self.pendingApprovalsTimeout
         )
-        return (result.objectValue?["approvals"]?.arrayValue ?? []).compactMap { value in
+        guard let object = result.objectValue,
+              let approvalsValue = object["approvals"],
+              let array = approvalsValue.arrayValue else {
+            throw HermesError.invalidResponse
+        }
+        return array.compactMap { value in
             guard let payload = value.objectValue else { return nil }
             return MessageNormalizer.approvalActivity(from: payload, sessionId: sessionId)
         }

@@ -72,6 +72,10 @@ struct ChatResumeLifecycleOperations {
     /// seam when set, so tests can pin WHICH Hermes profile a pending approvals
     /// query addresses (bot chats query under the bot's presentation profile).
     var pendingApprovalsWithProfile: (@MainActor (HermesClient, String, String?) async throws -> [ApprovalActivity])?
+    /// Decision response seam. Tests can intercept and verify the session,
+    /// request ID, choice, and explicit presentation profile passed to the
+    /// decision RPC.
+    var respondToApproval: (@MainActor (HermesClient, String, String?, String, String?) async throws -> Bool)?
     var sendPrompt: (@MainActor (HermesClient, String, String) async throws -> PromptSubmissionOutcome)?
     /// Foreground transport verification. Production calls the client's
     /// `session.list` health check; tests substitute a controllable outcome.
@@ -140,6 +144,7 @@ struct ChatResumeLifecycleOperations {
         refreshContext: (@MainActor (HermesClient, String) async -> Void)? = nil,
         pendingApprovals: (@MainActor (HermesClient, String) async throws -> [ApprovalActivity])? = nil,
         pendingApprovalsWithProfile: (@MainActor (HermesClient, String, String?) async throws -> [ApprovalActivity])? = nil,
+        respondToApproval: (@MainActor (HermesClient, String, String?, String, String?) async throws -> Bool)? = nil,
         sendPrompt: (@MainActor (HermesClient, String, String) async throws -> PromptSubmissionOutcome)? = nil,
         verifyTransportHealth: (@MainActor (HermesClient) async throws -> Void)? = nil,
         probeActiveSessions: (@MainActor (HermesClient) async throws -> [LiveSessionStatus])? = nil,
@@ -185,6 +190,7 @@ struct ChatResumeLifecycleOperations {
         self.refreshContext = refreshContext
         self.pendingApprovals = pendingApprovals
         self.pendingApprovalsWithProfile = pendingApprovalsWithProfile
+        self.respondToApproval = respondToApproval
         self.sendPrompt = sendPrompt
         self.verifyTransportHealth = verifyTransportHealth
         self.probeActiveSessions = probeActiveSessions
@@ -13434,12 +13440,25 @@ final class AppState: ObservableObject {
         // use; only client ownership changed here, so no epoch beyond the
         // pointer identity is needed.
         let profile = activeProfile
+        let conversationProfile = presentationProfile(for: current.sessionId)
         do {
-            let accepted = try await client.respondToApproval(
-                sessionId: current.sessionId,
-                requestId: current.requestId,
-                choice: choice
-            )
+            let accepted: Bool
+            if let respondToApproval = chatResumeLifecycleOperations.respondToApproval {
+                accepted = try await respondToApproval(
+                    client,
+                    current.sessionId,
+                    current.requestId,
+                    choice,
+                    conversationProfile
+                )
+            } else {
+                accepted = try await client.respondToApproval(
+                    sessionId: current.sessionId,
+                    requestId: current.requestId,
+                    choice: choice,
+                    profile: conversationProfile
+                )
+            }
             guard profile == activeProfile, self.client === client else { return }
             guard let updatedIndex = messages.firstIndex(where: { $0.id == messageId }),
                   SessionPresentationCache.decisionKey(for: messages[updatedIndex]) == decisionKey else { return }
