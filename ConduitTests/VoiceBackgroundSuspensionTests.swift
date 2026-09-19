@@ -101,11 +101,12 @@ final class VoiceConversationLifecycleSuspensionTests: XCTestCase {
         let startsAtSuspension = capture.startCount
 
         // The suspended turn's terminal events belong to the retired turn:
-        // they must not speak, append, or relisten.
+        // they must not speak, append, or relisten. Suspension clears
+        // isAwaitingVoiceAssistant synchronously, so receiveAssistantEvent
+        // rejects all three here and the absences are decided by these calls.
         controller.receiveAssistantEvent(.started(sessionID: "session"))
         controller.receiveAssistantEvent(.delta(sessionID: "session", text: "late"))
         controller.receiveAssistantEvent(.completed(sessionID: "session", content: "late answer"))
-        await drainPendingMainActorWork()
 
         XCTAssertEqual(controller.state, .idle)
         XCTAssertEqual(capture.startCount, startsAtSuspension, "no stale relisten after suspension")
@@ -401,7 +402,7 @@ final class VoiceConversationLifecycleSuspensionTests: XCTestCase {
 final class AppStateVoiceSuspensionTests: XCTestCase {
     func testBackgroundWithOpenVoiceSuspendsRuntimeAndRetainsDescriptor() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         await harness.driveToThinking()
         harness.controller.setOutputMuted(true)
         let startsBeforeBackground = harness.capture.startCount
@@ -425,7 +426,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
     func testSuspendedRuntimeRejectsCaptureEventsExplicitly() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         await harness.controller.startListening()
         harness.appState.handleScenePhase(.background)
         harness.controller.setForegroundActive(true)
@@ -445,7 +446,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
     func testTransientInactiveDipLeavesVoiceUntouched() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         await harness.driveToThinking()
         let stopsBeforeDip = harness.capture.stopCount
 
@@ -475,7 +476,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
     func testListeningSurvivesTransientInactiveDip() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         await harness.controller.startListening()
         XCTAssertEqual(harness.controller.state, .listening)
 
@@ -490,7 +491,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
     func testPermissionPromptStyleDipDoesNotLoseInitialListen() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         // A fresh open arms the sheet's one-shot auto-listen (the microphone
         // permission prompt then dips the scene before it can fire).
         harness.appState.voiceSheetShouldAutoListen = true
@@ -512,7 +513,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
     func testSpeechCapabilityLossWhileSuspendedFailsClosed() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         harness.appState.handleScenePhase(.background)
 
         // Speech is gone by the time Conduit returns (fresh opens are
@@ -535,7 +536,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
     func testRuntimeRebindOfSameDurableConversationRestores() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         await harness.driveToThinking()
         harness.appState.handleScenePhase(.background)
 
@@ -596,7 +597,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
         if let data = try? JSONEncoder().encode(beta) {
             defaults.set(data, forKey: betaKey)
         }
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         await harness.driveToThinking()
         harness.controller.setOutputMuted(true)
         harness.appState.handleScenePhase(.background)
@@ -629,7 +630,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
             connection: HermesConnection(baseUrl: "https://example.com", ticket: "stale-ticket"),
             profile: "default"
         )
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         await harness.driveToThinking()
         harness.appState.handleScenePhase(.background)
         XCTAssertNotNil(harness.appState.suspendedVoiceConversation)
@@ -662,7 +663,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
     func testInactiveThenBackgroundThenActiveRestoresExactlyOnce() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         await harness.driveToThinking()
 
         harness.appState.handleScenePhase(.inactive)
@@ -679,7 +680,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
     func testCapabilityLossWhileSuspendedFailsClosed() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         harness.appState.handleScenePhase(.background)
 
         // The transcription provider is gone by the time Conduit returns.
@@ -701,7 +702,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
     func testBackgroundWhileListeningFencesLateCaptureEvents() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         await harness.controller.startListening()
 
         harness.appState.handleScenePhase(.background)
@@ -721,7 +722,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
     func testBackgroundWhileSpeakingStopsPlaybackAndFencesLateCompletion() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         await harness.driveToThinking()
         await harness.driveToSpeaking()
         XCTAssertTrue(harness.playback.isPlaying)
@@ -732,12 +733,12 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
         // The assistant completes while Conduit is away; the late completion
         // is rejected synchronously (no assistant turn is awaited) and must
-        // neither speak nor relisten.
+        // neither speak nor relisten. setForegroundActive is a plain flag, so
+        // nothing asynchronous can land between it and these assertions.
         harness.controller.receiveAssistantEvent(
             .completed(sessionID: "session-1", content: "Answer.")
         )
         harness.controller.setForegroundActive(true)
-        await drainPendingMainActorWork()
 
         XCTAssertEqual(harness.capture.startCount, startsBeforeBackground, "late completion must not relisten")
         XCTAssertEqual(harness.controller.state, .idle)
@@ -745,7 +746,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
     func testBackgroundWhileThinkingDoesNotCancelServerTurn() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         await harness.driveToThinking()
 
         harness.appState.handleScenePhase(.background)
@@ -756,7 +757,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
     func testForegroundRestoreReinstallsGatewayWithoutStartingMic() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         await harness.driveToThinking()
         harness.appState.handleScenePhase(.background)
         // Simulate the gateway not surviving the suspension.
@@ -775,7 +776,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
     func testContinuousConversationOnStillRestoresNonListening() async {
         let harness = makeHarness()
         XCTAssertTrue(harness.appState.setContinuousConversation(true))
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         await harness.driveToThinking()
         harness.appState.handleScenePhase(.background)
 
@@ -788,7 +789,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
     func testContinuousConversationOffRestoresNonListening() async {
         let harness = makeHarness()
         XCTAssertTrue(harness.appState.setContinuousConversation(false))
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         await harness.driveToThinking()
         harness.appState.handleScenePhase(.background)
 
@@ -801,7 +802,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
     func testExplicitCloseBeforeBackgroundPreventsRestoration() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         harness.appState.closeVoiceConversation()
 
         harness.appState.handleScenePhase(.background)
@@ -813,7 +814,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
     func testSpokenGoodbyeBeforeBackgroundPreventsRestoration() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         await harness.speakUtterance("Goodbye.")
         await harness.flags.endConversations.waitUntil(1)
 
@@ -827,7 +828,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
     func testStaleRestoreCannotReopenAfterExplicitClose() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         await harness.driveToThinking()
         harness.appState.handleScenePhase(.background)
 
@@ -845,7 +846,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
     func testProfileChangeWhileBackgroundedPreventsRestoration() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         harness.appState.handleScenePhase(.background)
 
         harness.appState.setActiveProfileForTesting("beta")
@@ -857,7 +858,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
     func testServerIdentityChangePreventsRestoration() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         harness.appState.handleScenePhase(.background)
 
         harness.appState.connection = HermesConnection(baseUrl: "https://other-server.example.com", ticket: "t")
@@ -884,7 +885,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
     func testVoiceDisabledWhileSuspendedPreventsRestoration() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         harness.appState.handleScenePhase(.background)
 
         await harness.appState.setVoiceEnabled(false)
@@ -896,7 +897,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
     func testInvalidSuspendedSessionFailsClosedWithoutReplacementSession() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         harness.appState.handleScenePhase(.background)
 
         // The authoritative session changed while Conduit was away.
@@ -910,7 +911,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
     func testCaptureInterruptionWhileSuspendedDoesNotDestroyLogicalSession() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         await harness.driveToThinking()
         harness.appState.handleScenePhase(.background)
         XCTAssertNotNil(harness.appState.suspendedVoiceConversation)
@@ -938,7 +939,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
     func testLiveMuteSurvivesCapabilityRefreshAndRestore() async {
         let harness = makeHarness(requesterMode: .fullSupport)
         harness.defaults.set(true, forKey: "conduit.voice.enabled.v1.https://example.com.default")
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         await harness.driveToThinking()
         // The in-session Mute control changes only the live controller state.
         harness.controller.setOutputMuted(true)
@@ -968,7 +969,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
             try! JSONEncoder().encode(persisted),
             forKey: "conduit.voice.preferences.v1.https://example.com.default"
         )
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         harness.controller.setProfilePreferences(persisted)
         harness.controller.setOutputMuted(false)
         await harness.driveToThinking()
@@ -990,7 +991,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
         var beta = VoiceProfilePreferences()
         beta.outputMuted = false
         harness.defaults.set(try! JSONEncoder().encode(beta), forKey: betaKey)
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         harness.controller.setOutputMuted(true)
         harness.appState.handleScenePhase(.background)
 
@@ -1012,7 +1013,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
     func testSupersededRefreshDoesNotRestoreOrReapplyMute() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         harness.controller.setOutputMuted(true)
         harness.appState.handleScenePhase(.background)
 
@@ -1041,7 +1042,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
             connection: HermesConnection(baseUrl: "https://example.com", ticket: "stale-ticket"),
             profile: "default"
         )
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         await harness.driveToThinking()
         harness.appState.handleScenePhase(.background)
         XCTAssertNotNil(harness.appState.suspendedVoiceConversation)
@@ -1063,7 +1064,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
     func testCapabilityRefreshBeforeRestoreFailsClosedWhenSupportIsGone() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         await harness.driveToThinking()
         XCTAssertTrue(harness.appState.voiceCapabilitySnapshot.supportsSpeech, "pre-background the snapshot is capable")
         harness.appState.handleScenePhase(.background)
@@ -1092,7 +1093,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
             connection: HermesConnection(baseUrl: "https://example.com", ticket: "stale-ticket"),
             profile: "default"
         )
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         await harness.driveToThinking()
         harness.appState.handleScenePhase(.background)
 
@@ -1142,7 +1143,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
 
     func testRestoreThenListenRunsTheFullConversation() async {
         let harness = makeHarness()
-        await harness.openVoice(session: "session-1")
+        harness.openVoice(session: "session-1")
         await harness.driveToThinking()
         harness.appState.handleScenePhase(.background)
 

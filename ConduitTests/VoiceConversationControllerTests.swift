@@ -121,6 +121,52 @@ final class VoiceConversationControllerTests: XCTestCase {
         XCTAssertEqual(gateway.transcriptionCount, 0)
     }
 
+    /// Regression: `startCount` / `waitUntilStartCount` mean "a capture window
+    /// opened", so a start that threw must never satisfy them. The double used
+    /// to bump the success counter before rethrowing, which let a caller await
+    /// a listening window that never existed.
+    func testFailedCaptureStartDoesNotOpenAListenWindow() async {
+        let capture = MockCapture(
+            permissionGranted: true,
+            startError: VoiceAudioError.unavailable("Microphone capture could not start.")
+        )
+        let controller = VoiceConversationController(
+            capture: capture,
+            playback: MockPlayback(),
+            gateway: MockGateway(),
+            submit: { _ in true },
+            interrupt: { true }
+        )
+
+        await controller.startListening()
+
+        XCTAssertEqual(controller.state, .failed("Microphone capture could not start."))
+        XCTAssertEqual(capture.startCount, 0, "a start that threw opened no capture window")
+        XCTAssertFalse(capture.didStart, "a failed start never recorded a live capture")
+        XCTAssertNil(capture.lastStartIncludePreRoll, "a failed start has no window pre-roll to report")
+    }
+
+    /// Positive control for the test above: the same signal IS satisfied by a
+    /// successful start, so `startCount == 0` there is evidence of a failed
+    /// start rather than of a signal that never fires at all.
+    func testSuccessfulCaptureStartOpensExactlyOneListenWindow() async {
+        let capture = MockCapture(permissionGranted: true)
+        let controller = VoiceConversationController(
+            capture: capture,
+            playback: MockPlayback(),
+            gateway: MockGateway(),
+            submit: { _ in true },
+            interrupt: { true }
+        )
+
+        await controller.startListening()
+
+        XCTAssertEqual(controller.state, .listening)
+        XCTAssertEqual(capture.startCount, 1)
+        XCTAssertTrue(capture.didStart)
+        XCTAssertEqual(capture.lastStartIncludePreRoll, false)
+    }
+
     func testTranscriptionTestReturnsCapturedTranscript() async {
         let controller = VoiceConversationController(
             capture: MockCapture(permissionGranted: true),
@@ -371,7 +417,11 @@ final class VoiceConversationControllerTests: XCTestCase {
         await gateway.waitUntilTranscriptionStarted()
         controller.receiveAssistantEvent(.delta(sessionID: "typed-session", text: "Do not speak"))
         controller.receiveAssistantEvent(.completed(sessionID: "typed-session", content: "Do not speak"))
-        await drainPendingMainActorWork()
+        // Positive fence: the utterance pipeline reaching .thinking proves the
+        // turn was awaited, so the unrelated events above were rejected on
+        // session identity rather than merely arriving before the turn existed.
+        let submitted = await controller.waitForState(.thinking)
+        XCTAssertTrue(submitted, "the utterance pipeline submitted the turn")
 
         XCTAssertEqual(gateway.openCount, 0)
         XCTAssertEqual(controller.state, .thinking)
@@ -472,10 +522,13 @@ final class VoiceConversationControllerTests: XCTestCase {
             ofConversationContaining: ["stored-b", "runtime-of-b"]
         )
         controller.receiveAssistantEvent(.delta(sessionID: "runtime-of-b", text: " no"))
-        await drainPendingMainActorWork()
+        // Positive fence: .thinking proves the turn was awaited, so the refused
+        // delta was rejected on alias identity and the turn stayed speechless.
+        let submitted = await controller.waitForState(.thinking)
+        XCTAssertTrue(submitted, "the utterance pipeline submitted the turn")
 
-        XCTAssertTrue(
-            gateway.stream?.appended.isEmpty ?? true,
+        XCTAssertEqual(
+            gateway.openCount, 0,
             "Another conversation's runtime must never gain this turn's speech"
         )
     }
@@ -502,10 +555,14 @@ final class VoiceConversationControllerTests: XCTestCase {
         controller.ingestAudioLevel(0, at: start.addingTimeInterval(1.3))
         await gateway.waitUntilTranscriptionStarted()
         controller.receiveAssistantEvent(.delta(sessionID: "runtime-rebound", text: " no"))
-        await drainPendingMainActorWork()
+        // Positive fence: .thinking proves the turn was awaited, so the stale
+        // alias extension was genuinely refused rather than evaluated before
+        // the turn existed.
+        let submitted = await controller.waitForState(.thinking)
+        XCTAssertTrue(submitted, "the utterance pipeline submitted the turn")
 
-        XCTAssertTrue(
-            gateway.stream?.appended.isEmpty ?? true,
+        XCTAssertEqual(
+            gateway.openCount, 0,
             "A stale alias extension must not give the next turn's events speech"
         )
     }
@@ -571,10 +628,14 @@ final class VoiceConversationControllerTests: XCTestCase {
         controller.ingestAudioLevel(0, at: start.addingTimeInterval(1.3))
         await gateway.waitUntilTranscriptionStarted()
         controller.setOutputMuted(true)
+        // Positive fence: the turn must be awaited before the assistant's
+        // events are delivered, or they would be rejected as unexpected and
+        // the muted-output assertions below would hold vacuously.
+        let submitted = await controller.waitForState(.thinking)
+        XCTAssertTrue(submitted, "the utterance pipeline submitted the turn")
         controller.receiveAssistantEvent(.started(sessionID: "session"))
         controller.receiveAssistantEvent(.delta(sessionID: "session", text: "Partial"))
         controller.receiveAssistantEvent(.completed(sessionID: "session", content: "Authoritative answer"))
-        await drainPendingMainActorWork()
 
         XCTAssertEqual(controller.conversationTranscript.map(\.speaker), [.user, .assistant])
         XCTAssertEqual(controller.conversationTranscript.map(\.text), ["User words", "Authoritative answer"])
@@ -597,10 +658,13 @@ final class VoiceConversationControllerTests: XCTestCase {
         controller.ingestAudioLevel(0, at: start.addingTimeInterval(1.3))
         await gateway.waitUntilTranscriptionStarted()
         controller.setOutputMuted(true)
+        // Positive fence: see the transcript test above — deliver the
+        // assistant's events only once the turn is provably awaited.
+        let submitted = await controller.waitForState(.thinking)
+        XCTAssertTrue(submitted, "the utterance pipeline submitted the turn")
         controller.receiveAssistantEvent(.started(sessionID: "session"))
         controller.receiveAssistantEvent(.delta(sessionID: "session", text: "Keep this"))
         controller.receiveAssistantEvent(.completed(sessionID: "session", content: ""))
-        await drainPendingMainActorWork()
 
         XCTAssertEqual(controller.conversationTranscript.map(\.text), ["Question", "Keep this"])
     }
@@ -1279,6 +1343,10 @@ final class VoiceConversationControllerTests: XCTestCase {
         // a fresh startListening (capture stays paused), so no level event
         // publishes here; the interruption itself is what must land.
         await controller.startListening()
+        XCTAssertEqual(
+            capture.pauseCount, 2,
+            "the fresh capture window must be re-paused: the explicit user pause stays authoritative"
+        )
         capture.emit(.interrupted(generation: capture.captureGeneration))
         let failed = await controller.waitForFailedState()
         XCTAssertTrue(failed, "the interruption failed the session")
@@ -1397,9 +1465,9 @@ final class VoiceSpeakerSafeBargeInTests: XCTestCase {
         XCTAssertEqual(capture.finishUtteranceCount, 1, "no additional (assistant) utterance may be recorded")
 
         // The retired turn's late completion must stay retired: the guard in
-        // receiveAssistantEvent rejects it synchronously.
+        // receiveAssistantEvent rejects it synchronously, so the absence below
+        // is decided by this call and needs no drain.
         controller.receiveAssistantEvent(.completed(sessionID: "session", content: "Late tail"))
-        await drainPendingMainActorWork()
         XCTAssertEqual(gateway.openCount, 1, "a retired turn must not reopen speech")
         XCTAssertEqual(controller.state, .listening)
     }
@@ -1572,9 +1640,13 @@ final class VoiceSpeakerSafeBargeInTests: XCTestCase {
         controller.ingestAudioLevel(0, at: utteranceStart.addingTimeInterval(1.3))
         await gateway.waitUntilTranscriptionStarted()
         controller.setOutputMuted(true)
+        // Positive fence: deliver the assistant's events only once the turn is
+        // provably awaited, so these assertions test the mute guard rather than
+        // an event rejected for arriving before the turn existed.
+        let submitted = await controller.waitForState(.thinking)
+        XCTAssertTrue(submitted, "the utterance pipeline submitted the turn")
         controller.receiveAssistantEvent(.started(sessionID: "session"))
         controller.receiveAssistantEvent(.delta(sessionID: "session", text: "Silenced answer."))
-        await drainPendingMainActorWork()
 
         // Existing mute semantics: muting during .thinking keeps .thinking;
         // the muted label only replaces an in-flight .speaking. Either way

@@ -253,7 +253,11 @@ final class VoiceConversationSpokenEndCommandTests: XCTestCase {
         await driveUtterance(controller)
         await flags.endConversations.waitUntil(1)
         await flags.interrupts.waitUntil(1)
-        await drainPendingMainActorWork()
+        // Positive fence: both seams ran and the Close settled the controller,
+        // so the "must not relisten" absence below is decided by the close path
+        // rather than by a settle window.
+        let settled = await controller.waitForState(.idle)
+        XCTAssertTrue(settled, "the Close teardown must settle the controller")
 
         XCTAssertEqual(flags.endConversations.value, 1, "the Close teardown seam must be requested exactly once")
         XCTAssertEqual(gateway.transcriptionCount, 1)
@@ -271,7 +275,6 @@ final class VoiceConversationSpokenEndCommandTests: XCTestCase {
         await driveUtterance(controller)
         let stopped = await controller.waitForState(.idle)
         XCTAssertTrue(stopped, "without a Close seam the controller must still stop itself")
-        await drainPendingMainActorWork()
 
         XCTAssertEqual(flags.endConversations.value, 0)
         XCTAssertFalse(controller.hasLiveVoiceSession, "without a Close seam the controller must still stop itself")
@@ -286,7 +289,10 @@ final class VoiceConversationSpokenEndCommandTests: XCTestCase {
         await driveUtterance(controller)
         await flags.endConversations.waitUntil(1)
         await flags.interrupts.waitUntil(1)
-        await drainPendingMainActorWork()
+        // Positive fence: the Close seam ran and settled the controller, so
+        // continuous mode cannot be resurrecting the session asynchronously.
+        let settled = await controller.waitForState(.idle)
+        XCTAssertTrue(settled, "the Close teardown must settle the controller")
 
         XCTAssertFalse(controller.hasLiveVoiceSession, "continuous ON must not resurrect the session")
         XCTAssertEqual(controller.state, .idle)
@@ -302,7 +308,9 @@ final class VoiceConversationSpokenEndCommandTests: XCTestCase {
         await driveUtterance(controller)
         await flags.endConversations.waitUntil(1)
         await flags.interrupts.waitUntil(1)
-        await drainPendingMainActorWork()
+        // Positive fence: see the continuous-ON case above.
+        let settled = await controller.waitForState(.idle)
+        XCTAssertTrue(settled, "the Close teardown must settle the controller")
 
         XCTAssertFalse(controller.hasLiveVoiceSession)
         XCTAssertEqual(controller.state, .idle)
@@ -318,7 +326,10 @@ final class VoiceConversationSpokenEndCommandTests: XCTestCase {
         await driveUtterance(controller)
         await flags.endConversations.waitUntil(1)
         await flags.interrupts.waitUntil(1)
-        await drainPendingMainActorWork()
+        // Positive fence: the stronger action closed the session, which is the
+        // deterministic signal that End won over Stop.
+        let settled = await controller.waitForState(.idle)
+        XCTAssertTrue(settled, "the Close teardown must settle the controller")
 
         XCTAssertEqual(flags.endConversations.value, 1, "the stronger action must be deterministic")
         XCTAssertFalse(controller.hasLiveVoiceSession, "end must close, not stop-and-relisten")
@@ -453,11 +464,11 @@ final class VoiceConversationSpokenEndCommandTests: XCTestCase {
         await flags.endConversations.waitUntil(1)
         let startsAtClose = capture.startCount
 
-        // The closed session rejects these synchronously (no awaited turn).
+        // The closed session rejects these synchronously (no awaited turn), so
+        // the absences below are decided by these calls and need no drain.
         controller.receiveAssistantEvent(.started(sessionID: "session"))
         controller.receiveAssistantEvent(.delta(sessionID: "session", text: "late answer"))
         controller.receiveAssistantEvent(.completed(sessionID: "session", content: "late answer"))
-        await drainPendingMainActorWork()
 
         XCTAssertFalse(controller.hasLiveVoiceSession)
         XCTAssertEqual(controller.state, .idle)

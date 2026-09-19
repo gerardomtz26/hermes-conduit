@@ -22,11 +22,16 @@
 //    `MockPlayback.drainGate` — parked operations the test releases by hand.
 //
 //  Negative assertions ("this event must never arrive") cannot wait on an
-//  event; they prove the pipeline was drained with `drainPendingMainActorWork()`
-//  (or a positive control) and then assert nothing changed.
+//  event. Prefer a positive control that proves the pipeline passed the fence
+//  — another event's `waitUntil*` signal, a `waitForState` transition, a
+//  parked gate's release — and only then assert nothing changed. Where no such
+//  control exists (a rejected event has no observable effect by design),
+//  `drainPendingMainActorWork()` is best-effort cleanup between the handoff
+//  and the assertion; it is not proof that asynchronous work has finished.
 //
 
 import Combine
+import Foundation
 import XCTest
 @testable import Conduit
 
@@ -238,17 +243,36 @@ extension VoiceConversationController {
 
 // MARK: - Negative-assertion drain
 
-/// Bounded MainActor drain for NEGATIVE assertions: after yielding buffered
-/// capture events (or parking/releasing a gate), a generous yield budget lets
-/// every already-enqueued MainActor job — the capture-event pump, a cancelled
-/// utterance task — finish before the test asserts that nothing changed.
-/// There is no wall clock involved: a loaded runner cannot under-drain these
-/// because each `Task.yield()` re-enqueues the test BEHIND the pending work.
-/// Never use this to wait for a positive event — wait for that event.
+/// Best-effort MainActor barrier for NEGATIVE assertions only.
+///
+/// Each round enqueues one block on the main queue and awaits it. The main
+/// queue is FIFO, so every job that was already enqueued when a round started
+/// — including the MainActor job for a capture event that has already been
+/// yielded into a double's stream — has run by the time that round returns.
+/// That is the reason for rounds instead of a plain `Task.yield()` loop:
+/// `yield()` re-enqueues the yielding task without promising where it lands
+/// relative to work that is already waiting, so a yield budget asserts a
+/// scheduler contract that does not exist.
+///
+/// This is still NOT a synchronization primitive, and NOT a way to wait for
+/// something that has not happened yet:
+///
+/// - An `AsyncStream` consumer that has not been resumed yet is not covered.
+///   The pump advances about one event per round, so a multi-event handoff is
+///   drained as a matter of practice, not of contract. Rounds bound the effort
+///   and keep this best-effort; never read them as proof.
+/// - It must never be the SOLE evidence for an important negative assertion.
+///   When a positive event proves the relevant queue passed the fence — a
+///   `waitUntil*` signal, `waitForState`, a parked gate's release, a counter —
+///   wait on that instead. Use this only as cleanup between a volatile handoff
+///   and an absence assertion, or where rejecting the event has no observable
+///   effect by design.
 @MainActor
-func drainPendingMainActorWork(budget: Int = 50) async {
-    for _ in 0..<budget {
-        await Task.yield()
+func drainPendingMainActorWork(rounds: Int = 16) async {
+    for _ in 0..<rounds {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            DispatchQueue.main.async { continuation.resume() }
+        }
     }
 }
 
@@ -263,6 +287,10 @@ final class MockCapture: AudioCaptureService {
     private var continuation: AsyncStream<VoiceCaptureEvent>.Continuation?
     private let permissionGranted: Bool
     private let startError: Error?
+    /// Latches on the first successful `startListening` and is never cleared.
+    /// It answers "did a capture window ever open", NOT production's
+    /// `activelyRecording` (which flips false again on barge-in monitoring and
+    /// on stop). For a per-window signal use `startCount`/`waitUntilStartCount`.
     var didStart = false
     var didBeginMonitoring = false
     var didPause = false
@@ -285,14 +313,26 @@ final class MockCapture: AudioCaptureService {
     }
     func requestPermission() async -> Bool { permissionGranted }
     func startListening(includePreRoll: Bool) throws {
+        if let startError {
+            // A failed start opens no capture window. Mirror the production
+            // failure path (`handleStartupFailure` -> `stop()`): the partial
+            // startup is torn down, clearing the pause and bumping the
+            // generation fail-closed, but no listen is recorded — `startCount`
+            // and `lastStartIncludePreRoll` describe successful windows only.
+            mockPaused = false
+            captureGeneration &+= 1
+            throw startError
+        }
+
         didStart = true
         lastStartIncludePreRoll = includePreRoll
         mockPaused = false
         captureGeneration &+= 1
         starts.increment()
-        if let startError { throw startError }
     }
-    /// Awaits a capture window opening (fresh listen or recapture).
+    /// Awaits a successful capture window opening (fresh listen or recapture).
+    /// A configured `startError` never satisfies this: a start that threw did
+    /// not open a window.
     func waitUntilStartCount(_ count: Int, timeout: TimeInterval = 10) async {
         await starts.waitUntil(count, timeout: timeout)
     }
@@ -477,14 +517,31 @@ final class MockSpeechStream: VoiceSpeechStream {
         appended.append(text)
         onAppend(text)
         guard blocksAppend else { return }
-        if isCancelled { throw URLError(.cancelled) }
-        try await withCheckedThrowingContinuation { continuation in
-            appendContinuation = continuation
-            if isCancelled {
-                appendContinuation = nil
-                continuation.resume(throwing: URLError(.cancelled))
+        if isCancelled || Task.isCancelled { throw URLError(.cancelled) }
+        try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { continuation in
+                appendContinuation = continuation
+                // Cancellation can land before the continuation is installed;
+                // this re-check keeps the park from outliving its task.
+                if isCancelled || Task.isCancelled {
+                    appendContinuation = nil
+                    continuation.resume(throwing: URLError(.cancelled))
+                }
             }
-        }
+        }, onCancel: { [weak self] in
+            Task { @MainActor [weak self] in
+                self?.releaseParkedAppendAsCancelled()
+            }
+        })
+    }
+
+    /// Resumes the parked append with `.cancelled`. Every release path clears
+    /// the slot before resuming and all of them run on the MainActor, so the
+    /// continuation is resumed at most once.
+    private func releaseParkedAppendAsCancelled() {
+        guard let continuation = appendContinuation else { return }
+        appendContinuation = nil
+        continuation.resume(throwing: URLError(.cancelled))
     }
 
     func finish() async throws -> Bool {
@@ -496,9 +553,7 @@ final class MockSpeechStream: VoiceSpeechStream {
         guard !isCancelled else { return }
         isCancelled = true
         cancelCount += 1
-        let continuation = appendContinuation
-        appendContinuation = nil
-        continuation?.resume(throwing: URLError(.cancelled))
+        releaseParkedAppendAsCancelled()
     }
 }
 

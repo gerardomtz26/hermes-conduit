@@ -1248,6 +1248,9 @@ final class CarPlayVoiceSurfaceGateTests: XCTestCase {
     /// microphone.
     func testPhoneVoiceOpenReArmsTheGateAndListens() async {
         let harness = CarPlayVoiceCoordinatorTests.makeSharedHarness()
+        addTeardownBlock { [defaults = harness.defaults, suite = harness.defaultsSuiteName] in
+            defaults.removePersistentDomain(forName: suite)
+        }
         harness.appState.activeSessionId = "session-1"
         // Background/foreground cycle with the sheet closed: under the new
         // predicate the gate ends false (no Voice surface is presenting).
