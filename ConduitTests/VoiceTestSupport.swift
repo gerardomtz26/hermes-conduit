@@ -175,18 +175,22 @@ private final class PublishedValueWaiter<Value> {
     func wait(timeout: TimeInterval) async -> Bool {
         await withCheckedContinuation { continuation in
             // withCheckedContinuation runs its body before suspending, so
-            // the subscription is installed before any production task can
-            // run — no missed event.
+            // everything here is installed before any production task can
+            // run — no missed event, and no suspension point between the
+            // continuation and the subscription.
             self.continuation = continuation
-            self.cancellable = self.publisher.sink { [weak self] value in
-                MainActor.assumeIsolated {
-                    self?.receive(value)
-                }
-            }
+            // Created BEFORE the subscription: a value replayed synchronously
+            // inside `sink` would otherwise reach `finish` while `timeoutTask`
+            // is still nil, leaving this timer to fire uncancelled later.
             self.timeoutTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
                 guard !Task.isCancelled else { return }
                 self?.finish(returning: false)
+            }
+            self.cancellable = self.publisher.sink { [weak self] value in
+                MainActor.assumeIsolated {
+                    self?.receive(value)
+                }
             }
         }
     }
@@ -314,13 +318,12 @@ final class MockCapture: AudioCaptureService {
     func requestPermission() async -> Bool { permissionGranted }
     func startListening(includePreRoll: Bool) throws {
         if let startError {
-            // A failed start opens no capture window. Mirror the production
-            // failure path (`handleStartupFailure` -> `stop()`): the partial
-            // startup is torn down, clearing the pause and bumping the
-            // generation fail-closed, but no listen is recorded — `startCount`
-            // and `lastStartIncludePreRoll` describe successful windows only.
-            mockPaused = false
-            captureGeneration &+= 1
+            // A failed start opens no capture window. Production runs
+            // `handleStartupFailure` -> `stop()`, so mirror that teardown
+            // exactly (stopCount, pause cleared, generation bumped
+            // fail-closed). No listen is recorded — `startCount` and
+            // `lastStartIncludePreRoll` describe successful windows only.
+            stop()
             throw startError
         }
 
@@ -498,6 +501,14 @@ final class MockGateway: VoiceGatewayService {
     }
 }
 
+/// Raised when a double is driven outside its documented contract, so the
+/// misuse surfaces as a loud, testable failure instead of a stalled lane.
+enum MockSpeechStreamError: Error, Equatable {
+    /// A second append parked while one was already parked; the double
+    /// supports a single parked append at a time.
+    case concurrentParkedAppend
+}
+
 @MainActor
 final class MockSpeechStream: VoiceSpeechStream {
     private(set) var appended: [String] = []
@@ -518,6 +529,12 @@ final class MockSpeechStream: VoiceSpeechStream {
         onAppend(text)
         guard blocksAppend else { return }
         if isCancelled || Task.isCancelled { throw URLError(.cancelled) }
+        // One parked append at a time. Overwriting the slot would leak the
+        // earlier continuation and hang the drain, so a second concurrent park
+        // fails loudly and testably instead. Checked before the continuation
+        // is installed: there is no suspension point in between, so the check
+        // and the park are one atomic MainActor step.
+        if appendContinuation != nil { throw MockSpeechStreamError.concurrentParkedAppend }
         try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
                 appendContinuation = continuation
@@ -662,23 +679,32 @@ final class RoutePolicyBox {
 /// resets, so a second `waitUntilEntered()` would observe the first entry.
 @MainActor
 final class InterruptParkingGate {
-    private(set) var count = 0
+    private let entered = AwaitableCounter()
     private var parked: [CheckedContinuation<Void, Never>] = []
-    private var entryWaiters: [CheckedContinuation<Void, Never>] = []
     private var isDisarmed = false
 
+    /// How many interruptions have reached the gate.
+    var count: Int { entered.value }
+
     func waitInInterrupt() async {
-        count += 1
-        let waiters = entryWaiters
-        entryWaiters.removeAll()
-        waiters.forEach { $0.resume() }
+        entered.increment()
         guard !isDisarmed else { return }
+        // Deliberately parked until `release()`: this models an operation held
+        // mid-flight, so the park itself must not expire — the test owns the
+        // release, and `waitUntilEntered` below is what fails loudly if entry
+        // never happens.
         await withCheckedContinuation { parked.append($0) }
     }
 
-    func waitUntilEntered() async {
-        guard count == 0 else { return }
-        await withCheckedContinuation { entryWaiters.append($0) }
+    /// Awaits the operation being parked. Bounded: a `timeout` expiry records
+    /// an explicit failure naming the missing entry instead of stalling the
+    /// lane until the watchdog kills it.
+    func waitUntilEntered(timeout: TimeInterval = 10) async {
+        await entered.waitUntil(1, timeout: timeout)
+        XCTAssertEqual(
+            entered.value, 1,
+            "the parked operation was never entered within \(timeout)s"
+        )
     }
 
     func release() {
@@ -690,6 +716,14 @@ final class InterruptParkingGate {
 }
 
 /// A parkable async step for hermetic reconciliation tests.
+///
+/// Unlike the counting and published-value waits in this harness,
+/// `waitUntilSuspended()` parks WITHOUT a timeout. That is deliberate: this
+/// helper is owned by the AppState recovery suites (it was relocated here from
+/// `AppStateChatResumeTests`), so giving it a new failure mode is out of scope
+/// for the Voice synchronization pass — a suspension that never arrives still
+/// stalls the lane rather than failing it. Callers that want a loud failure
+/// should pair it with their own positive signal.
 @MainActor
 final class ControlledSuspension {
     private var suspension: CheckedContinuation<Void, Never>?

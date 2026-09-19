@@ -119,6 +119,39 @@ final class VoiceTestSupportTests: XCTestCase {
         XCTAssertEqual(stream.cancelCount, 1)
     }
 
+    /// The double supports one parked append at a time. A second concurrent
+    /// park must fail loudly rather than overwrite the slot and leak the first
+    /// continuation — that would hang the drain with no diagnostic.
+    func testSecondConcurrentParkFailsLoudlyInsteadOfLeakingTheFirst() async {
+        let handedOff = AwaitableCounter()
+        let stream = MockSpeechStream(blocksAppend: true, onAppend: { _ in handedOff.increment() })
+        let first = Task { @MainActor in
+            do {
+                try await stream.append("first")
+                return false
+            } catch {
+                return (error as? URLError)?.code == .cancelled
+            }
+        }
+
+        await handedOff.waitUntil(1)
+
+        var violation: MockSpeechStreamError?
+        do {
+            try await stream.append("second")
+        } catch let error as MockSpeechStreamError {
+            violation = error
+        } catch {
+            XCTFail("expected MockSpeechStreamError, got \(error)")
+        }
+        XCTAssertEqual(violation, .concurrentParkedAppend)
+
+        // The original park is still the live one and still releasable.
+        stream.cancel()
+        let wasCancellation = await first.value
+        XCTAssertTrue(wasCancellation, "the first park survives the refused second park")
+    }
+
     /// `cancel()` and task cancellation racing must still resume the park
     /// exactly once — a double resume traps on the checked continuation.
     func testStreamCancelRacingTaskCancellationResumesExactlyOnce() async {
