@@ -62,6 +62,24 @@ class WorkflowContractTests(unittest.TestCase):
             out.append(line)
         return "\n".join(out)
 
+    def test_unit_job_is_a_dynamic_matrix_with_sequential_batches(self):
+        text = self._workflow_text()
+        unit = self._job_text("unit")
+        # Matrix fanout comes from the planner, never a hard-coded class list,
+        # and one stalled lane must not cancel the others.
+        self.assertIn("matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}", unit)
+        self.assertIn("fail-fast: false", unit)
+        self.assertIn('needs: [plan, build]', unit,
+                      "Unit lanes must consume the SHARED build products")
+        # The planner-owned batch layout + per-batch watchdog table must be
+        # handed to the runner verbatim (never template-interpolated into
+        # bash code).
+        self.assertIn("--kind unit", unit)
+        self.assertIn("--batches-json", unit)
+        self.assertIn('LANE_BATCHES: "${{ matrix.batches }}"', unit)
+        self.assertIn('echo "matrix=', text,
+                      "the plan job must emit the unit matrix the job consumes")
+
     def test_ui_job_is_a_dynamic_matrix_with_batched_lane_runner(self):
         text = self._workflow_text()
         ui = self._job_text("ui")

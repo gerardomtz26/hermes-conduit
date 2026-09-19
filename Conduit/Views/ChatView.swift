@@ -2391,6 +2391,10 @@ struct ApprovalCard: View {
                     } else if approval.status == .approved || approval.status == .rejected {
                         Image(systemName: approval.status == .approved ? "checkmark.circle.fill" : "xmark.circle.fill")
                             .foregroundStyle(statusColor(for: approval.status))
+                    } else if approval.status == .expired {
+                        Image(systemName: "clock.badge.xmark")
+                            .foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
                     }
                     MessageTimestampLabel(timestamp: message.timestamp, tone: .supporting)
                 }
@@ -2407,11 +2411,18 @@ struct ApprovalCard: View {
                         .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
 
-                if let choice = approval.choice,
-                   approval.status == .approved || approval.status == .rejected {
-                    Label(decisionTitle(choice), systemImage: approval.status == .approved ? "checkmark" : "xmark")
+                if approval.status == .approved || approval.status == .rejected {
+                    let text = approval.choice.map { decisionTitle($0) } ?? statusTitle(for: approval.status)
+                    Label(text, systemImage: approval.status == .approved ? "checkmark" : "xmark")
                         .font(.subheadline.weight(.medium))
                         .foregroundStyle(statusColor(for: approval.status))
+                } else if approval.status == .expired {
+                    let explanation = approval.error?.isEmpty == false
+                        ? approval.error!
+                        : AppLocalization.string("This approval is no longer active — Hermes timed it out and continued.")
+                    Text(explanation)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 } else {
                     HStack(spacing: 8) {
                         Button {
@@ -2449,7 +2460,7 @@ struct ApprovalCard: View {
                     .font(.subheadline.weight(.medium))
                 }
 
-                if let error = approval.error, !error.isEmpty {
+                if approval.status != .expired, let error = approval.error, !error.isEmpty {
                     Label(error, systemImage: "exclamationmark.circle")
                         .font(.caption)
                         .foregroundStyle(.red)
@@ -2502,6 +2513,7 @@ struct ApprovalCard: View {
         case .submitting: return AppLocalization.string("SENDING DECISION")
         case .approved: return AppLocalization.string("APPROVED")
         case .rejected: return AppLocalization.string("REJECTED")
+        case .expired: return AppLocalization.string("EXPIRED")
         case .error: return AppLocalization.string("TRY AGAIN")
         }
     }
@@ -2510,7 +2522,7 @@ struct ApprovalCard: View {
         switch status {
         case .pending, .submitting: return .orange
         case .approved: return .green
-        case .rejected, .error: return .red
+        case .rejected, .expired, .error: return .red
         }
     }
 }

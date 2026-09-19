@@ -30,7 +30,8 @@ final class AppStateReasoningStreamTests: XCTestCase {
         return AppState(
             defaults: defaults,
             loadSavedConnection: false,
-            chatResumeLifecycleOperations: lifecycleOperations
+            chatResumeLifecycleOperations: lifecycleOperations,
+            sessionPresentationCache: SessionPresentationCache(defaults: defaults)
         )
     }
 
@@ -480,6 +481,143 @@ final class AppStateReasoningStreamTests: XCTestCase {
         XCTAssertEqual(state.messages[toolIndex].tool?.status, .complete)
     }
 
+    func testStableToolIDsKeepConcurrentIdenticalCallsDistinctOutOfOrder() {
+        let state = makeAppState()
+        installActiveSession(state, id: "stored-a")
+
+        for toolID in ["call-a", "call-b"] {
+            state.handleStreamEvent(.toolStart(
+                sessionId: "stored-a", toolName: "terminal", toolInput: "git status", toolID: toolID
+            ))
+        }
+        state.handleStreamEvent(.toolComplete(
+            sessionId: "stored-a", toolName: "terminal", toolOutput: "b-output", toolID: "call-b"
+        ))
+        state.handleStreamEvent(.toolComplete(
+            sessionId: "stored-a", toolName: "terminal", toolOutput: "a-output", toolID: "call-a"
+        ))
+
+        let tools = state.messages.compactMap(\.tool)
+        XCTAssertEqual(tools.count, 2)
+        XCTAssertEqual(tools.first { $0.id == "call-a" }?.output, "a-output")
+        XCTAssertEqual(tools.first { $0.id == "call-b" }?.output, "b-output")
+
+        // Replayed completion updates the same terminal card in place.
+        state.handleStreamEvent(.toolComplete(
+            sessionId: "stored-a", toolName: "terminal", toolOutput: "b-replayed", toolID: "call-b"
+        ))
+        XCTAssertEqual(state.messages.compactMap(\.tool).count, 2)
+        XCTAssertEqual(state.messages.compactMap(\.tool).first { $0.id == "call-b" }?.output, "b-replayed")
+
+        // A replayed start cannot re-arm a completed card with the same id.
+        state.handleStreamEvent(.toolStart(
+            sessionId: "stored-a", toolName: "terminal", toolInput: "git status", toolID: "call-a"
+        ))
+        XCTAssertEqual(state.messages.compactMap(\.tool).count, 2)
+        XCTAssertEqual(state.messages.compactMap(\.tool).first { $0.id == "call-a" }?.status, .complete)
+
+        // A completion for another known id must append its own result, not
+        // steal either of the two same-name calls.
+        state.handleStreamEvent(.toolComplete(
+            sessionId: "stored-a", toolName: "terminal", toolOutput: "c-output", toolID: "call-c"
+        ))
+        XCTAssertEqual(state.messages.compactMap(\.tool).first { $0.id == "call-a" }?.output, "a-output")
+        XCTAssertEqual(state.messages.compactMap(\.tool).first { $0.id == "call-b" }?.output, "b-replayed")
+        XCTAssertEqual(state.messages.compactMap(\.tool).first { $0.id == "call-c" }?.status, .complete)
+    }
+
+    func testAmbiguousIdlessCompletionDoesNotGuessOrDestroyRunningCards() {
+        let state = makeAppState()
+        installActiveSession(state, id: "stored-a")
+        state.handleStreamEvent(.toolStart(sessionId: "stored-a", toolName: "terminal", toolInput: "first"))
+        state.handleStreamEvent(.toolStart(sessionId: "stored-a", toolName: "terminal", toolInput: "second"))
+        state.handleStreamEvent(.toolComplete(sessionId: "stored-a", toolName: "terminal", toolOutput: "done"))
+
+        let tools = state.messages.compactMap(\.tool)
+        XCTAssertEqual(tools.count, 3, "An ID-less completion must not guess when multiple ID-less running cards exist")
+        XCTAssertEqual(tools[0].status, .running)
+        XCTAssertEqual(tools[0].input, "first")
+        XCTAssertEqual(tools[1].status, .running)
+        XCTAssertEqual(tools[1].input, "second")
+        XCTAssertEqual(tools[2].status, .complete)
+        XCTAssertEqual(tools[2].output, "done")
+    }
+
+    func testUniqueIdlessCompletionAdoptsRunningCardInPlace() {
+        let state = makeAppState()
+        installActiveSession(state, id: "stored-a")
+        state.handleStreamEvent(.toolStart(sessionId: "stored-a", toolName: "terminal", toolInput: "first"))
+        state.handleStreamEvent(.toolComplete(sessionId: "stored-a", toolName: "terminal", toolOutput: "done"))
+
+        let tools = state.messages.compactMap(\.tool)
+        XCTAssertEqual(tools.count, 1, "An ID-less completion should adopt the unique running card")
+        XCTAssertEqual(tools[0].status, .complete)
+        XCTAssertEqual(tools[0].input, "first")
+        XCTAssertEqual(tools[0].output, "done")
+    }
+
+    func testIdentifiedCompletionAdoptsUniqueIdlessRunningTool() {
+        let state = makeAppState()
+        installActiveSession(state, id: "stored-a")
+        state.handleStreamEvent(.toolStart(sessionId: "stored-a", toolName: "terminal", toolInput: "git status", toolID: nil))
+        state.handleStreamEvent(.toolComplete(sessionId: "stored-a", toolName: "terminal", toolOutput: "clean", toolID: "call-xyz"))
+
+        let tools = state.messages.compactMap(\.tool)
+        XCTAssertEqual(tools.count, 1, "An identified completion should adopt a unique ID-less running card")
+        XCTAssertEqual(tools[0].id, "call-xyz")
+        XCTAssertEqual(tools[0].status, .complete)
+        XCTAssertEqual(tools[0].input, "git status")
+        XCTAssertEqual(tools[0].output, "clean")
+    }
+
+    func testIdentifiedCompletionDoesNotAdoptAmbiguousIdlessRunningTools() {
+        let state = makeAppState()
+        installActiveSession(state, id: "stored-a")
+        state.handleStreamEvent(.toolStart(sessionId: "stored-a", toolName: "terminal", toolInput: "first", toolID: nil))
+        state.handleStreamEvent(.toolStart(sessionId: "stored-a", toolName: "terminal", toolInput: "second", toolID: nil))
+        state.handleStreamEvent(.toolComplete(sessionId: "stored-a", toolName: "terminal", toolOutput: "done", toolID: "call-xyz"))
+
+        let tools = state.messages.compactMap(\.tool)
+        XCTAssertEqual(tools.count, 3, "An identified completion must not guess when multiple ID-less running cards exist")
+        XCTAssertEqual(tools[0].status, .running)
+        XCTAssertEqual(tools[1].status, .running)
+        XCTAssertEqual(tools[2].status, .complete)
+        XCTAssertEqual(tools[2].id, "call-xyz")
+        XCTAssertEqual(tools[2].output, "done")
+    }
+
+    func testIdlessCompletionAdoptsUniqueIdentifiedRunningToolPreservingToolID() {
+        let state = makeAppState()
+        installActiveSession(state, id: "stored-a")
+        state.handleStreamEvent(.toolStart(sessionId: "stored-a", toolName: "terminal", toolInput: "git pull", toolID: "call-start-123"))
+        state.handleStreamEvent(.toolComplete(sessionId: "stored-a", toolName: "terminal", toolOutput: "up to date", toolID: nil))
+
+        let tools = state.messages.compactMap(\.tool)
+        XCTAssertEqual(tools.count, 1, "An ID-less completion should adopt a unique identified running card")
+        XCTAssertEqual(tools[0].id, "call-start-123", "Preserves the existing tool ID from the start event")
+        XCTAssertEqual(tools[0].status, .complete)
+        XCTAssertEqual(tools[0].input, "git pull")
+        XCTAssertEqual(tools[0].output, "up to date")
+    }
+
+    func testIdlessCompletionDoesNotAdoptAmbiguousIdentifiedRunningTools() {
+        let state = makeAppState()
+        installActiveSession(state, id: "stored-a")
+        state.handleStreamEvent(.toolStart(sessionId: "stored-a", toolName: "terminal", toolInput: "cmd 1", toolID: "call-1"))
+        state.handleStreamEvent(.toolStart(sessionId: "stored-a", toolName: "terminal", toolInput: "cmd 2", toolID: "call-2"))
+        state.handleStreamEvent(.toolComplete(sessionId: "stored-a", toolName: "terminal", toolOutput: "done", toolID: nil))
+
+        let tools = state.messages.compactMap(\.tool)
+        XCTAssertEqual(tools.count, 3, "An ID-less completion must not guess when multiple identified running cards exist")
+        XCTAssertEqual(tools[0].status, .running)
+        XCTAssertEqual(tools[0].id, "call-1")
+        XCTAssertEqual(tools[1].status, .running)
+        XCTAssertEqual(tools[1].id, "call-2")
+        XCTAssertEqual(tools[2].status, .complete)
+        XCTAssertNil(tools[2].id)
+        XCTAssertEqual(tools[2].output, "done")
+    }
+
     func testMultiSegmentTurnKeepsBothSegmentsAndSkipsCompletionTrace() {
         let state = makeAppState()
         installActiveSession(state, id: "stored-a")
@@ -643,5 +781,90 @@ final class AppStateReasoningStreamTests: XCTestCase {
         XCTAssertTrue(reasoningCards(in: state).isEmpty)
         XCTAssertNil(state.liveReasoningSegment)
         XCTAssertEqual(state.messages, replacementMessages)
+    }
+
+    func testBotChatToolRecoveryAndCleanupUnderBotProfileNamespace() async {
+        let suite = "testBotChatToolRecovery.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            XCTFail("Failed to initialize UserDefaults suite")
+            return
+        }
+        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
+        let cache = SessionPresentationCache(defaults: defaults)
+        let state = AppState(
+            defaults: defaults,
+            loadSavedConnection: false,
+            sessionPresentationCache: cache
+        )
+
+        let botSessionID = "bot-session-1"
+        let botProfile = "my-bot-profile"
+        let dashboardProfile = "dashboard-default"
+
+        state.setActiveProfileForTesting(dashboardProfile)
+        installActiveSession(state, id: botSessionID)
+        state.noteBotChatSessionForTesting(botSessionID, profile: botProfile)
+
+        // 1. Begin a tool call in the bot chat
+        state.handleStreamEvent(.toolStart(
+            sessionId: botSessionID,
+            toolName: "calculator",
+            toolInput: "40 + 2",
+            toolID: "call-calc-1"
+        ))
+
+        let toolInFlight = state.messages.compactMap(\.tool)
+        XCTAssertEqual(toolInFlight.count, 1)
+        XCTAssertEqual(toolInFlight.first?.status, .running)
+
+        // Verify pending tool is stored under botProfile, NOT dashboardProfile
+        let botPending = cache.merge([], profile: botProfile, sessionIDs: [botSessionID], includePendingTools: true)
+        let dashboardPending = cache.merge([], profile: dashboardProfile, sessionIDs: [botSessionID], includePendingTools: true)
+        XCTAssertEqual(botPending.compactMap(\.tool).map(\.id), ["call-calc-1"], "Pending tool must be persisted under the bot profile namespace")
+        XCTAssertTrue(dashboardPending.isEmpty, "No pending tool entry should exist under the dashboard profile")
+
+        // 2. Simulate reopen/recovery with running == true
+        let recoverState = AppState(
+            defaults: defaults,
+            loadSavedConnection: false,
+            sessionPresentationCache: cache
+        )
+        recoverState.setActiveProfileForTesting(dashboardProfile)
+        installActiveSession(recoverState, id: botSessionID)
+        recoverState.noteBotChatSessionForTesting(botSessionID, profile: botProfile)
+
+        let resumeResultRunning = SessionResumeResult(
+            sessionId: botSessionID,
+            messages: [],
+            snapshot: SessionRuntimeSnapshot(object: ["running": .bool(true)])
+        )
+        let restored = recoverState.applyChatResume(resumeResultRunning)
+        XCTAssertTrue(restored)
+        let restoredTools = recoverState.messages.compactMap(\.tool)
+        XCTAssertEqual(restoredTools.count, 1, "The running tool card must be restored from the bot profile cache")
+        XCTAssertEqual(restoredTools.first?.id, "call-calc-1")
+        XCTAssertEqual(restoredTools.first?.status, .running)
+
+        // 3. Simulate completion/clean it up with running == false
+        let resumeResultIdle = SessionResumeResult(
+            sessionId: botSessionID,
+            messages: [
+                ChatMessage(
+                    id: "tool-complete-gw",
+                    role: .tool,
+                    content: "",
+                    timestamp: "now",
+                    tool: ToolActivity(id: "call-calc-1", name: "calculator", input: "40 + 2", output: "42", status: .complete)
+                )
+            ],
+            snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+        )
+        _ = recoverState.applyChatResume(resumeResultIdle)
+
+        // Verify no stale dashboard-profile entry remains and bot-profile entry is cleared
+        let updatedDashboardPending = cache.merge([], profile: dashboardProfile, sessionIDs: [botSessionID], includePendingTools: true)
+        let updatedBotPending = cache.merge([], profile: botProfile, sessionIDs: [botSessionID], includePendingTools: true)
+        XCTAssertTrue(updatedDashboardPending.isEmpty)
+        XCTAssertTrue(updatedBotPending.filter { $0.tool?.status == .running }.isEmpty, "Pending tool side store must be cleaned up when running == false")
     }
 }

@@ -37,7 +37,8 @@ final class SessionPresentationCache {
             return "clarify:\(clarify.requestId)"
         }
         if let approval = message.approval {
-            return "approval:\(approval.sessionId)"
+            return approval.requestId.map { "approval-request:\($0)" }
+                ?? "approval:\(approval.sessionId)"
         }
         return nil
     }
@@ -47,7 +48,8 @@ final class SessionPresentationCache {
             return "clarify:\(clarify.requestId)"
         }
         if let approval = message.approval, isPendingDecision(approval.status) {
-            return "approval:\(approval.sessionId)"
+            return approval.requestId.map { "approval-request:\($0)" }
+                ?? "approval:\(approval.sessionId)"
         }
         return nil
     }
@@ -71,7 +73,8 @@ final class SessionPresentationCache {
             }
             if let approval = message.approval,
                isPendingDecision(approval.status),
-               keys.contains("approval:\(approval.sessionId)") {
+               keys.contains(approval.requestId.map { "approval-request:\($0)" }
+                    ?? "approval:\(approval.sessionId)") {
                 message.approval = nil
             }
             if message.role == .clarify, message.clarify == nil { return nil }
@@ -86,9 +89,12 @@ final class SessionPresentationCache {
         var signature: String
         var timestamp: String
         var toolName: String?
+        var toolDisplayName: String?
+        var toolID: String?
         var toolInputSignature: String?
         var toolOutputSignature: String?
         var toolPreview: String?
+        var toolStatus: ToolActivity.Status?
         var attachments: [Attachment]?
         var clarify: ClarifyActivity?
         var approval: ApprovalActivity?
@@ -108,9 +114,12 @@ final class SessionPresentationCache {
             signature = SessionPresentationCache.fingerprint(message.content)
             timestamp = message.timestamp
             toolName = tool.map { $0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            toolDisplayName = tool?.name
+            toolID = tool?.id
             toolInputSignature = tool?.input.map(SessionPresentationCache.fingerprint)
             toolOutputSignature = tool?.output.map(SessionPresentationCache.fingerprint)
             toolPreview = preview
+            toolStatus = tool?.status
             attachments = message.attachments
             clarify = message.clarify
             approval = message.approval
@@ -130,6 +139,7 @@ final class SessionPresentationCache {
     private let defaults: UserDefaults
     private let now: () -> Date
     private let storageKey = "conduit.sessionPresentation.v1"
+    private let pendingToolsStorageKey = "conduit.sessionPresentation.pendingTools.v1"
     private let maxSessions = 32
     private let maxMessagesPerSession = 320
 
@@ -161,7 +171,8 @@ final class SessionPresentationCache {
         profile: String,
         sessionIDs: [String],
         includePendingClarifications: Bool = false,
-        includePendingApprovals: Bool = false
+        includePendingApprovals: Bool = false,
+        includePendingTools: Bool = false
     ) -> [ChatMessage] {
         let stored = load()
         // Resolve every supplied alias, but let each LOGICAL cached snapshot
@@ -202,7 +213,7 @@ final class SessionPresentationCache {
                 snapshotByID[identity] = session
             }
         }
-        let cached = resolutionOrder.compactMap { snapshotByID[$0] }
+        var cached = resolutionOrder.compactMap { snapshotByID[$0] }
             .flatMap { session -> [CachedMessage] in
                 let unconfirmedExpired = isUnconfirmedPendingDecisionExpired(
                     since: session.unconfirmedPendingDecisionAt
@@ -211,6 +222,9 @@ final class SessionPresentationCache {
                     ? removingPendingDecisionPresentation(from: session.messages)
                     : session.messages
             }
+        var cachedIDs = Set(cached.map(\.id))
+        cached.append(contentsOf: pendingToolRecords(profile: profile, sessionIDs: sessionIDs)
+            .filter { cachedIDs.insert($0.id).inserted })
         guard !cached.isEmpty else { return messages }
 
         var remaining = Set(cached.indices)
@@ -266,6 +280,51 @@ final class SessionPresentationCache {
             return message
         }
 
+        if includePendingTools {
+            var eligibleIDLessRunningByName: [String: Set<String>] = [:]
+            for index in remaining {
+                let presentation = cached[index]
+                guard presentation.role == .tool,
+                      presentation.toolStatus == .running,
+                      stableToolID(presentation.toolID) == nil,
+                      let name = normalizedToolName(name: presentation.toolName, displayName: presentation.toolDisplayName) else {
+                    continue
+                }
+                eligibleIDLessRunningByName[name, default: []].insert(presentation.id)
+            }
+            let uniqueIDLessRunningNames = Set(
+                eligibleIDLessRunningByName.compactMap { name, ids in
+                    ids.count == 1 ? name : nil
+                }
+            )
+
+            for index in remaining.sorted() {
+                let presentation = cached[index]
+                guard presentation.role == .tool,
+                      presentation.toolStatus == .running,
+                      !containsResolvedTool(
+                          for: presentation,
+                          gatewayMessages: messages,
+                          uniqueIDLessRunningNames: uniqueIDLessRunningNames
+                      ) else {
+                    continue
+                }
+                merged.append(ChatMessage(
+                    id: presentation.id,
+                    role: .tool,
+                    content: "",
+                    timestamp: presentation.timestamp,
+                    tool: ToolActivity(
+                        id: presentation.toolID,
+                        name: presentation.toolDisplayName ?? presentation.toolName ?? "Tool",
+                        input: presentation.toolPreview,
+                        output: nil,
+                        status: .running
+                    )
+                ))
+            }
+        }
+
         if includePendingClarifications {
             let pendingClarifications = cached.compactMap(\.clarify).filter {
                 Self.isPendingDecision($0.status)
@@ -315,11 +374,21 @@ final class SessionPresentationCache {
                     )
             }
             for approval in pendingApprovals {
-                if gatewayAnnouncesPendingGate { break }
-                guard !merged.contains(where: {
-                    $0.approval?.sessionId == approval.sessionId
-                }) else { continue }
-                let cachedMessage = cached.last { $0.approval?.sessionId == approval.sessionId }
+                let alreadyPresent = merged.contains { message in
+                    guard let existing = message.approval else { return false }
+                    if let requestId = approval.requestId {
+                        return existing.requestId == requestId
+                    }
+                    return existing.requestId == nil
+                        && existing.sessionId == approval.sessionId
+                }
+                if alreadyPresent || (approval.requestId == nil && gatewayAnnouncesPendingGate) {
+                    continue
+                }
+                let cachedMessage = cached.last {
+                    $0.approval?.requestId == approval.requestId
+                        && $0.approval?.sessionId == approval.sessionId
+                }
                 merged.append(ChatMessage(
                     id: cachedMessage?.id ?? "approval-\(approval.sessionId)",
                     role: .approval,
@@ -330,6 +399,276 @@ final class SessionPresentationCache {
             }
         }
         return merged
+    }
+
+    private func containsResolvedTool(
+        for cached: CachedMessage,
+        gatewayMessages: [ChatMessage],
+        uniqueIDLessRunningNames: Set<String> = []
+    ) -> Bool {
+        let cachedToolID = stableToolID(cached.toolID)
+        let cachedNormalizedName = normalizedToolName(name: cached.toolName, displayName: cached.toolDisplayName)
+        return gatewayMessages.contains { message in
+            guard message.role == .tool,
+                  let tool = message.tool else {
+                return false
+            }
+            if message.id == cached.id { return true }
+            let gatewayToolID = stableToolID(tool.id)
+            if let cachedToolID, let gatewayToolID {
+                return cachedToolID == gatewayToolID
+            }
+            if cachedToolID == nil,
+               gatewayToolID != nil,
+               tool.status == .complete,
+               let cachedNormalizedName,
+               uniqueIDLessRunningNames.contains(cachedNormalizedName),
+               normalizedToolName(name: tool.name, displayName: nil) == cachedNormalizedName {
+                return true
+            }
+            return false
+        }
+    }
+
+    private func normalizedToolName(name: String?, displayName: String?) -> String? {
+        if let name {
+            let trimmed = normalized(name)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        if let displayName {
+            let trimmed = normalized(displayName)
+            if !trimmed.isEmpty { return trimmed }
+        }
+        return nil
+    }
+
+    private func stableToolID(_ id: String?) -> String? {
+        guard let id else { return nil }
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    /// Records the crash-recovery marker synchronously, without decoding and
+    /// rewriting the much larger presentation store. The next ordinary,
+    /// debounced `save` folds this bounded side record into the full snapshot.
+    func recordPendingToolStart(
+        _ message: ChatMessage,
+        profile: String,
+        sessionIDs: [String]
+    ) {
+        guard message.role == .tool, message.tool?.status == .running else { return }
+        let ids = Set(sessionIDs.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+        guard !ids.isEmpty else { return }
+        let record = CachedMessage(message)
+        var pendingStore = loadPendingTools()
+        for id in ids {
+            let cacheKey = key(profile: profile, sessionID: id)
+            var records = pendingStore[cacheKey] ?? []
+            if let toolID = stableToolID(record.toolID) {
+                records.removeAll { stableToolID($0.toolID) == toolID }
+            }
+            records.append(record)
+            pendingStore[cacheKey] = Array(records.suffix(maxMessagesPerSession))
+        }
+        persistPendingTools(pendingStore)
+    }
+
+    /// A completion event makes the local running projection obsolete. An
+    /// exact message id or stable tool id resolves only its exact record.
+    /// Legacy id-less events are inherently ambiguous when same-name calls
+    /// overlap; resolving is only performed when exactly one unambiguous
+    /// running candidate exists, avoiding destructive mis-matches when multiple
+    /// calls are in flight.
+    func resolvePendingTool(
+        named name: String,
+        toolID: String? = nil,
+        messageID: String? = nil,
+        profile: String,
+        sessionIDs: [String]
+    ) {
+        let ids = Set(sessionIDs.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+        guard !ids.isEmpty else { return }
+        let normalizedName = normalized(name)
+        let trimmedToolID = toolID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let stableToolID = trimmedToolID.isEmpty ? nil : trimmedToolID
+        let trimmedMessageID = messageID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let stableMessageID = trimmedMessageID.isEmpty ? nil : trimmedMessageID
+
+        // Exact-identity paths (messageID or stableToolID) are deterministic
+        // and handle each store independently — the first match wins.
+        // The ID-less fallback must inspect BOTH stores before mutating
+        // either, deduplicating by message ID, and only resolve when the
+        // combined logical candidate count is exactly one.
+
+        let hasExactIdentity = stableMessageID != nil || stableToolID != nil
+
+        var pendingStore = loadPendingTools()
+        var pendingChanged = false
+        var matchedPendingKeys = Set<String>()
+
+        if hasExactIdentity {
+            // --- Exact-identity resolution (unchanged) ---
+            for id in ids {
+                let cacheKey = key(profile: profile, sessionID: id)
+                guard var records = pendingStore[cacheKey] else { continue }
+                let index: Int?
+                if let stableMessageID {
+                    index = records.lastIndex(where: {
+                        $0.id == stableMessageID && $0.toolStatus == .running
+                    })
+                } else {
+                    index = records.lastIndex(where: {
+                        $0.toolStatus == .running && self.stableToolID($0.toolID) == stableToolID
+                    })
+                }
+                guard let resolvedIndex = index else { continue }
+                records.remove(at: resolvedIndex)
+                pendingStore[cacheKey] = records.isEmpty ? nil : records
+                pendingChanged = true
+                matchedPendingKeys.insert(cacheKey)
+            }
+            if pendingChanged { persistPendingTools(pendingStore) }
+
+            let unresolvedIDs = ids.filter { !matchedPendingKeys.contains(key(profile: profile, sessionID: $0)) }
+            guard !unresolvedIDs.isEmpty else { return }
+
+            var store = load()
+            var changed = false
+            for id in unresolvedIDs {
+                let cacheKey = key(profile: profile, sessionID: id)
+                guard var session = store[cacheKey] else { continue }
+                let index: Int?
+                if let stableMessageID {
+                    index = session.messages.lastIndex(where: {
+                        $0.role == .tool
+                            && $0.toolStatus == .running
+                            && $0.id == stableMessageID
+                    })
+                } else {
+                    index = session.messages.lastIndex(where: {
+                        $0.role == .tool
+                            && $0.toolStatus == .running
+                            && self.stableToolID($0.toolID) == stableToolID
+                    })
+                }
+                guard let resolvedIndex = index else { continue }
+                session.messages.remove(at: resolvedIndex)
+                session.updatedAt = now()
+                store[cacheKey] = session
+                changed = true
+            }
+            if changed { persist(store) }
+        } else {
+            // --- ID-less fallback: cross-store deduplication ---
+            // Gather ALL running same-name candidates from both stores across
+            // all session aliases, deduplicate by message ID, and only mutate
+            // when the combined logical candidate count is exactly one.
+
+            struct CandidateLocation {
+                enum Store { case pending, full }
+                let store: Store
+                let cacheKey: String
+                let index: Int
+                let messageID: String
+            }
+
+            var allCandidates: [CandidateLocation] = []
+            let store = load()
+
+            for id in ids {
+                let cacheKey = key(profile: profile, sessionID: id)
+
+                if let records = pendingStore[cacheKey] {
+                    for idx in records.indices {
+                        let msg = records[idx]
+                        guard msg.toolStatus == .running,
+                              msg.toolName == normalizedName else { continue }
+                        allCandidates.append(CandidateLocation(
+                            store: .pending, cacheKey: cacheKey, index: idx, messageID: msg.id
+                        ))
+                    }
+                }
+
+                if let session = store[cacheKey] {
+                    for idx in session.messages.indices {
+                        let msg = session.messages[idx]
+                        guard msg.role == .tool,
+                              msg.toolStatus == .running,
+                              msg.toolName == normalizedName else { continue }
+                        allCandidates.append(CandidateLocation(
+                            store: .full, cacheKey: cacheKey, index: idx, messageID: msg.id
+                        ))
+                    }
+                }
+            }
+
+            // Deduplicate by message ID — the same logical record exists under
+            // every session alias and may be mirrored between pending and full.
+            var seenMessageIDs = Set<String>()
+            let uniqueCandidates = allCandidates.filter { seenMessageIDs.insert($0.messageID).inserted }
+
+            guard uniqueCandidates.count == 1, let winner = uniqueCandidates.first else { return }
+
+            // Remove the unique winner from every alias across BOTH stores
+            // (a single logical candidate may be mirrored between pending and full).
+            for id in ids {
+                let cacheKey = key(profile: profile, sessionID: id)
+                guard var records = pendingStore[cacheKey] else { continue }
+                if let idx = records.lastIndex(where: { $0.id == winner.messageID && $0.toolStatus == .running }) {
+                    records.remove(at: idx)
+                    pendingStore[cacheKey] = records.isEmpty ? nil : records
+                    pendingChanged = true
+                }
+            }
+            if pendingChanged { persistPendingTools(pendingStore) }
+
+            var mutableStore = store
+            var changed = false
+            for id in ids {
+                let cacheKey = key(profile: profile, sessionID: id)
+                guard var session = mutableStore[cacheKey] else { continue }
+                if let idx = session.messages.lastIndex(where: {
+                    $0.role == .tool && $0.toolStatus == .running && $0.id == winner.messageID
+                }) {
+                    session.messages.remove(at: idx)
+                    session.updatedAt = now()
+                    mutableStore[cacheKey] = session
+                    changed = true
+                }
+            }
+            if changed { persist(mutableStore) }
+        }
+    }
+
+    /// An explicitly idle resume is authoritative: any local tool-start
+    /// projection that has not been committed is stale and must not become a
+    /// permanently-running card on later launches.
+    func removePendingTools(profile: String, sessionIDs: [String]) {
+        let ids = Set(sessionIDs.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+        guard !ids.isEmpty else { return }
+        var pendingStore = loadPendingTools()
+        var pendingChanged = false
+        for id in ids {
+            let cacheKey = key(profile: profile, sessionID: id)
+            if pendingStore.removeValue(forKey: cacheKey) != nil {
+                pendingChanged = true
+            }
+        }
+        if pendingChanged { persistPendingTools(pendingStore) }
+        guard defaults.data(forKey: storageKey) != nil else { return }
+        var store = load()
+        var changed = false
+        for id in ids {
+            let cacheKey = key(profile: profile, sessionID: id)
+            guard var session = store[cacheKey] else { continue }
+            let originalCount = session.messages.count
+            session.messages.removeAll { $0.role == .tool && $0.toolStatus == .running }
+            guard session.messages.count != originalCount else { continue }
+            session.updatedAt = now()
+            store[cacheKey] = session
+            changed = true
+        }
+        if changed { persist(store) }
     }
 
     /// Pending decision keys currently held in the store for the given
@@ -482,6 +821,14 @@ final class SessionPresentationCache {
             from: existingRecords,
             matching: unconfirmedPendingDecisionKeys
         )
+        let pendingRecords = pendingToolRecords(profile: profile, sessionIDs: Array(ids)).filter { pending in
+            guard let pendingID = stableToolID(pending.toolID) else { return true }
+            return !freshRecords.contains { fresh in
+                stableToolID(fresh.toolID) == pendingID && fresh.toolStatus != .running
+            }
+        }
+        let recordIDs = Set(records.map(\.id))
+        records.append(contentsOf: pendingRecords.filter { !recordIDs.contains($0.id) })
         if !preservePendingDecisionCards {
             records = removingPendingDecisionPresentation(
                 from: records,
@@ -504,6 +851,7 @@ final class SessionPresentationCache {
         }
         trim(&store)
         persist(store)
+        removePendingToolSideRecords(profile: profile, sessionIDs: Array(ids))
     }
 
     /// A resume without an explicit active-turn signal may temporarily show a
@@ -523,7 +871,8 @@ final class SessionPresentationCache {
             }
             if let approval = message.approval,
                Self.isPendingDecision(approval.status),
-               !keys.contains("approval:\(approval.sessionId)") {
+               !keys.contains(approval.requestId.map { "approval-request:\($0)" }
+                    ?? "approval:\(approval.sessionId)") {
                 message.approval = nil
             }
             if message.role == .clarify, message.clarify == nil { return nil }
@@ -537,7 +886,8 @@ final class SessionPresentationCache {
             return "clarify:\(clarify.requestId)"
         }
         if let approval = message.approval {
-            return "approval:\(approval.sessionId)"
+            return approval.requestId.map { "approval-request:\($0)" }
+                ?? "approval:\(approval.sessionId)"
         }
         return nil
     }
@@ -547,7 +897,8 @@ final class SessionPresentationCache {
             return "clarify:\(clarify.requestId)"
         }
         if let approval = message.approval, Self.isPendingDecision(approval.status) {
-            return "approval:\(approval.sessionId)"
+            return approval.requestId.map { "approval-request:\($0)" }
+                ?? "approval:\(approval.sessionId)"
         }
         return nil
     }
@@ -574,6 +925,7 @@ final class SessionPresentationCache {
     func clear(profile: String? = nil) {
         guard let profile else {
             defaults.removeObject(forKey: storageKey)
+            defaults.removeObject(forKey: pendingToolsStorageKey)
             return
         }
 
@@ -581,6 +933,9 @@ final class SessionPresentationCache {
         var store = load()
         store.keys.filter { $0.hasPrefix(prefix) }.forEach { store.removeValue(forKey: $0) }
         persist(store)
+        var pendingStore = loadPendingTools()
+        pendingStore.keys.filter { $0.hasPrefix(prefix) }.forEach { pendingStore.removeValue(forKey: $0) }
+        persistPendingTools(pendingStore)
     }
 
     /// Removes the cached records for the given sessions inside `profile`,
@@ -602,8 +957,8 @@ final class SessionPresentationCache {
                 changed = true
             }
         }
-        guard changed else { return }
-        persist(store)
+        if changed { persist(store) }
+        removePendingToolSideRecords(profile: profile, sessionIDs: Array(ids))
     }
 
     /// Durable-owned persistence: once this conversation's durable identity
@@ -639,6 +994,19 @@ final class SessionPresentationCache {
             runtimeAliases.map { key(profile: profile, sessionID: $0) }
         ).subtracting([durableKey])
         guard !aliasKeys.isEmpty else { return }
+        var pendingStore = loadPendingTools()
+        var durablePending = pendingStore[durableKey] ?? []
+        var pendingIDs = Set(durablePending.map(\.id))
+        for aliasKey in aliasKeys {
+            for record in pendingStore.removeValue(forKey: aliasKey) ?? []
+                where pendingIDs.insert(record.id).inserted {
+                durablePending.append(record)
+            }
+        }
+        if !durablePending.isEmpty {
+            pendingStore[durableKey] = Array(durablePending.suffix(maxMessagesPerSession))
+        }
+        persistPendingTools(pendingStore)
         var store = load()
         if store[durableKey] == nil {
             let freshest = aliasKeys
@@ -801,6 +1169,39 @@ final class SessionPresentationCache {
         defaults.set(data, forKey: storageKey)
     }
 
+    private func loadPendingTools() -> [String: [CachedMessage]] {
+        guard let data = defaults.data(forKey: pendingToolsStorageKey),
+              let decoded = try? JSONDecoder().decode([String: [CachedMessage]].self, from: data) else {
+            return [:]
+        }
+        return decoded
+    }
+
+    private func persistPendingTools(_ store: [String: [CachedMessage]]) {
+        guard !store.isEmpty else {
+            defaults.removeObject(forKey: pendingToolsStorageKey)
+            return
+        }
+        guard let data = try? JSONEncoder().encode(store) else { return }
+        defaults.set(data, forKey: pendingToolsStorageKey)
+    }
+
+    private func pendingToolRecords(profile: String, sessionIDs: [String]) -> [CachedMessage] {
+        let store = loadPendingTools()
+        var seen = Set<String>()
+        return sessionIDs.flatMap { store[key(profile: profile, sessionID: $0)] ?? [] }
+            .filter { seen.insert($0.id).inserted }
+    }
+
+    private func removePendingToolSideRecords(profile: String, sessionIDs: [String]) {
+        var store = loadPendingTools()
+        var changed = false
+        for sessionID in sessionIDs {
+            changed = store.removeValue(forKey: key(profile: profile, sessionID: sessionID)) != nil || changed
+        }
+        if changed { persistPendingTools(store) }
+    }
+
     private func trim(_ store: inout [String: CachedSession]) {
         guard store.count > maxSessions else { return }
         let keysToRemove = store.sorted { $0.value.updatedAt > $1.value.updatedAt }
@@ -838,8 +1239,28 @@ final class SessionPresentationCache {
                 // Absolute maximum; no later candidate can outrank it.
                 return index
             } else if let tool = message.tool {
-                guard candidate.toolName == normalized(tool.name) else { continue }
-                score = 50
+                let cachedToolID = stableToolID(candidate.toolID)
+                let gatewayToolID = stableToolID(tool.id)
+                let hasStableMatch: Bool
+                if let cachedToolID, let gatewayToolID {
+                    guard cachedToolID == gatewayToolID else { continue }
+                    hasStableMatch = true
+                } else if cachedToolID != nil || gatewayToolID != nil {
+                    // ID-bearing tools must not fall back to name matching.
+                    continue
+                } else {
+                    guard candidate.toolName == normalized(tool.name) else { continue }
+                    // A locally recorded start belongs after the cached history.
+                    // Do not let any generic same-name gateway row consume it:
+                    // without a shared row or tool id, it can be a distinct
+                    // invocation that happens to have the same input.
+                    if candidate.toolStatus == .running {
+                        continue
+                    }
+                    hasStableMatch = false
+                }
+                score = hasStableMatch ? 80 : 50
+                if candidate.toolName == normalized(tool.name) { score += 10 }
                 if let input = tool.input, candidate.toolInputSignature == Self.fingerprint(input) { score += 30 }
                 if let output = tool.output, candidate.toolOutputSignature == Self.fingerprint(output) { score += 30 }
                 if (tool.input ?? "").isEmpty, candidate.toolPreview?.isEmpty == false { score += 5 }
@@ -867,6 +1288,7 @@ final class SessionPresentationCache {
         }
         return bestIndex
     }
+
 
     /// Never replace a cached timestamp/preview with a newer history record
     /// that simply omits it. Exact content wins; matching row position is only

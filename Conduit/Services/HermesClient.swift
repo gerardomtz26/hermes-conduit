@@ -173,8 +173,8 @@ enum StreamEvent {
     case sessionBusy(sessionId: String, busy: Bool)
     case sessionInfo(sessionId: String, snapshot: SessionRuntimeSnapshot)
     case sessionTitle(runtimeSessionId: String, storedSessionId: String, title: String)
-    case toolStart(sessionId: String, toolName: String, toolInput: String?)
-    case toolComplete(sessionId: String, toolName: String, toolOutput: String?)
+    case toolStart(sessionId: String, toolName: String, toolInput: String?, toolID: String? = nil)
+    case toolComplete(sessionId: String, toolName: String, toolOutput: String?, toolID: String? = nil)
     case reviewSummary(sessionId: String, activity: ReviewActivity)
     /// The complete normalized clarification — batch structure intact. The
     /// parser must not flatten `questions[]` back into scalar fields, or a
@@ -235,6 +235,9 @@ struct SessionRuntimeSnapshot {
     /// is not sufficient for restore: it may have fired while the app was
     /// backgrounded or disconnected.
     let pendingClarify: ClarifyActivity?
+    /// Raw authoritative approval still blocking the session. AppState adds
+    /// the enclosing runtime session id when normalizing the card.
+    let pendingApprovalPayload: [String: AnyCodable]?
 
     /// `session.resume` may include an in-flight or queued projection that is
     /// newer than the persisted database transcript. Keep that projection for
@@ -293,6 +296,7 @@ struct SessionRuntimeSnapshot {
             ?? object["approvals"]?.objectValue?["mode"]?.stringValue
         pendingClarify = object["pending_clarify"]?.objectValue
             .flatMap { MessageNormalizer.pendingClarifyActivity(from: $0) }
+        pendingApprovalPayload = object["pending_approval"]?.objectValue
         self.inflight = inflight
         self.queued = queued
     }
@@ -349,19 +353,9 @@ struct SessionCompressResult {
     var isPending: Bool { status == .pending }
     var isAborted: Bool { status == .aborted || summaryAborted }
 
-    /// Non-trapping exact `Int` extraction. `Int(Double)` traps outside the
-    /// Int64 range, and `removed` is gateway-authored — a hostile or buggy
-    /// payload must degrade to "unknown", never crash the client. Non-integer
-    /// doubles are likewise rejected: only exact whole values convert.
+    /// Non-trapping exact `Int` extraction. Delegates to `HermesClient.exactIntValue`.
     private static func exactIntValue(_ value: AnyCodable?) -> Int? {
-        guard case .number(let n)? = value else { return nil }
-        guard n.isFinite,
-              n >= -9_223_372_036_854_775_808.0, // Int.min == -2^63, exact as Double
-              n < 9_223_372_036_854_775_808.0,   // 2^63 itself already overflows
-              n == n.rounded(.towardZero) else {
-            return nil
-        }
-        return Int(n)
+        HermesClient.exactIntValue(value)
     }
 
     init(from result: AnyCodable) {
@@ -642,6 +636,25 @@ final class HermesClient: ObservableObject {
     /// still compressing (upstream #97948; Hermes Desktop parity:
     /// `SESSION_COMPRESS_TIMEOUT_MS = 660_000`).
     static let sessionCompressTimeout: TimeInterval = 660
+    /// Approval queue hydration is optional recovery context. It must never
+    /// hold foreground restoration behind the ordinary RPC timeout.
+    static let pendingApprovalsTimeout: TimeInterval = 3
+
+    /// Non-trapping exact `Int` extraction. `Int(Double)` traps outside the
+    /// Int64 range, and numeric fields can be gateway-authored — a hostile or buggy
+    /// payload must degrade to invalid response or unknown, never crash the client.
+    /// Non-integer doubles, NaN, infinity, and out-of-range numbers are rejected:
+    /// only exact whole values convert.
+    nonisolated static func exactIntValue(_ value: AnyCodable?) -> Int? {
+        guard case .number(let n)? = value else { return nil }
+        guard n.isFinite,
+              n >= -9_223_372_036_854_775_808.0, // Int.min == -2^63, exact as Double
+              n < 9_223_372_036_854_775_808.0,   // 2^63 itself already overflows
+              n == n.rounded(.towardZero) else {
+            return nil
+        }
+        return Int(n)
+    }
 
     init(
         connection: HermesConnection,
@@ -868,7 +881,12 @@ final class HermesClient: ObservableObject {
 
     // MARK: - RPC
 
-    private func rpc(_ method: String, params: [String: Any]? = nil, timeout: TimeInterval = requestTimeout) async throws -> AnyCodable {
+    private func rpc(
+        _ method: String,
+        params: [String: Any]? = nil,
+        timeout: TimeInterval = requestTimeout,
+        scoped: Bool = true
+    ) async throws -> AnyCodable {
         // Require both a live socket and a completed handshake. A receive
         // error leaves the socket installed with `closeCode == .invalid`, so
         // closeCode alone would let an RPC ride a dead socket to its timeout.
@@ -877,7 +895,7 @@ final class HermesClient: ObservableObject {
         }
 
         let id = incrementRequestId()
-        let scopedParams = scopeParams(params)
+        let scopedParams = scoped ? scopeParams(params) : (params?.isEmpty == false ? params : nil)
         let encodedParams = scopedParams?.mapValues { AnyCodable.from($0) }
 
         let request = JsonRpcRequest(id: id, method: method, params: encodedParams)
@@ -938,7 +956,10 @@ final class HermesClient: ObservableObject {
 
     private func scopeParams(_ params: [String: Any]?) -> [String: Any]? {
         var params = params ?? [:]
-        if let profile, profile != "default" {
+        // The client's profile is the DEFAULT scope; a caller-supplied
+        // `profile` is explicit intent (Bot Mode addresses another profile's
+        // registry) and always wins.
+        if params["profile"] == nil, let profile, profile != "default" {
             params["profile"] = profile
         }
         return params.isEmpty ? nil : params
@@ -953,6 +974,65 @@ final class HermesClient: ObservableObject {
         let result = try await rpc("session.list", params: nil)
         return MessageNormalizer.normalizeSessions(result, profile: profile)
     }
+
+    // MARK: - Bot Mode
+
+    /// THE Bot Mode capability call. A gateway old enough to lack the method
+    /// has no Bot Mode; callers classify the thrown error with
+    /// `isMissingRPCMethod`. Rows carry `canonical_session`, `last_session`,
+    /// `ui_meta['hermes-bots']`, and `has_avatar`. The listing is
+    /// gateway-wide (`list_profiles()`), so it is sent UNSCOPED: the
+    /// dashboard profile context must never shrink the roster.
+    func botRoster() async throws -> BotRosterSnapshot {
+        let result = try await rpc("profiles.list", params: nil, scoped: false)
+        guard let snapshot = BotRosterDecoder.decode(result) else {
+            throw HermesError.invalidResponse
+        }
+        return snapshot
+    }
+
+    /// The bot's canonical-chat registry lookup: the profile's session titled
+    /// exactly "Bot Chat", window-free, hidden rows included — the gateway
+    /// answers the indexed exact-title scan with at most one row. Explicit
+    /// `profile` routing is the identity contract; `scopeParams` never
+    /// overrides a caller-supplied profile.
+    func findBotChatSession(profile: String) async throws -> [BotChatLookupRow] {
+        let result = try await rpc("session.list", params: [
+            "profile": profile,
+            "title": BotMode.canonicalChatTitle,
+            "limit": BotMode.lookupSessionLimit,
+            "include_hidden": true
+        ])
+        guard let rows = BotChatLookupDecoder.decode(result) else {
+            throw HermesError.invalidResponse
+        }
+        return rows
+    }
+
+    /// Creates the bot's ONE forever chat: born hidden, titled "Bot Chat",
+    /// and always following the profile's CURRENT model/provider config.
+    /// Older gateways ignore the unknown `hidden`/`follow_profile_config`
+    /// params (upstream behavior). The stored row is lazy until the eager
+    /// `session.title` write lands.
+    func createBotChatSession(profile: String) async throws -> (sessionId: String, storedSessionId: String?) {
+        let result = try await rpc("session.create", params: [
+            "cols": 96,
+            "source": "desktop",
+            "profile": profile,
+            "title": BotMode.canonicalChatTitle,
+            "hidden": true,
+            "follow_profile_config": true
+        ])
+        let object = result.objectValue ?? [:]
+        let sessionId = object["session_id"]?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !sessionId.isEmpty else { throw HermesError.invalidResponse }
+        let stored = ["stored_session_id", "storedSessionId", "session_key"]
+            .compactMap { object[$0]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
+        return (sessionId, stored)
+    }
+
 
     /// Projects are a newer, optional gateway capability. Unlike the ordinary
     /// session catalog, membership comes from Hermes' server-side project tree
@@ -990,8 +1070,8 @@ final class HermesClient: ObservableObject {
     /// unknown flag, degrading to the historical full response. AppState owns
     /// the REST hydration and falls back to `openSessionLegacy` when no
     /// usable history source exists.
-    func openSession(_ sessionId: String) async throws -> SessionResumeResult {
-        try await resumeSession(sessionId, omitMessages: true)
+    func openSession(_ sessionId: String, profile: String? = nil) async throws -> SessionResumeResult {
+        try await resumeSession(sessionId, omitMessages: true, profile: profile)
     }
 
     /// Resume variant that carries the persisted transcript inside the RPC
@@ -999,8 +1079,8 @@ final class HermesClient: ObservableObject {
     /// a gateway without the history endpoint, or history rows that resolved
     /// to a foreign session). Its response is the largest ordinary payload in
     /// the app, so it uses the dedicated `legacyResumeTimeout`.
-    func openSessionLegacy(_ sessionId: String) async throws -> SessionResumeResult {
-        try await resumeSession(sessionId, omitMessages: false)
+    func openSessionLegacy(_ sessionId: String, profile: String? = nil) async throws -> SessionResumeResult {
+        try await resumeSession(sessionId, omitMessages: false, profile: profile)
     }
 
     /// Compact responses are tiny, so they ride the ordinary request budget;
@@ -1009,7 +1089,11 @@ final class HermesClient: ObservableObject {
         omitMessages ? requestTimeout : legacyResumeTimeout
     }
 
-    private func resumeSession(_ sessionId: String, omitMessages: Bool) async throws -> SessionResumeResult {
+    private func resumeSession(
+        _ sessionId: String,
+        omitMessages: Bool,
+        profile: String? = nil
+    ) async throws -> SessionResumeResult {
         var params: [String: Any] = [
             "session_id": sessionId,
             "cols": 96,
@@ -1017,6 +1101,13 @@ final class HermesClient: ObservableObject {
         ]
         if omitMessages {
             params["omit_messages"] = true
+        }
+        // A bot chat lives in the bot profile's state.db; the gateway's
+        // `session.resume` reads the `profile` param to open that store
+        // (`_profile_home(params.profile)`). Without it the resume lands on
+        // the dashboard profile and cannot see the session.
+        if let profile, !profile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            params["profile"] = profile
         }
         let result = try await rpc(
             "session.resume",
@@ -1042,11 +1133,12 @@ final class HermesClient: ObservableObject {
                 snapshotObject[key] = value
             }
         }
-        // `pending_clarify` rides the resume response top level (upstream
-        // `_build_resume_payload`), mirroring how `pending_approval` is
-        // delivered; hoist it so the snapshot parser sees it.
-        if let pendingClarify = object["pending_clarify"] {
-            snapshotObject["pending_clarify"] = pendingClarify
+        // Pending decisions ride the resume response top level. Hoist both so
+        // the snapshot parser sees the same contract as session.info.
+        for key in ["pending_clarify", "pending_approval"] {
+            if let value = object[key] {
+                snapshotObject[key] = value
+            }
         }
         return SessionResumeResult(
             sessionId: resolvedId,
@@ -1127,18 +1219,30 @@ final class HermesClient: ObservableObject {
         )
     }
 
-    func setSessionTitle(_ sessionId: String, title: String) async throws {
-        _ = try await rpc("session.title", params: [
+    func setSessionTitle(_ sessionId: String, title: String, profile: String? = nil) async throws {
+        var params: [String: Any] = [
             "session_id": sessionId,
             "title": title
-        ])
+        ]
+        // The gateway's `session.title` is session-scoped (the db comes from
+        // the resolved session's own profile home), so this param is inert
+        // on the wire — it is carried to keep the bot chat's RPCs uniformly
+        // self-describing about the profile they address.
+        if let profile, !profile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            params["profile"] = profile
+        }
+        _ = try await rpc("session.title", params: params)
     }
 
     /// Reads the gateway's current title without guessing from the local
     /// catalog. This is particularly important for profile-scoped sessions,
     /// whose title can be updated asynchronously by Hermes.
-    func sessionTitle(_ sessionId: String) async throws -> String? {
-        let result = try await rpc("session.title", params: ["session_id": sessionId])
+    func sessionTitle(_ sessionId: String, profile: String? = nil) async throws -> String? {
+        var params: [String: Any] = ["session_id": sessionId]
+        if let profile, !profile.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            params["profile"] = profile
+        }
+        let result = try await rpc("session.title", params: params)
         let title = result.objectValue?["title"]?.stringValue?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return (title?.isEmpty == false) ? title : nil
@@ -1286,11 +1390,65 @@ final class HermesClient: ObservableObject {
         return .accepted(remaining: remaining)
     }
 
-    func respondToApproval(sessionId: String, choice: String) async throws {
-        _ = try await rpc("approval.respond", params: [
+    func respondToApproval(
+        sessionId: String,
+        requestId: String? = nil,
+        choice: String,
+        profile: String? = nil
+    ) async throws -> Bool {
+        var params: [String: Any] = [
             "choice": choice,
             "session_id": sessionId
-        ])
+        ]
+        let trimmedRequestId = requestId?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasRequestId = trimmedRequestId?.isEmpty == false
+        if let trimmedRequestId, hasRequestId {
+            params["request_id"] = trimmedRequestId
+        }
+        if let profile, !profile.isEmpty {
+            params["profile"] = profile
+        }
+        let result = try await rpc("approval.respond", params: params)
+        // Current Hermes reports the number of queue entries resolved. Older
+        // gateways omitted the field after a successful response to legacy
+        // requestless approval calls.
+        guard let object = result.objectValue else {
+            throw HermesError.invalidResponse
+        }
+        guard let rawResolved = object["resolved"] else {
+            if hasRequestId {
+                throw HermesError.invalidResponse
+            }
+            return true
+        }
+        guard let resolved = Self.exactIntValue(rawResolved), resolved >= 0 else {
+            throw HermesError.invalidResponse
+        }
+        return resolved > 0
+    }
+
+    /// Returns every unresolved approval for one live Hermes session. Current
+    /// Hermes scopes this method through `session_id`; bind payloads to that
+    /// requested identity rather than trusting optional fields inside a row.
+    func pendingApprovals(sessionId: String, profile: String? = nil) async throws -> [ApprovalActivity] {
+        var params: [String: Any] = ["session_id": sessionId]
+        if let profile, !profile.isEmpty {
+            params["profile"] = profile
+        }
+        let result = try await rpc(
+            "approval.pending",
+            params: params,
+            timeout: Self.pendingApprovalsTimeout
+        )
+        guard let object = result.objectValue,
+              let approvalsValue = object["approvals"],
+              let array = approvalsValue.arrayValue else {
+            throw HermesError.invalidResponse
+        }
+        return array.compactMap { value in
+            guard let payload = value.objectValue else { return nil }
+            return MessageNormalizer.approvalActivity(from: payload, sessionId: sessionId)
+        }
     }
 
     func modelOptions(sessionId: String? = nil) async throws -> (model: String?, provider: String?, providers: [ProviderInfo]?) {
@@ -2436,6 +2594,9 @@ enum MessageNormalizer {
     ) -> ApprovalActivity? {
         let normalizedSessionId = sessionId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalizedSessionId.isEmpty else { return nil }
+        let requestId = ["request_id", "requestId"]
+            .compactMap { payload[$0]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
 
         let command = ["command", "code", "text"]
             .compactMap { payload[$0]?.stringValue }
@@ -2456,6 +2617,7 @@ enum MessageNormalizer {
 
         return ApprovalActivity(
             sessionId: normalizedSessionId,
+            requestId: requestId,
             command: command,
             description: description,
             choices: uniqueChoices?.isEmpty == true ? nil : uniqueChoices,
