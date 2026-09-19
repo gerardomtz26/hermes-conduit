@@ -525,16 +525,22 @@ final class MockSpeechStream: VoiceSpeechStream {
     }
 
     func append(_ text: String) async throws {
-        appended.append(text)
-        onAppend(text)
-        guard blocksAppend else { return }
+        // Acceptance is validated BEFORE the append is published: a refused
+        // append must not look like a delivered one to `appended`, to
+        // `onAppend` (and therefore MockGateway's append counter and a waiting
+        // `waitUntilSpeechAppended`), or to anything else observing the stream.
         if isCancelled || Task.isCancelled { throw URLError(.cancelled) }
         // One parked append at a time. Overwriting the slot would leak the
         // earlier continuation and hang the drain, so a second concurrent park
-        // fails loudly and testably instead. Checked before the continuation
-        // is installed: there is no suspension point in between, so the check
-        // and the park are one atomic MainActor step.
-        if appendContinuation != nil { throw MockSpeechStreamError.concurrentParkedAppend }
+        // fails loudly and testably instead. Checked here rather than inside
+        // the continuation: there is no suspension point in between, so the
+        // check and the park are one atomic MainActor step.
+        if blocksAppend, appendContinuation != nil { throw MockSpeechStreamError.concurrentParkedAppend }
+
+        appended.append(text)
+        onAppend(text)
+
+        guard blocksAppend else { return }
         try await withTaskCancellationHandler(operation: {
             try await withCheckedThrowingContinuation { continuation in
                 appendContinuation = continuation
@@ -586,7 +592,11 @@ final class GatedTranscriptionGateway: VoiceGatewayService {
     var transcriptionCount: Int { transcriptions.value }
     private let transcriptions = AwaitableCounter()
     private var pendingContinuation: CheckedContinuation<String, Error>?
-    private var isReleased = false
+    /// Whether `releaseTranscription()` has disarmed the gate. Readable so a
+    /// test can assert the disarm contract directly — after a release, a later
+    /// transcription returns from the early guard in `transcribe` instead of
+    /// parking.
+    private(set) var isReleased = false
 
     init(transcript: String) { self.transcript = transcript }
 
@@ -615,12 +625,17 @@ final class GatedTranscriptionGateway: VoiceGatewayService {
     }
 
     func releaseTranscription() {
-        // Guarded: the cancellation handler may already have consumed the
-        // parked continuation when suspension cancelled the utterance task.
-        guard !isReleased, let continuation = pendingContinuation else { return }
+        // Disarms unconditionally. The cancellation handler may already have
+        // consumed the parked continuation when suspension cancelled the
+        // utterance task, in which case there is nothing to resume — but the
+        // gate must still stop accepting parks. Returning early on a nil
+        // continuation left `isReleased` false, so the next transcription
+        // parked on a gate the test had already released.
+        guard !isReleased else { return }
         isReleased = true
+        let continuation = pendingContinuation
         pendingContinuation = nil
-        continuation.resume(with: .success(transcript))
+        continuation?.resume(with: .success(transcript))
     }
 
     func openSpeechStream(
@@ -696,12 +711,22 @@ final class InterruptParkingGate {
         await withCheckedContinuation { parked.append($0) }
     }
 
-    /// Awaits the operation being parked. Bounded: a `timeout` expiry records
-    /// an explicit failure naming the missing entry instead of stalling the
-    /// lane until the watchdog kills it.
+    /// Awaits at least `count` entries. The multi-entry companion to
+    /// `waitUntilEntered`, so a test can pin a two-entry phase without
+    /// assuming anything about scheduling.
+    func waitUntilEntryCount(_ count: Int, timeout: TimeInterval = 10) async {
+        await entered.waitUntil(count, timeout: timeout)
+    }
+
+    /// Awaits the operation being parked — the semantic condition is "entered
+    /// at least once", so a gate that was entered twice before this ran is
+    /// satisfied, not failed. Bounded: a `timeout` expiry records an explicit
+    /// failure naming the missing entry instead of stalling the lane until the
+    /// watchdog kills it. A genuine "only once" invariant belongs at the call
+    /// site that owns it, not in this generic waiter.
     func waitUntilEntered(timeout: TimeInterval = 10) async {
         await entered.waitUntil(1, timeout: timeout)
-        XCTAssertEqual(
+        XCTAssertGreaterThanOrEqual(
             entered.value, 1,
             "the parked operation was never entered within \(timeout)s"
         )
@@ -717,31 +742,86 @@ final class InterruptParkingGate {
 
 /// A parkable async step for hermetic reconciliation tests.
 ///
-/// Unlike the counting and published-value waits in this harness,
-/// `waitUntilSuspended()` parks WITHOUT a timeout. That is deliberate: this
-/// helper is owned by the AppState recovery suites (it was relocated here from
-/// `AppStateChatResumeTests`), so giving it a new failure mode is out of scope
-/// for the Voice synchronization pass — a suspension that never arrives still
-/// stalls the lane rather than failing it. Callers that want a loud failure
-/// should pair it with their own positive signal.
+/// `suspend()` itself never expires: like the other parked-operation gates, the
+/// parked operation is released by the test through `resume()`. What is bounded
+/// is the *observation* — `waitUntilSuspended()` fails loudly on `timeout`
+/// instead of leaving the lane for the watchdog when a suspension never
+/// arrives. One waiter at a time: create a fresh gate per test phase.
 @MainActor
 final class ControlledSuspension {
     private var suspension: CheckedContinuation<Void, Never>?
-    private var observer: CheckedContinuation<Void, Never>?
+    private var observer: Observer?
+
+    /// The single pending suspension wait: its continuation plus the
+    /// deadlock-guard timer. `isResumed` makes the two release paths — the
+    /// suspension arriving and the timeout expiring — mutually exclusive, and
+    /// the slot is cleared before resuming, so the continuation is resumed at
+    /// most once.
+    private final class Observer {
+        let continuation: CheckedContinuation<Bool, Never>
+        var timeoutTask: Task<Void, Never>?
+        var isResumed = false
+
+        init(continuation: CheckedContinuation<Bool, Never>) {
+            self.continuation = continuation
+        }
+    }
 
     func suspend() async {
         await withCheckedContinuation { continuation in
             suspension = continuation
-            observer?.resume()
-            observer = nil
+            // Hand off to a live observer exactly once. A timed-out observer
+            // was already detached, so it can never be resumed from here.
+            guard let observer, !observer.isResumed else { return }
+            self.observer = nil
+            observer.isResumed = true
+            observer.timeoutTask?.cancel()
+            observer.continuation.resume(returning: true)
         }
     }
 
-    func waitUntilSuspended() async {
-        guard suspension == nil else { return }
-        await withCheckedContinuation { continuation in
-            observer = continuation
+    /// The bounded core of `waitUntilSuspended`: whether the suspension was
+    /// observed before `timeout` expired. Separate from the asserting wrapper
+    /// so the expiry path can be exercised deliberately — a test asserting the
+    /// `false` outcome is not itself reporting a failure.
+    func awaitSuspension(timeout: TimeInterval = 10) async -> Bool {
+        guard suspension == nil else { return true }
+        return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let observer = Observer(continuation: continuation)
+            self.observer = observer
+            observer.timeoutTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                guard !Task.isCancelled else { return }
+                self?.expire(observer)
+            }
         }
+    }
+
+    /// Awaits this gate being suspended, returning immediately when it already
+    /// is. Bounded: on expiry the observer is detached and a failure naming the
+    /// missing suspension is recorded, so a regression fails the test instead
+    /// of stalling the lane.
+    func waitUntilSuspended(
+        timeout: TimeInterval = 10,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        let didSuspend = await awaitSuspension(timeout: timeout)
+        XCTAssertTrue(
+            didSuspend,
+            "the suspension was never installed within \(timeout)s",
+            file: file,
+            line: line
+        )
+    }
+
+    /// Timeout path: detach before resuming, so a later `suspend()` cannot find
+    /// a stale observer and this continuation is resumed exactly once.
+    private func expire(_ observer: Observer) {
+        guard !observer.isResumed else { return }
+        observer.isResumed = true
+        if self.observer === observer { self.observer = nil }
+        observer.continuation.resume(returning: false)
     }
 
     func resume() {

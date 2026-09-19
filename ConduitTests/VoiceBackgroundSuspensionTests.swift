@@ -1141,6 +1141,26 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
         XCTAssertFalse(harness.appState.showVoiceSheet, "signed-out restoration fails closed")
     }
 
+    /// The signed-out harness must expose the same playback double the
+    /// controller drives. It used to build two instances, so any assertion on
+    /// `harness.playback` would have observed an object the controller never
+    /// touched — silently green whatever the real playback did.
+    func testSignedOutHarnessExposesTheControllersPlaybackDouble() {
+        let harness = makeHarnessWithoutConnection()
+        harness.openVoice(session: "session-1")
+
+        // Arm the double the HARNESS exposes. Suspension stops the playback
+        // instance the CONTROLLER holds, so it can only flip this one back if
+        // they are the same object.
+        harness.playback.isPlaying = true
+        harness.appState.handleScenePhase(.background)
+
+        XCTAssertFalse(
+            harness.playback.isPlaying,
+            "the controller must drive the playback instance the harness exposes"
+        )
+    }
+
     func testRestoreThenListenRunsTheFullConversation() async {
         let harness = makeHarness()
         harness.openVoice(session: "session-1")
@@ -1332,12 +1352,13 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
         )
 
         let capture = MockCapture(permissionGranted: true)
+        let playback = MockPlayback()
         let gateway = MockGateway(transcript: "Question")
         let spy = SubmitSpy()
         let appStateRef = appState
         let controller = VoiceConversationController(
             capture: capture,
-            playback: MockPlayback(),
+            playback: playback,
             gateway: gateway,
             routePolicyProvider: { .fullDuplex },
             submit: { await spy.submit($0) },
@@ -1352,7 +1373,7 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
             appState: appState,
             controller: controller,
             capture: capture,
-            playback: MockPlayback(),
+            playback: playback,
             gateway: gateway,
             spy: spy,
             flags: Flags(),
