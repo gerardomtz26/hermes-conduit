@@ -199,13 +199,15 @@ final class VoiceTestSupportTests: XCTestCase {
     /// report `false` there.
     func testSuspensionWaitReturnsImmediatelyWhenAlreadySuspended() async {
         let gate = ControlledSuspension()
-        let parked = Task { @MainActor in await gate.suspend() }
+        let waiting = Task { @MainActor in await gate.awaitSuspension(timeout: 5) }
+        await gate.waitUntilObserverInstalled()
 
-        // This call cannot return before the suspension is installed, so once
-        // it does the gate is provably parked.
-        let observed = await gate.awaitSuspension(timeout: 5)
+        let parked = Task { @MainActor in await gate.suspend() }
+        let observed = await waiting.value
         XCTAssertTrue(observed, "the suspension arrived while a waiter was present")
 
+        // The fast path: the gate is suspended, so this must return without
+        // waiting out its own timeout — hence the deliberately short bound.
         let immediate = await gate.awaitSuspension(timeout: 0.2)
         XCTAssertTrue(immediate, "an already-suspended gate must not wait again")
 
@@ -213,14 +215,18 @@ final class VoiceTestSupportTests: XCTestCase {
         await parked.value
     }
 
-    /// A suspension arriving after the wait began must wake it — in either
-    /// order, so the outcome is `true` whether the observer or the suspension
-    /// landed first.
+    /// A suspension arriving after the waiter parked must wake it. The phase
+    /// signal pins that order: the waiter is installed BEFORE `suspend()` is
+    /// started, so this cannot silently pass through the already-suspended fast
+    /// path instead of exercising the wakeup it names.
     func testSuspensionWaitWakesWhenTheSuspensionArrivesLater() async {
         let gate = ControlledSuspension()
         let waiting = Task { @MainActor in await gate.awaitSuspension(timeout: 5) }
-        let parked = Task { @MainActor in await gate.suspend() }
+        await gate.waitUntilObserverInstalled()
 
+        // The waiter is parked with nothing suspended; only now does the
+        // suspension arrive.
+        let parked = Task { @MainActor in await gate.suspend() }
         let observed = await waiting.value
         XCTAssertTrue(observed, "a suspension arriving after the wait must wake it")
 

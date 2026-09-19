@@ -751,6 +751,9 @@ final class InterruptParkingGate {
 final class ControlledSuspension {
     private var suspension: CheckedContinuation<Void, Never>?
     private var observer: Observer?
+    /// Counts waits that parked an observer with nothing yet suspended, so a
+    /// test can fence the "waiter installed before the suspension" phase.
+    private let observersInstalled = AwaitableCounter()
 
     /// The single pending suspension wait: its continuation plus the
     /// deadlock-guard timer. `isResumed` makes the two release paths — the
@@ -789,12 +792,27 @@ final class ControlledSuspension {
         return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
             let observer = Observer(continuation: continuation)
             self.observer = observer
+            // Installed, and no suspension yet — publish the phase so a test
+            // can pin this order instead of assuming it.
+            observersInstalled.increment()
             observer.timeoutTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
                 guard !Task.isCancelled else { return }
                 self?.expire(observer)
             }
         }
+    }
+
+    /// How many waits have parked an observer without a suspension to consume.
+    var observerInstallCount: Int { observersInstalled.value }
+
+    /// Awaits `count` observers being installed while nothing is suspended. A
+    /// phase signal for tests that must pin "the waiter is parked before the
+    /// suspension arrives": without it, starting `suspend()` concurrently lets
+    /// the waiter take the already-suspended fast path and the wakeup path
+    /// under test is never exercised.
+    func waitUntilObserverInstalled(_ count: Int = 1, timeout: TimeInterval = 10) async {
+        await observersInstalled.waitUntil(count, timeout: timeout)
     }
 
     /// Awaits this gate being suspended, returning immediately when it already
