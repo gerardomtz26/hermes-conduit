@@ -1605,6 +1605,10 @@ private struct AppearanceSettingsDetail: View {
                                 cornerRadius: 18,
                                 tint: appState.appIconChoice == choice ? .conduitAccent.opacity(0.14) : .clear
                             )
+                            // The whole tile selects the icon: the tile's
+                            // padding and the space beside the title are part
+                            // of the hit region by declaration.
+                            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                         }
                         .buttonStyle(.plain)
                         .disabled(isChangingIcon)
@@ -1891,6 +1895,9 @@ private struct NotificationSetupCommand: View {
                         .font(.caption.weight(.semibold))
                 }
                 .padding(12)
+                // Copying is the card's whole purpose: the card is the tap
+                // target, not just the command text inside it.
+                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
             .buttonStyle(.plain)
             .conduitGlassSurface(cornerRadius: 14, tint: .conduitAccent.opacity(0.08))

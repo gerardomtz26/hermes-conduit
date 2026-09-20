@@ -100,6 +100,126 @@ final class AppStateVoiceCapabilityTests: XCTestCase {
         XCTAssertTrue(appState.canStartVoiceConversation)
     }
 
+    /// Build-146 regression guard. Voice settings is a foreground screen that
+    /// presents no Voice sheet, so the *capture* gate is closed there while
+    /// the app-foreground gate must stay open: selecting "On this iPhone"
+    /// asks iOS for permissions, and the settings-launched provider tests run
+    /// capture — all legitimate with the app on screen. Reading the capture
+    /// gate for those silently refused the selection (no mode change, no
+    /// surfaced error), which is the regression this pins.
+    func testVoiceSettingsSurfaceStateKeepsTheApplicationForegroundGateOpen() {
+        let appState = makeReadyAppState()
+
+        // Leave and re-enter the foreground — the transition that republishes
+        // both gates — with the phone Voice sheet closed throughout: exactly
+        // the state Voice settings is in.
+        _ = appState.handleScenePhase(.background)
+        XCTAssertFalse(appState.voiceConversationController.isApplicationForegroundGateOpen)
+        let foreground = appState.handleScenePhase(.active)
+        // The gate publication is synchronous; the reconciliation task it
+        // also starts is not what this test covers.
+        foreground?.cancel()
+
+        XCTAssertFalse(appState.hasActiveVoiceSurface, "No Voice surface presents while the user is in Voice settings")
+        XCTAssertTrue(appState.hasForegroundApplicationSurface)
+        XCTAssertTrue(appState.voiceConversationController.isApplicationForegroundGateOpen)
+    }
+
+    /// The gate that must still close: iOS presents permission alerts only
+    /// for a foreground app.
+    func testBackgroundingClosesTheApplicationForegroundGate() {
+        let appState = makeReadyAppState()
+        appState.reassertVoiceSurfaceGate()
+
+        _ = appState.handleScenePhase(.background)
+
+        XCTAssertFalse(appState.voiceConversationController.isApplicationForegroundGateOpen)
+    }
+
+    /// CarPlay is the other app-foreground surface: presenting it keeps the
+    /// gate open with the phone locked, and losing it closes the gate again.
+    func testCarPlaySurfaceDrivesTheApplicationForegroundGateWhileThePhoneIsBackgrounded() {
+        let appState = makeReadyAppState()
+        _ = appState.handleScenePhase(.background)
+
+        appState.setCarPlayVoiceSurfaceActive(true)
+        XCTAssertTrue(appState.voiceConversationController.isApplicationForegroundGateOpen)
+
+        appState.setCarPlayVoiceSurfaceActive(false)
+        XCTAssertFalse(appState.voiceConversationController.isApplicationForegroundGateOpen)
+    }
+
+    /// An overlay dip must leave the Voice gates exactly as they were. The
+    /// first-run microphone alert drives `.inactive` while `startListening`
+    /// awaits its permission; republishing there would close the app gate the
+    /// listen's `isCurrent` checks are fenced on, so every grant would kill
+    /// the listen it was granted for. This pins the deliberate absence of a
+    /// publication at `.inactive`, which nothing else observes.
+    ///
+    /// Only the published app gate is observable here (the capture gate has no
+    /// seam); the computed surface properties read false during the dip by
+    /// design, because they are consulted only at `.active` and `.background`,
+    /// where they are re-published.
+    func testOverlayDipLeavesThePublishedVoiceGatesUntouched() {
+        let appState = makeReadyAppState()
+        appState.showVoiceSheet = true
+        appState.reassertVoiceSurfaceGate()
+        XCTAssertTrue(appState.voiceConversationController.isApplicationForegroundGateOpen)
+
+        _ = appState.handleScenePhase(.inactive)
+
+        XCTAssertTrue(
+            appState.voiceConversationController.isApplicationForegroundGateOpen,
+            "an overlay dip must not close the app-foreground gate"
+        )
+    }
+
+    /// Attaching a presentation to a live Voice conversation must republish the
+    /// app-foreground gate, not only the capture gate. This is the healing path
+    /// a CarPlay-only session relies on when it hands the conversation back to a
+    /// phone whose gate a previous boundary left closed: without it, the next
+    /// Listen or provider test is treated as backgrounded work and discarded —
+    /// the stale-gate failure this PR fixed, one layer down.
+    func testAttachingToALiveVoiceConversationReopensTheApplicationForegroundGate() {
+        let appState = makeReadyAppState()
+        appState.voiceConversationController.beginVoiceTurn(sessionID: "session-1")
+        XCTAssertTrue(appState.voiceConversationController.hasLiveVoiceSession)
+        appState.voiceConversationController.setApplicationForegroundActive(false)
+        XCTAssertFalse(appState.voiceConversationController.isApplicationForegroundGateOpen)
+
+        let attached = appState.attachToLiveVoiceConversation()
+
+        XCTAssertTrue(attached, "the bridge and voice capability state are installed, so the gateway attaches")
+        XCTAssertTrue(
+            appState.voiceConversationController.isApplicationForegroundGateOpen,
+            "attaching a presentation means the app is on screen"
+        )
+    }
+
+    /// The attachment is only for a live conversation: without one the call is a
+    /// no-op and must not silently reopen a gate on its own (that would make the
+    /// foreground fact claimable from a non-presenting surface).
+    func testAttachingWithoutALiveConversationLeavesTheGateClosed() {
+        let appState = makeReadyAppState()
+        appState.voiceConversationController.setApplicationForegroundActive(false)
+
+        let attached = appState.attachToLiveVoiceConversation()
+
+        XCTAssertFalse(attached)
+        XCTAssertFalse(appState.voiceConversationController.isApplicationForegroundGateOpen)
+    }
+
+    private func makeReadyAppState() -> AppState {
+        makeAppState(
+            snapshot: VoiceCapabilitySnapshot(
+                isGatewayConnected: true,
+                supportsTranscription: true,
+                supportsSpeech: true,
+                unavailableReason: nil
+            )
+        )
+    }
+
     private func makeAppState(
         snapshot: VoiceCapabilitySnapshot,
         transcriptionMode: VoiceTranscriptionMode = .hermes,

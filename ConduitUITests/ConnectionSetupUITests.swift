@@ -264,6 +264,78 @@ final class ConnectionSetupUITests: XCTestCase {
         stepLabel(app, "Step 2 of 3")
     }
 
+    /// The setup cards must be selectable across their whole visible area,
+    /// not only on their glyphs: the user reports that most of the card looks
+    /// tappable but does nothing, and that only the text works. Every tap
+    /// below lands deliberately *off* the text — in the card's leading
+    /// padding, or in the whitespace its trailing `Spacer` leaves empty —
+    /// and must select exactly like a tap on the words. Card centres are
+    /// already covered by the other cases in this class, which tap elements
+    /// directly.
+    func testSetupCardsSelectFromWhitespaceOffTheirText() throws {
+        let app = XCUIApplication()
+        app.launch()
+
+        // 1. The login screen's setup entry card: its leading padding.
+        let serverField = serverFieldAgain(app)
+        XCTAssertTrue(serverField.waitForExistence(timeout: 10), "Login screen did not appear. Tree:\n\(app.debugDescription)")
+        tapCardWhitespace(app, on: app.buttons[Identity.connectionSetup], side: .leading)
+        stepLabel(app, "Step 1 of 3")
+
+        // 2. Answer card: right of the short "Yes" label, inside the card.
+        tapCardWhitespace(app, on: app.buttons[Identity.answerYes], side: .trailing)
+        stepLabel(app, "Step 2 of 3")
+
+        // 3. Answer card: the card's own leading padding, left of the label.
+        tapCardWhitespace(app, on: app.buttons[Identity.answerYes], side: .leading)
+        stepLabel(app, "Step 3 of 3")
+
+        // 4. Access-method card: its leading padding, left of the title.
+        tapCardWhitespace(app, on: app.buttons["setup.method-lan"], side: .leading)
+        XCTAssertTrue(
+            app.staticTexts["Same network as Hermes"].waitForExistence(timeout: 5),
+            "Tapping the card's padding must select the method. Tree:\n\(app.debugDescription)"
+        )
+    }
+
+    private enum CardProbeSide {
+        /// Inside the card's leading padding, left of every glyph.
+        case leading
+        /// Inside the card but right of the row's text, in the space its
+        /// trailing `Spacer` leaves empty.
+        case trailing
+    }
+
+    /// Taps a point inside the card's visible area but off its text: the
+    /// card's leading padding for `.leading`, the whitespace its trailing
+    /// `Spacer` leaves empty for `.trailing`. The offset is measured from the
+    /// button's own frame, so it follows whatever inset the hosting screen
+    /// uses (the login column insets by 24, the wizard by 16).
+    private func tapCardWhitespace(_ app: XCUIApplication, on card: XCUIElement, side: CardProbeSide) {
+        XCTAssertTrue(card.waitForExistence(timeout: 5), "Card not found. Tree:\n\(app.debugDescription)")
+        let window = app.windows.firstMatch
+        let bounds = window.frame
+        for _ in 0..<6 {
+            if card.isHittable { break }
+            // Scroll toward the card: a card below the fold needs a swipe up,
+            // one above it a swipe down.
+            if card.frame.midY > bounds.midY { app.swipeUp() } else { app.swipeDown() }
+        }
+        XCTAssertTrue(card.isHittable, "Card was never reachable. Tree:\n\(app.debugDescription)")
+        let frame = card.frame
+        XCTAssertFalse(frame.isEmpty, "Card has no frame. Tree:\n\(app.debugDescription)")
+        let x = side == .leading ? frame.minX + 8 : frame.maxX - 8
+        let point = CGPoint(x: x, y: frame.midY)
+        XCTAssertTrue(
+            point.x > bounds.minX + 8 && point.x < bounds.maxX - 8,
+            "Probe \(point) falls outside the window \(bounds)"
+        )
+        window
+            .coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: point.x, dy: point.y))
+            .tap()
+    }
+
     private func serverFieldAgain(_ app: XCUIApplication) -> XCUIElement {
         app.textFields["login.server-url"]
     }

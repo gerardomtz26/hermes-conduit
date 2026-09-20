@@ -1039,6 +1039,13 @@ final class AppState: ObservableObject {
 
     func setCarPlayVoiceSurfaceActive(_ active: Bool) {
         isCarPlayVoiceSurfaceActive = active
+        // CarPlay feeds BOTH gates (`hasActiveVoiceSurface` and
+        // `hasForegroundApplicationSurface`), so this publishes both rather
+        // than only the app-foreground one: the adjacent
+        // `handleCarPlayVoiceSurfaceActivated/Removed` handlers then re-state
+        // the same capture value as they own the suspension side-effect, and
+        // no reader can observe a CarPlay edge half-applied.
+        publishVoiceRuntimeGates()
     }
 
     /// Whether at least one legitimate Voice presentation surface is
@@ -1054,13 +1061,49 @@ final class AppState: ObservableObject {
         (isSceneActive && showVoiceSheet) || isCarPlayVoiceSurfaceActive
     }
 
-    /// Re-asserts the Voice runtime gate from the current surface
-    /// bookkeeping. Presenting the phone Voice sheet must call this BEFORE
-    /// auto-listen: with CarPlay absent the gate is false while the sheet is
-    /// closed (`hasActiveVoiceSurface` requires the sheet), and
-    /// `startListening` is gated on it.
-    func reassertVoiceSurfaceGate() {
+    /// Whether the app itself has a foreground presentation surface: the
+    /// phone scene is on screen, or CarPlay presents the shared conversation
+    /// while the phone is locked.
+    ///
+    /// This is the `hasActiveVoiceSurface` meaning from before the CarPlay
+    /// surface work, and it is deliberately kept separate: that property is
+    /// now a *capture* gate (it also requires the phone Voice sheet), while
+    /// permission alerts and the settings-launched provider tests only ever
+    /// needed "the app is on screen". Voice settings is reachable only from
+    /// the foreground and presents no Voice sheet, so reading the capture
+    /// gate there refused legitimate actions.
+    var hasForegroundApplicationSurface: Bool {
+        isSceneActive || isCarPlayVoiceSurfaceActive
+    }
+
+    /// Publishes every Voice runtime gate from the current surface
+    /// bookkeeping. Used at the lifecycle boundaries that can change both
+    /// facts at once; a boundary that changes only one (the CarPlay surface
+    /// edges) publishes by the same rule.
+    ///
+    /// INVARIANT for every other writer: the two gates must never be left
+    /// inconsistent *across* an await. A writer either publishes both through
+    /// here, or writes both facts explicitly in one synchronous run (the
+    /// `.background` branch does), or writes only the capture gate because
+    /// the same step tears the runtime down — `stop()` and
+    /// `suspendRuntimeForLifecycle()` both bump `operationGeneration`, so
+    /// in-flight work is fenced even while the app-foreground gate stays
+    /// open.
+    private func publishVoiceRuntimeGates() {
         voiceConversationController.setForegroundActive(hasActiveVoiceSurface)
+        voiceConversationController.setApplicationForegroundActive(hasForegroundApplicationSurface)
+    }
+
+    /// Re-asserts the Voice runtime gates from the current surface
+    /// bookkeeping. Presenting the phone Voice sheet must call this BEFORE
+    /// auto-listen: with CarPlay absent the capture gate is false while the
+    /// sheet is closed (`hasActiveVoiceSurface` requires the sheet), and
+    /// `startListening` is gated on it. Both gates are published: a Voice
+    /// surface presenting at all also means the app is on screen, so this
+    /// heals a stale app-foreground gate left by a scene-phase event that
+    /// never fired (the phone may be locked throughout a CarPlay session).
+    func reassertVoiceSurfaceGate() {
+        publishVoiceRuntimeGates()
     }
 
     /// Manual per-message read aloud for completed assistant responses.
@@ -2710,6 +2753,25 @@ final class AppState: ObservableObject {
               index + 1 < arguments.count else { return .hostNotFound }
         return arguments[index + 1] == "none" ? nil : .hostNotFound
     }
+
+    /// UI-test-only profile roster: `-CONDUIT_UI_TEST_PROFILES "work,staging"`
+    /// (comma-separated). Needed because the connection-scoped reset that runs
+    /// before this seeds nothing back — it clears `profiles` — and a stub has no
+    /// transport for `/api/profiles` discovery to repopulate it from, so a
+    /// profile-scoped UI test would otherwise only ever see `default`. The names
+    /// go through the same `orderedProfiles` the launch hydration uses, so a
+    /// seeded roster behaves exactly like a discovered one (active profile and
+    /// `default` are unioned in, order included).
+    private static func uiTestSeededProfiles() -> [String]? {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let index = arguments.firstIndex(of: "-CONDUIT_UI_TEST_PROFILES"),
+              index + 1 < arguments.count else { return nil }
+        let names = arguments[index + 1]
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return names.isEmpty ? nil : names
+    }
 #endif
 
     func loadSavedConnection() {
@@ -2732,6 +2794,10 @@ final class AppState: ObservableObject {
             isConnected = true
             isConnecting = false
             showLogin = false
+            if let seededProfiles = Self.uiTestSeededProfiles() {
+                lifecycleLog.notice("UI-test profile roster seeded: \(seededProfiles.count, privacy: .public) profiles")
+                profiles = orderedProfiles(seededProfiles + [activeProfile, "default"])
+            }
             return
         }
         #endif
@@ -6492,11 +6558,12 @@ final class AppState: ObservableObject {
         switch phase {
         case .active:
             isSceneActive = true
-            // Voice gate = "a legitimate Voice presentation surface exists".
-            // With the phone scene active this is trivially true; the same
-            // gate also stays true while the phone is backgrounded but the
-            // CarPlay surface is presenting the shared conversation.
-            voiceConversationController.setForegroundActive(hasActiveVoiceSurface)
+            // Voice gates. The capture gate additionally requires a Voice
+            // surface (the phone sheet, or CarPlay), so it can be false here
+            // while the app-foreground gate is true — that pair is exactly
+            // the Voice settings state, and it must still admit permission
+            // requests and provider tests.
+            publishVoiceRuntimeGates()
             messageReadAloudController.setForegroundActive(true)
             // Voice restoration deliberately does NOT run here: the socket,
             // bridge, and runtime session identity may all be stale after a
@@ -6647,6 +6714,10 @@ final class AppState: ObservableObject {
             }
             foregroundFreshnessCheckArmed = true
             messageReadAloudController.setForegroundActive(false)
+            // The app-foreground fact changed here regardless of which branch
+            // below runs: the phone scene is gone, so only CarPlay can still
+            // count as a foreground surface.
+            voiceConversationController.setApplicationForegroundActive(hasForegroundApplicationSurface)
             // Suspension is not Close: an open Voice conversation releases its
             // runtime ownership and is recorded for foreground restoration,
             // and the sheet presentation intentionally survives the
@@ -6705,6 +6776,15 @@ final class AppState: ObservableObject {
             // dip. Voice suspension happens only on the actual .background
             // transition — a descriptor-less suspension here would tear the
             // runtime down with no restoration path.
+            //
+            // The Voice gates are deliberately NOT republished here, leaving
+            // the app-foreground gate at its last value. This branch runs
+            // while iOS presents a permission alert the voice flow awaited —
+            // the first-run microphone alert over a fresh sheet's auto-listen
+            // — and republishing would fence `startListening`'s
+            // `isCurrent`-checked continuation during the alert, so every
+            // grant would kill the listen it was granted for. Only `.active`
+            // and `.background` state the fact.
             return nil
 
         @unknown default:
@@ -16443,7 +16523,11 @@ final class AppState: ObservableObject {
     @discardableResult
     func attachToLiveVoiceConversation() -> Bool {
         guard voiceConversationController.hasLiveVoiceSession else { return false }
-        voiceConversationController.setForegroundActive(hasActiveVoiceSurface)
+        // Both gates, not just the capture gate: attaching a presentation
+        // means the app is on screen too, and an in-flight runtime operation
+        // (the next Listen, a provider test) must not be discarded as
+        // backgrounded work.
+        reassertVoiceSurfaceGate()
         if !voiceConversationController.isGatewayAttached {
             refreshVoiceControllerGateway()
         }
@@ -16470,6 +16554,12 @@ final class AppState: ObservableObject {
     /// Goodbye, which is Close.
     func handleCarPlayVoiceSurfaceRemoved() {
         guard !hasActiveVoiceSurface else { return }
+        // State the app-foreground fact at the boundary that owns the
+        // decision instead of relying on the caller having called
+        // `setCarPlayVoiceSurfaceActive(false)` first: `fence()` in the CarPlay
+        // coordinator reaches here directly. Re-stating an unchanged value is
+        // free, and suspension itself only writes the capture gate.
+        voiceConversationController.setApplicationForegroundActive(hasForegroundApplicationSurface)
         suspendVoiceConversationForBackground()
     }
 
@@ -16493,6 +16583,11 @@ final class AppState: ObservableObject {
         voiceConversationController.endVoiceSession()
         voiceControllerSessionProfile = nil
         showVoiceSheet = false
+        // Close removes the surface the capture gate was open for, so restate
+        // the gates from bookkeeping rather than leaving the capture gate
+        // stale-true until the next lifecycle event (a CarPlay-presented
+        // conversation keeps it open by the same rule).
+        reassertVoiceSurfaceGate()
     }
 
     func runVoiceASRTest() async -> VoiceProviderTestResult {

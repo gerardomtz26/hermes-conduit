@@ -71,6 +71,15 @@ struct ProfilePickerSheet: View {
     }
 }
 
+/// One profile card. Selection covers the whole card — see the selection
+/// surface on the body for why, and for the accessibility split between the
+/// card and its nested controls.
+///
+/// Covered by `ConduitUITests/ProfilePickerUITests`: the picker is reached with
+/// the DEBUG-only `-CONDUIT_UI_TEST_CONNECTED_DASHBOARD` stub plus the
+/// `-CONDUIT_UI_TEST_PROFILES` roster seam in `AppState.uiTestSeededProfiles()`,
+/// which seeds through the same `orderedProfiles` a real `/api/profiles`
+/// discovery uses.
 private struct ProfilePickerRow: View {
     @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var appState: AppState
@@ -85,6 +94,12 @@ private struct ProfilePickerRow: View {
     @State private var pickedImage: UIImage?
     @State private var saveError: String?
     private var isCurrent: Bool { profile == appState.activeProfile }
+    /// One rule for both selection paths: the text column's button and the
+    /// card-sized selection surface behind the row must agree on when a
+    /// profile can be selected.
+    private var canSelect: Bool {
+        !isCurrent && !appState.isProfileSwitching && !isReordering
+    }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -115,7 +130,7 @@ private struct ProfilePickerRow: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
             }
-            .buttonStyle(.plain).disabled(isCurrent || appState.isProfileSwitching || isReordering)
+            .buttonStyle(.plain).disabled(!canSelect)
 
             if isReordering {
                 VStack(spacing: 0) {
@@ -149,6 +164,32 @@ private struct ProfilePickerRow: View {
             }
         }
         .padding(12)
+        // The card's empty area selects the profile. The selection surface has
+        // to be a card-sized button BEHIND the row, not a container
+        // `.onTapGesture`: a gesture on an ancestor also recognizes taps that
+        // land on the nested controls, so tapping the avatar or the
+        // photo-removal button would switch profiles (and dismiss the sheet)
+        // as well as running its own action. As a sibling behind the row it is
+        // reached only where nothing interactive sits above it — the padding,
+        // the trailing accessory column, and the space beside the name — and
+        // the nested controls keep every tap that lands on them.
+        //
+        // Accessibility stays on the inner select button, which VoiceOver
+        // already exposes with the profile name and the `canSelect` disabled
+        // state; this surface is hidden to avoid a duplicate target. The
+        // Kanban card's `.accessibilityElement(children: .combine)` treatment
+        // is wrong here for the same reason the gesture is — this row carries
+        // two further controls that combining would fold into the card.
+        .background {
+            Button(action: select) {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(Color.clear)
+                    .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .disabled(!canSelect)
+            .accessibilityHidden(true)
+        }
         .conduitGlassSurface(cornerRadius: 20, tint: isCurrent ? .conduitAccent.opacity(0.12) : .clear)
         .overlay(alignment: .bottomLeading) {
             if let saveError { Text(saveError).font(.caption2).foregroundStyle(.red).padding(.horizontal, 12).padding(.bottom, 4) }
