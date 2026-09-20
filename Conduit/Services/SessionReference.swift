@@ -41,21 +41,27 @@ struct SessionReference: Codable, Equatable {
     /// The session identity to resume. For a `.bot` conversation this is the
     /// canonical chat's registry row (or a lineage tip of it).
     let sessionID: String
-    /// True when this reference was MIGRATED from the v1 payload, which stored
-    /// a bare session id: the kind is unknown, and a bot chat written there by
-    /// an earlier build is indistinguishable from an ordinary conversation
-    /// until bot evidence confirms it. Callers treat an untyped reference as
-    /// non-authoritative when that evidence is unavailable — our own v2 writes
-    /// are positively identified by the kind they carry.
+    /// True when this conversation's KIND WAS NOT ESTABLISHED WITH EVIDENCE:
+    /// it came from the v1 payload (a bare id, written by a build that could
+    /// not record a kind), from a v2 payload written before this flag existed,
+    /// or from a write made while Bot Mode could not be probed at all. In every
+    /// one of those cases a bot chat is indistinguishable from an ordinary
+    /// conversation, so callers treat the reference as NON-AUTHORITATIVE while
+    /// bot evidence is unavailable (`savedReferenceIsAuthoritative`).
+    ///
+    /// A selection this build recorded WITH evidence carries `false` and is
+    /// trusted unconditionally. This is a gate, not a migration marker: widening
+    /// the set of writers must widen it in the UNVERIFIED direction.
+    ///
     /// Defaulted so the implicit memberwise initializer keeps its five-field
-    /// call shape: only the migration writes an untyped reference.
-    var isLegacyIDOnly: Bool = false
+    /// call shape; decoding defaults it to `true` for payloads that predate it.
+    var isUnverified: Bool = false
 
     /// A conversation of the dashboard workspace's Sessions surface.
     static func dashboard(
         profile: String,
         sessionID: String,
-        isLegacyIDOnly: Bool = false
+        isUnverified: Bool = false
     ) -> SessionReference {
         SessionReference(
             kind: .dashboard,
@@ -63,7 +69,7 @@ struct SessionReference: Codable, Equatable {
             botName: nil,
             botLabel: nil,
             sessionID: sessionID,
-            isLegacyIDOnly: isLegacyIDOnly
+            isUnverified: isUnverified
         )
     }
 
@@ -79,7 +85,7 @@ struct SessionReference: Codable, Equatable {
             botName: botName,
             botLabel: label,
             sessionID: sessionID,
-            isLegacyIDOnly: false
+            isUnverified: false
         )
     }
 
@@ -140,7 +146,11 @@ struct SessionBotOwnership {
     /// casing" — the second case may be an unrelated workspace.
     func botProfileMatch(for profile: String) -> (name: String, isExact: Bool)? {
         guard let normalized = SessionBotOwnership.normalized(profile) else { return nil }
-        let names = roster.map { $0.name } + Array(registryProfiles.values)
+        // Roster names are compared trimmed, like the registry's values (which
+        // `init` already trims): incidental whitespace must not read as a
+        // case-only mismatch.
+        let names = roster.map { $0.name.trimmingCharacters(in: .whitespacesAndNewlines) }
+            + Array(registryProfiles.values)
         // An EXACT spelling from either source outranks any case-insensitive hit:
         // the caller distinguishes "this is that bot's profile" from "this only
         // matches with different casing", and a roster holding a differently
@@ -236,5 +246,24 @@ struct SessionBotOwnership {
     private static func normalized(_ value: String?) -> String? {
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+extension SessionReference {
+    /// Decoded leniently on purpose. `Codable` synthesis does NOT apply a
+    /// property DEFAULT when a key is absent, so a payload written before this
+    /// flag existed would fail to decode — and a failed decode drops the user's
+    /// whole resume state. A missing flag means exactly what absence of evidence
+    /// means: unverified.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(
+            kind: try container.decode(Kind.self, forKey: .kind),
+            scopeProfile: try container.decode(String.self, forKey: .scopeProfile),
+            botName: try container.decodeIfPresent(String.self, forKey: .botName),
+            botLabel: try container.decodeIfPresent(String.self, forKey: .botLabel),
+            sessionID: try container.decode(String.self, forKey: .sessionID),
+            isUnverified: try container.decodeIfPresent(Bool.self, forKey: .isUnverified) ?? true
+        )
     }
 }

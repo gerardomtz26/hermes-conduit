@@ -3024,7 +3024,7 @@ final class BotModeTests: XCTestCase {
             connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
             profile: "default"
         )
-        XCTAssertTrue(harness.store.lastSession(for: "default")?.isLegacyIDOnly ?? false)
+        XCTAssertTrue(harness.store.lastSession(for: "default")?.isUnverified ?? false)
 
         // Bot evidence is unreadable (the probe failed), so the ambiguous id is
         // not resumed; the workspace falls back to its newest conversation.
@@ -3128,7 +3128,7 @@ final class BotModeTests: XCTestCase {
             connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
             profile: "default"
         )
-        XCTAssertFalse(harness.store.lastSession(for: "default")?.isLegacyIDOnly ?? true)
+        XCTAssertFalse(harness.store.lastSession(for: "default")?.isUnverified ?? true)
         await harness.appState.refreshBotRoster()
         harness.appState.activeSessionId = nil
 
@@ -3368,7 +3368,7 @@ final class BotModeTests: XCTestCase {
 
         XCTAssertEqual(harness.appState.activeSessionId, "ordinary-1")
         XCTAssertEqual(
-            harness.store.lastSession(for: "default")?.isLegacyIDOnly,
+            harness.store.lastSession(for: "default")?.isUnverified,
             true,
             "an evidence-blind write is unverified, not a typed ordinary selection"
         )
@@ -3405,7 +3405,7 @@ final class BotModeTests: XCTestCase {
 
         XCTAssertEqual(verified.appState.activeSessionId, "ordinary-1")
         XCTAssertEqual(
-            verified.store.lastSession(for: "default")?.isLegacyIDOnly,
+            verified.store.lastSession(for: "default")?.isUnverified,
             false,
             "a selection recorded with verified evidence stays typed"
         )

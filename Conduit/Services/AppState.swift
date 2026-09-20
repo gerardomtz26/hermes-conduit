@@ -902,6 +902,11 @@ final class AppState: ObservableObject {
     private var cachedBotOwnership: (generation: Int, ownership: SessionBotOwnership)?
     private var botOwnershipGeneration = 0
 
+    /// Whether the roster on hand was verified since the CURRENT connection
+    /// began. Cleared whenever a connection (or reconnect) is established, so
+    /// absence evidence can never outlive the socket that produced it.
+    private var botRosterVerifiedForCurrentConnection = false
+
     private func invalidateBotOwnershipCache() {
         botOwnershipGeneration &+= 1
     }
@@ -2035,7 +2040,7 @@ final class AppState: ObservableObject {
         return .dashboard(
             profile: activeProfile,
             sessionID: persistedID,
-            isLegacyIDOnly: !botEvidenceIsAvailable
+            isUnverified: !botEvidenceIsAvailable
         )
     }
 
@@ -3312,6 +3317,7 @@ final class AppState: ObservableObject {
             reconnectAttempts = 0
             connectedAt = Date()
             KeychainHelper.saveConnection(conn, dashboardID: adoptedDashboardID)
+            botRosterVerifiedForCurrentConnection = false
 
             // Bot Mode evidence must exist before the sync below decides which
             // conversation this workspace was in — loaded CONCURRENTLY with
@@ -4398,7 +4404,7 @@ final class AppState: ObservableObject {
             // conversation of this workspace. Our own v2 writes carry the kind,
             // so they keep the escape hatch unconditionally — and a gateway
             // that cannot host Bot Mode cannot hold a bot chat either.
-            let savedReferenceIsAuthoritative = !(storedReference?.isLegacyIDOnly ?? false)
+            let savedReferenceIsAuthoritative = !(storedReference?.isUnverified ?? false)
                 || botEvidenceIsAvailable
             let missingSavedSessionID = botSavedReference?.sessionID
                 ?? (savedReferenceIsAuthoritative
@@ -4763,7 +4769,7 @@ final class AppState: ObservableObject {
         // bot evidence could be read: a v1-migrated id cannot be told from a
         // bot chat, and adopting a catalog row by it is the fail-open the
         // typed payload exists to close.
-        let savedReferenceIsAuthoritative = !(chatResumeCoordinator.lastSession(for: profile)?.isLegacyIDOnly ?? false)
+        let savedReferenceIsAuthoritative = !(chatResumeCoordinator.lastSession(for: profile)?.isUnverified ?? false)
             || botEvidenceIsAvailable
         return chatResumeCoordinator.selectTarget(
             in: catalog,
@@ -6905,6 +6911,7 @@ final class AppState: ObservableObject {
             reconnectAttempts = 0
             connectedAt = Date()
             // Bot Mode evidence before the sync: a reconnect re-runs the same
+            botRosterVerifiedForCurrentConnection = false
             // resume decision as a cold launch, and a server-identity boundary
             // clears the roster. Without the reload, a canonical chat whose
             // title no longer reads "Bot Chat" would be eligible as this
@@ -6987,12 +6994,17 @@ final class AppState: ObservableObject {
             return
         }
         guard botModePhase != .gatewayUnsupported else { return }
-        // Evidence already in hand: re-fetching it would put an RPC on the
-        // resume path of every reconnect for no new information. The roster
-        // is a server-side registry that changes only when the user edits
-        // bots, and a stale roster can only ever ADD reservations.
+        // One verified roster per CONNECTION. The skip avoids re-fetching on
+        // the resume path within a connection, but it must not cross a
+        // reconnection: a same-server reconnect re-reads this evidence,
+        // because a bot registered since the last successful refresh would be
+        // missing from a roster that still reports `.available` — and absence
+        // is what the authority gates read.
+        guard botRosterVerifiedForCurrentConnection else {
+            await refreshBotRoster()
+            return
+        }
         guard botRoster.isEmpty else { return }
-        await refreshBotRoster()
     }
 
     private func loadChatResumeBusyInputMode(using client: HermesClient) async {
@@ -8927,6 +8939,7 @@ final class AppState: ObservableObject {
             // the roster VIEW hides meta-hidden rows for display only.
             botRoster = BotProfile.displayOrder(snapshot.bots)
             botModePhase = .available
+            botRosterVerifiedForCurrentConnection = true
         } catch {
             guard botModeStateIsCurrent(epoch: epoch, dashboardID: dashboardID),
                   !Task.isCancelled else { return }
@@ -9209,8 +9222,9 @@ final class AppState: ObservableObject {
         // The KEY is normalized exactly like every lookup that reads this map
         // (`botScopeProfile` normalizes its query ids), so a padded id cannot
         // register an entry the fast path will never find.
-        guard let sessionID = ChatScrollIdentityNormalization.sessionID(sessionID) else { return }
-        botChatSessionProfiles[sessionID] = profile
+        guard let sessionID = ChatScrollIdentityNormalization.sessionID(sessionID),
+              let scope = ChatResumeStore.rpcProfileName(profile) else { return }
+        botChatSessionProfiles[sessionID] = scope
         invalidateBotOwnershipCache()
         if let label = label?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty {
             botChatSessionLabels[sessionID] = label

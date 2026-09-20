@@ -196,7 +196,7 @@ final class ChatResumeStore {
                 botName: existing.botName,
                 botLabel: existing.botLabel,
                 sessionID: newKey.sessionID,
-                isLegacyIDOnly: existing.isLegacyIDOnly
+                isUnverified: existing.isUnverified
             )
             migratedLastSession = true
         } else {
@@ -306,7 +306,7 @@ final class ChatResumeStore {
                 botName: nil,
                 botLabel: nil,
                 sessionID: sessionID,
-                isLegacyIDOnly: reference.isLegacyIDOnly
+                isUnverified: reference.isUnverified
             )
         }
         guard let scope = Self.rpcProfileName(reference.botName ?? reference.scopeProfile) else {
@@ -318,7 +318,7 @@ final class ChatResumeStore {
             botName: scope,
             botLabel: reference.botLabel,
             sessionID: sessionID,
-            isLegacyIDOnly: false
+            isUnverified: false
         )
     }
 
@@ -379,7 +379,7 @@ final class ChatResumeStore {
             result[candidate.profile] = .dashboard(
                 profile: candidate.profile,
                 sessionID: candidate.sessionID,
-                isLegacyIDOnly: true
+                isUnverified: true
             )
         }
     }

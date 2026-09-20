@@ -291,16 +291,16 @@ final class ChatResumeStoreTests: XCTestCase {
         let migrated = store.lastSession(for: "default")
         XCTAssertEqual(
             migrated,
-            .dashboard(profile: "default", sessionID: "stored-a", isLegacyIDOnly: true),
+            .dashboard(profile: "default", sessionID: "stored-a", isUnverified: true),
             "a bare v1 id carries no kind: it migrates as an UNTYPED reference — the kind is unknown until bot evidence says otherwise"
         )
         XCTAssertTrue(
-            migrated?.isLegacyIDOnly ?? false,
+            migrated?.isUnverified ?? false,
             "callers must be able to tell a migrated id from one this build recorded"
         )
         XCTAssertEqual(store.lastSessionID(for: "work"), "stored-b")
         XCTAssertTrue(
-            store.lastSession(for: "work")?.isLegacyIDOnly ?? false,
+            store.lastSession(for: "work")?.isUnverified ?? false,
             "every entry recovered from a v1 payload is untyped, whichever workspace it belongs to"
         )
         // The upgrade is persisted, so the next launch decodes v2 directly.
@@ -354,8 +354,8 @@ final class ChatResumeStoreTests: XCTestCase {
         store.setLastSessionID("stored-a", for: "default")
         store.setLastSession(.bot(botName: "Atlas", label: "Scout", sessionID: "stored-b"), for: "work")
 
-        XCTAssertFalse(store.lastSession(for: "default")?.isLegacyIDOnly ?? true)
-        XCTAssertFalse(store.lastSession(for: "work")?.isLegacyIDOnly ?? true)
+        XCTAssertFalse(store.lastSession(for: "default")?.isUnverified ?? true)
+        XCTAssertFalse(store.lastSession(for: "work")?.isUnverified ?? true)
     }
 
     func testStoredSelectionNormalizesItsSessionID() throws {
@@ -418,6 +418,85 @@ final class ChatResumeStoreTests: XCTestCase {
         XCTAssertNil(restored?.botName, "an ordinary reference carries no bot binding")
         XCTAssertNil(restored?.botLabel)
     }
+
+    /// A payload written BEFORE the unverified flag existed must still decode,
+    /// as unverified. `Codable` synthesis does not apply a property default when
+    /// a key is absent, so without the lenient decoder this payload would fail
+    /// to decode and the store would silently discard the user's selection —
+    /// data loss, in exchange for no safety gain (the flag's whole point is that
+    /// absent evidence reads as unverified).
+    func testPayloadWithoutTheUnverifiedFlagDecodesAsUnverified() throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let legacyV2: [String: Any] = [
+            "version": 2,
+            "behavior": "continueWhereLeftOff",
+            "lastSessionByProfile": [
+                "default": [
+                    "kind": "dashboard",
+                    "scopeProfile": "default",
+                    "sessionID": "stored-a"
+                    // no `isUnverified` key: written before the flag existed
+                ],
+                "work": [
+                    "kind": "bot",
+                    "scopeProfile": "Atlas",
+                    "botName": "Atlas",
+                    "botLabel": "Scout",
+                    "sessionID": "stored-b"
+                ]
+            ],
+            "snapshots": []
+        ]
+        defaults.set(
+            try JSONSerialization.data(withJSONObject: legacyV2),
+            forKey: ChatResumeStore.defaultStorageKey
+        )
+
+        let store = ChatResumeStore(defaults: defaults)
+
+        XCTAssertEqual(
+            store.lastSessionID(for: "default"),
+            "stored-a",
+            "the selection survives instead of being dropped"
+        )
+        XCTAssertTrue(
+            store.lastSession(for: "default")?.isUnverified ?? false,
+            "a flag-less payload means the kind was never verified"
+        )
+        XCTAssertFalse(
+            store.lastSession(for: "work")?.isUnverified ?? true,
+            "a .bot reference records its kind outright, so it is verified whatever the flag says"
+        )
+        XCTAssertEqual(
+            store.lastSession(for: "work")?.scopeProfile,
+            "Atlas",
+            "and the case-preserved scope round-trips"
+        )
+
+        // A payload that EXPLICITLY says it was verified stays verified.
+        let verifiedV2: [String: Any] = [
+            "version": 2,
+            "behavior": "continueWhereLeftOff",
+            "lastSessionByProfile": [
+                "default": [
+                    "kind": "dashboard",
+                    "scopeProfile": "default",
+                    "sessionID": "stored-a",
+                    "isUnverified": false
+                ]
+            ],
+            "snapshots": []
+        ]
+        defaults.set(
+            try JSONSerialization.data(withJSONObject: verifiedV2),
+            forKey: ChatResumeStore.defaultStorageKey
+        )
+        XCTAssertFalse(
+            ChatResumeStore(defaults: defaults).lastSession(for: "default")?.isUnverified ?? true
+        )
+    }
+
 
     private func payloadData(snapshots: [[String: Any]]) throws -> Data {
         try JSONSerialization.data(withJSONObject: [
