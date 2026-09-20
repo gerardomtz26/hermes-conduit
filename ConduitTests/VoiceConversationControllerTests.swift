@@ -234,6 +234,96 @@ final class VoiceConversationControllerTests: XCTestCase {
         XCTAssertEqual(deviceTranscriber.permissionRequestCount, 1, "Speech permission should be requested exactly once")
     }
 
+    /// Build-146 regression, root cause: Voice settings asks for the
+    /// microphone and Speech Recognition permissions with no Voice sheet
+    /// presenting, so the *surface* gate is false exactly where this runs.
+    /// Gating on it refused the selection outright — and silently, because
+    /// the gate's own message is only surfaced for permission-availability
+    /// failures, so the picker simply never changed.
+    func testOnDevicePermissionPreparationIgnoresTheVoiceSurfaceGate() async {
+        let controller = VoiceConversationController(
+            capture: MockCapture(permissionGranted: true),
+            playback: MockPlayback(),
+            deviceTranscriber: MockDeviceTranscriber(transcript: "", permissionGranted: true),
+            gateway: MockGateway(),
+            submit: { _ in true },
+            interrupt: { true }
+        )
+        controller.setForegroundActive(false)
+
+        let result = await controller.requestOnDeviceTranscriptionPermissions()
+
+        XCTAssertTrue(result.passed)
+    }
+
+    /// The gate that must still refuse: iOS presents permission alerts only
+    /// for a foreground app.
+    func testOnDevicePermissionPreparationRefusesWhileTheApplicationIsBackgrounded() async {
+        let deviceTranscriber = MockDeviceTranscriber(transcript: "", permissionGranted: true)
+        let controller = VoiceConversationController(
+            capture: MockCapture(permissionGranted: true),
+            playback: MockPlayback(),
+            deviceTranscriber: deviceTranscriber,
+            gateway: MockGateway(),
+            submit: { _ in true },
+            interrupt: { true }
+        )
+        controller.setApplicationForegroundActive(false)
+
+        let result = await controller.requestOnDeviceTranscriptionPermissions()
+
+        XCTAssertFalse(result.passed)
+        XCTAssertEqual(result.message, "Voice permissions can only be requested while Conduit is in the foreground.")
+        XCTAssertEqual(deviceTranscriber.permissionRequestCount, 0, "A backgrounded app must not ask iOS to present a permission alert")
+    }
+
+    /// The same root cause reaches the settings-launched provider tests: both
+    /// run from Voice settings, which presents no Voice surface.
+    func testProviderTestsIgnoreTheVoiceSurfaceGate() async {
+        let transcriptionController = VoiceConversationController(
+            capture: MockCapture(permissionGranted: true),
+            playback: MockPlayback(),
+            gateway: MockGateway(),
+            submit: { _ in true },
+            interrupt: { true }
+        )
+        transcriptionController.setForegroundActive(false)
+
+        let transcription = await transcriptionController.runTranscriptionTest(duration: 0)
+
+        XCTAssertTrue(transcription.passed)
+
+        let speechController = VoiceConversationController(
+            capture: MockCapture(permissionGranted: true),
+            playback: MockPlayback(),
+            gateway: MockGateway(deliversPCM: true),
+            submit: { _ in true },
+            interrupt: { true }
+        )
+        speechController.setForegroundActive(false)
+
+        let speech = await speechController.runSpeechTest(text: "test")
+
+        XCTAssertTrue(speech.passed)
+    }
+
+    func testProviderTestsRefuseWhileTheApplicationIsBackgrounded() async {
+        let controller = VoiceConversationController(
+            capture: MockCapture(permissionGranted: true),
+            playback: MockPlayback(),
+            gateway: MockGateway(deliversPCM: true),
+            submit: { _ in true },
+            interrupt: { true }
+        )
+        controller.setApplicationForegroundActive(false)
+
+        let transcription = await controller.runTranscriptionTest(duration: 0)
+        let speech = await controller.runSpeechTest(text: "test")
+
+        XCTAssertEqual(transcription.message, "Voice tests only run while Conduit is in the foreground.")
+        XCTAssertEqual(speech.message, "Voice tests only run while Conduit is in the foreground.")
+    }
+
     func testAppleSpeechAvailabilityCanAttemptRecognition() {
         let ready = AppleSpeechRecognitionAvailability.ready(localeIdentifier: "en_US")
         XCTAssertTrue(ready.canAttemptRecognition)

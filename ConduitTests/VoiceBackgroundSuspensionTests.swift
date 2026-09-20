@@ -1243,11 +1243,15 @@ final class AppStateVoiceSuspensionTests: XCTestCase {
             capture.emit(level: 0, at: start.addingTimeInterval(1.3))
         }
 
-        /// Foreground return WITHOUT the reconnect task: flips the controller
-        /// foreground flag and runs the synchronous restoration validation —
-        /// exactly what the .active scene phase does before its transport work.
+        /// Foreground return WITHOUT the reconnect task: flips both controller
+        /// foreground gates and runs the synchronous restoration validation —
+        /// exactly what the .active scene phase does before its transport
+        /// work. The capture gate alone is not enough: the app-foreground gate
+        /// is what makes in-flight runtime work (the restored conversation's
+        /// next Listen) count as current rather than discarded.
         func foregroundForRestoration() {
             controller.setForegroundActive(true)
+            controller.setApplicationForegroundActive(true)
             appState.restoreSuspendedVoiceConversationIfNeeded()
         }
     }

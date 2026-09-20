@@ -81,6 +81,15 @@ final class VoiceConversationController: ObservableObject {
     private var lastSpeechAt: Date?
     private var bargeInStartedAt: Date?
     private var isForegroundActive = true
+    /// App-level foreground state, deliberately separate from
+    /// `isForegroundActive`: the phone scene is on screen (or CarPlay
+    /// presents the shared conversation while the phone is locked). Asking
+    /// iOS to present a permission alert, and running a provider test from
+    /// Voice settings, need the app on screen — NOT a presenting Voice
+    /// surface. The surface gate is false whenever the Voice sheet is
+    /// closed, which is exactly the state Voice settings is in, so reading
+    /// it here refuses legitimate settings actions.
+    private var isApplicationForegroundActive = true
     private var isVoiceSessionActive = false
     private var isAwaitingVoiceAssistant = false
     private var awaitedAssistantResponseStarted = false
@@ -237,12 +246,31 @@ final class VoiceConversationController: ObservableObject {
     /// teardown is owned by the caller: AppState routes an open Voice
     /// conversation through `suspendRuntimeForLifecycle()` (logical
     /// preservation) and a closed one through `stop()` (full teardown).
+    ///
+    /// This gate is NOT the app-foreground fact: see
+    /// `setApplicationForegroundActive(_:)` for the consumers that need the
+    /// app on screen rather than a presenting Voice surface.
     func setForegroundActive(_ active: Bool) {
         isForegroundActive = active
     }
 
+    /// App-foreground gate (AppState feeds it alongside the surface gate).
+    /// Permission alerts and the settings-launched provider tests are gated
+    /// on the app being on screen; a phone Voice surface is not required and
+    /// is in fact absent while the user works in Voice settings.
+    func setApplicationForegroundActive(_ active: Bool) {
+        isApplicationForegroundActive = active
+    }
+
+    /// Observability seam: whether the app-foreground gate currently admits
+    /// permission and provider-test work. Tests pin it through here because
+    /// the failure it guards against — a foreground settings action refused
+    /// as though the app were backgrounded — leaves no observable state
+    /// behind (no mode change, no surfaced error).
+    var isApplicationForegroundGateOpen: Bool { isApplicationForegroundActive }
+
     func requestOnDeviceTranscriptionPermissions() async -> VoiceProviderTestResult {
-        guard isForegroundActive else {
+        guard isApplicationForegroundActive else {
             return .failure(AppLocalization.string("Voice permissions can only be requested while Conduit is in the foreground."))
         }
         guard await capture.requestPermission() else {
@@ -472,7 +500,7 @@ final class VoiceConversationController: ObservableObject {
     /// Hermes provider end to end.
     func runTranscriptionTest(duration: TimeInterval = 4) async -> VoiceProviderTestResult {
         stop()
-        guard isForegroundActive else {
+        guard isApplicationForegroundActive else {
             return .failure(AppLocalization.string("Voice tests only run while Conduit is in the foreground."))
         }
         guard let gateway else {
@@ -527,7 +555,7 @@ final class VoiceConversationController: ObservableObject {
     /// transport and playback services used by a conversation.
     func runSpeechTest(text: String) async -> VoiceProviderTestResult {
         stop()
-        guard isForegroundActive else {
+        guard isApplicationForegroundActive else {
             return .failure(AppLocalization.string("Voice tests only run while Conduit is in the foreground."))
         }
         guard let gateway else {
@@ -1241,7 +1269,14 @@ final class VoiceConversationController: ObservableObject {
         return normalized.contains("cancelled") || normalized.contains("canceled")
     }
 
+    /// Whether an in-flight runtime operation is still the current one. The
+    /// generation fences superseded AND torn-down work (`stop()` and
+    /// `suspendRuntimeForLifecycle()` both bump it), so the remaining term is
+    /// the app-foreground fact: results must not apply once the app is off
+    /// screen. It is deliberately NOT the capture gate — a provider test
+    /// started from Voice settings runs with no Voice surface presenting, and
+    /// the surface gate would discard its own progress.
     private func isCurrent(_ generation: UInt64) -> Bool {
-        generation == operationGeneration && isForegroundActive && isVoiceSessionActive
+        generation == operationGeneration && isApplicationForegroundActive && isVoiceSessionActive
     }
 }
