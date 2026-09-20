@@ -329,7 +329,9 @@ enum BotChatHygiene {
                // resolution: a mixed-case bot profile ("Atlas") whose row is
                // stamped "atlas" is still that bot's canonical chat, and two
                // hygiene checks disagreeing about it is the latent trap.
-               owner.caseInsensitiveCompare(bot.name) == .orderedSame {
+               owner.caseInsensitiveCompare(
+                   bot.name.trimmingCharacters(in: .whitespacesAndNewlines)
+               ) == .orderedSame {
                 return true
             }
         }

@@ -9257,6 +9257,12 @@ final class AppState: ObservableObject {
         chatResumeCoordinator.lastSession(for: profile)
     }
 
+    /// Whether the ownership match for a name was spelled exactly, so a test can
+    /// pin the diagnostic copy's input without driving a routed push.
+    func botProfileMatchForTesting(_ profile: String) -> (name: String, isExact: Bool)? {
+        botOwnership.botProfileMatch(for: profile)
+    }
+
     /// Simulates the next connection boundary for evidence freshness: the roster
     /// on hand becomes unverified (as it does at every connect/reconnect)
     /// without clearing it, so a test can pin that absence stops being evidence.

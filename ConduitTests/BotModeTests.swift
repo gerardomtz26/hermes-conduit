@@ -3459,6 +3459,59 @@ final class BotModeTests: XCTestCase {
         )
     }
 
+    /// A server-side profile name carrying incidental whitespace must behave
+    /// identically everywhere it is consumed: the canonical-row hygiene check,
+    /// the ownership verdict, and the profile the RPC actually addresses.
+    func testPaddedBotProfileNameIsConsistentEverywhere() async {
+        let padded = makeBot(name: "  Atlas  ", canonicalID: "stored-atlas")
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.makeSessionSummary(id: "ordinary-1", title: "Design review")] },
+            openSessionWithProfile: { _, id, _, _ in
+                SessionResumeResult(
+                    sessionId: id,
+                    storedSessionId: id,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            botRoster: { _ in
+                BotRosterSnapshot(bots: [padded], supportsBotProtocol: false)
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        await harness.appState.refreshBotRoster()
+        XCTAssertEqual(harness.appState.botModePhase, .available)
+
+        // Every consumer treats "Atlas" as that bot's profile.
+        XCTAssertEqual(
+            harness.appState.profileOwnershipVerdictForTesting("Atlas"),
+            .botOwned,
+            "the ownership verdict trims the roster name"
+        )
+        XCTAssertEqual(
+            harness.appState.botProfileMatchForTesting("Atlas")?.isExact,
+            true,
+            "and reports an exact match rather than a case-only one"
+        )
+
+        // The canonical-row hygiene rule agrees (rule 2: reserved title stamped
+        // with a roster bot's profile).
+        let canonicalRow = makeSessionSummary(
+            id: "runtime-row",
+            title: BotMode.canonicalChatTitle,
+            storedID: nil,
+            profile: "Atlas"
+        )
+        XCTAssertTrue(BotChatHygiene.isCanonicalBotChatRow(canonicalRow, roster: [padded]))
+        XCTAssertTrue(
+            BotChatHygiene.ordinaryResumeCandidates([canonicalRow], roster: [padded]).isEmpty
+        )
+    }
+
     // MARK: - harness
 
     /// The UserDefaults suite of the most recent harness, so tests can pin

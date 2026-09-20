@@ -217,7 +217,13 @@ struct SessionBotOwnership {
         // persisted by an earlier build was case-folded. The registry is the
         // fallback — it is keyed by EVERY id the conversation has ever
         // answered to, so a rotated runtime id still resolves.
-        if let rosterName = bot(owningAny: ids)?.name { return rosterName }
+        // Trimmed, like every sibling comparison: this value becomes the
+        // `profile` parameter of `session.resume`, and incidental whitespace on
+        // a server-side name must not change which store is addressed.
+        if let rosterName = bot(owningAny: ids)?.name
+            .trimmingCharacters(in: .whitespacesAndNewlines) {
+            return rosterName
+        }
         for id in ids.sorted() {
             if let profile = registryProfiles[id] { return profile }
         }

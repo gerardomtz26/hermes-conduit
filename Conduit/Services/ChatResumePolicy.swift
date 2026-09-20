@@ -132,6 +132,15 @@ enum ChatResumeSessionResolver {
         // One definition of "this row is a bot's forever chat" for both the
         // sessions surface and this selection: a second copy here could drift
         // and let the two disagree.
+        //
+        // RESIDUAL, stated because it is the shape of this whole fix: with NO
+        // bot evidence at all (an unverified reference and a roster that was
+        // never confirmed), these candidates are screened only by the reserved
+        // title, so a bot chat whose title moved on is indistinguishable from an
+        // ordinary conversation and can be the "latest" one. That is not
+        // recoverable from local data — it is why the callers gate the
+        // AUTHORITATIVE paths (the saved-id match and the catalog-absent escape
+        // hatch) on evidence instead of trusting a guess.
         return latestChat(
             in: scoped.filter {
                 !BotChatHygiene.isBotOwnedRow($0, botOwnedSessionIDs: botOwnedSessionIDs)
