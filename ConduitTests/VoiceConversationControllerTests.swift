@@ -320,6 +320,8 @@ final class VoiceConversationControllerTests: XCTestCase {
         let transcription = await controller.runTranscriptionTest(duration: 0)
         let speech = await controller.runSpeechTest(text: "test")
 
+        XCTAssertFalse(transcription.passed, "a backgrounded app must not run a provider test")
+        XCTAssertFalse(speech.passed, "a backgrounded app must not run a provider test")
         XCTAssertEqual(transcription.message, "Voice tests only run while Conduit is in the foreground.")
         XCTAssertEqual(speech.message, "Voice tests only run while Conduit is in the foreground.")
     }

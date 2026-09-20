@@ -149,6 +149,31 @@ final class AppStateVoiceCapabilityTests: XCTestCase {
         XCTAssertFalse(appState.voiceConversationController.isApplicationForegroundGateOpen)
     }
 
+    /// An overlay dip must leave the Voice gates exactly as they were. The
+    /// first-run microphone alert drives `.inactive` while `startListening`
+    /// awaits its permission; republishing there would close the app gate the
+    /// listen's `isCurrent` checks are fenced on, so every grant would kill
+    /// the listen it was granted for. This pins the deliberate absence of a
+    /// publication at `.inactive`, which nothing else observes.
+    ///
+    /// Only the published app gate is observable here (the capture gate has no
+    /// seam); the computed surface properties read false during the dip by
+    /// design, because they are consulted only at `.active` and `.background`,
+    /// where they are re-published.
+    func testOverlayDipLeavesThePublishedVoiceGatesUntouched() {
+        let appState = makeReadyAppState()
+        appState.showVoiceSheet = true
+        appState.reassertVoiceSurfaceGate()
+        XCTAssertTrue(appState.voiceConversationController.isApplicationForegroundGateOpen)
+
+        _ = appState.handleScenePhase(.inactive)
+
+        XCTAssertTrue(
+            appState.voiceConversationController.isApplicationForegroundGateOpen,
+            "an overlay dip must not close the app-foreground gate"
+        )
+    }
+
     private func makeReadyAppState() -> AppState {
         makeAppState(
             snapshot: VoiceCapabilitySnapshot(

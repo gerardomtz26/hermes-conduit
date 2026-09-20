@@ -1080,6 +1080,15 @@ final class AppState: ObservableObject {
     /// bookkeeping. Used at the lifecycle boundaries that can change both
     /// facts at once; a boundary that changes only one (the CarPlay surface
     /// edges) publishes by the same rule.
+    ///
+    /// INVARIANT for every other writer: the two gates must never be left
+    /// inconsistent *across* an await. A writer either publishes both through
+    /// here, or writes both facts explicitly in one synchronous run (the
+    /// `.background` branch does), or writes only the capture gate because
+    /// the same step tears the runtime down — `stop()` and
+    /// `suspendRuntimeForLifecycle()` both bump `operationGeneration`, so
+    /// in-flight work is fenced even while the app-foreground gate stays
+    /// open.
     private func publishVoiceRuntimeGates() {
         voiceConversationController.setForegroundActive(hasActiveVoiceSurface)
         voiceConversationController.setApplicationForegroundActive(hasForegroundApplicationSurface)
@@ -6746,12 +6755,13 @@ final class AppState: ObservableObject {
             // runtime down with no restoration path.
             //
             // The Voice gates are deliberately NOT republished here, leaving
-            // the app-foreground gate at its last value: this branch runs while
-            // iOS is presenting the microphone/Speech permission alert that
-            // `setVoiceTranscriptionMode` awaited, and closing the gate
-            // mid-request would refuse that same request's follow-up work (the
-            // second permission, the provider test that follows). Only
-            // `.active` and `.background` state the fact.
+            // the app-foreground gate at its last value. This branch runs
+            // while iOS presents a permission alert the voice flow awaited —
+            // the first-run microphone alert over a fresh sheet's auto-listen
+            // — and republishing would fence `startListening`'s
+            // `isCurrent`-checked continuation during the alert, so every
+            // grant would kill the listen it was granted for. Only `.active`
+            // and `.background` state the fact.
             return nil
 
         @unknown default:
@@ -16521,6 +16531,12 @@ final class AppState: ObservableObject {
     /// Goodbye, which is Close.
     func handleCarPlayVoiceSurfaceRemoved() {
         guard !hasActiveVoiceSurface else { return }
+        // State the app-foreground fact at the boundary that owns the
+        // decision instead of relying on the caller having called
+        // `setCarPlayVoiceSurfaceActive(false)` first: `fence()` in the CarPlay
+        // coordinator reaches here directly. Re-stating an unchanged value is
+        // free, and suspension itself only writes the capture gate.
+        voiceConversationController.setApplicationForegroundActive(hasForegroundApplicationSurface)
         suspendVoiceConversationForBackground()
     }
 
@@ -16544,6 +16560,11 @@ final class AppState: ObservableObject {
         voiceConversationController.endVoiceSession()
         voiceControllerSessionProfile = nil
         showVoiceSheet = false
+        // Close removes the surface the capture gate was open for, so restate
+        // the gates from bookkeeping rather than leaving the capture gate
+        // stale-true until the next lifecycle event (a CarPlay-presented
+        // conversation keeps it open by the same rule).
+        reassertVoiceSurfaceGate()
     }
 
     func runVoiceASRTest() async -> VoiceProviderTestResult {

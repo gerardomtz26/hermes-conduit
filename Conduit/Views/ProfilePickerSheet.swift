@@ -71,9 +71,9 @@ struct ProfilePickerSheet: View {
     }
 }
 
-/// One profile card. Selection covers the whole card — see the gesture on the
-/// body for why, and for the accessibility split between the card and its
-/// nested controls.
+/// One profile card. Selection covers the whole card — see the selection
+/// surface on the body for why, and for the accessibility split between the
+/// card and its nested controls.
 ///
 /// Unlike the setup cards, this row has no automated coverage: the picker is
 /// only reachable with a connected dashboard AND more than one discovered
@@ -94,7 +94,8 @@ private struct ProfilePickerRow: View {
     @State private var saveError: String?
     private var isCurrent: Bool { profile == appState.activeProfile }
     /// One rule for both selection paths: the text column's button and the
-    /// card-wide gesture below must agree on when a profile can be selected.
+    /// card-sized selection surface behind the row must agree on when a
+    /// profile can be selected.
     private var canSelect: Bool {
         !isCurrent && !appState.isProfileSwitching && !isReordering
     }
@@ -162,27 +163,35 @@ private struct ProfilePickerRow: View {
             }
         }
         .padding(12)
+        // The card's empty area selects the profile. The selection surface has
+        // to be a card-sized button BEHIND the row, not a container
+        // `.onTapGesture`: a gesture on an ancestor also recognizes taps that
+        // land on the nested controls, so tapping the avatar or the
+        // photo-removal button would switch profiles (and dismiss the sheet)
+        // as well as running its own action. As a sibling behind the row it is
+        // reached only where nothing interactive sits above it — the padding,
+        // the trailing accessory column, and the space beside the name — and
+        // the nested controls keep every tap that lands on them.
+        //
+        // Accessibility stays on the inner select button, which VoiceOver
+        // already exposes with the profile name and the `canSelect` disabled
+        // state; this surface is hidden to avoid a duplicate target. The
+        // Kanban card's `.accessibilityElement(children: .combine)` treatment
+        // is wrong here for the same reason the gesture is — this row carries
+        // two further controls that combining would fold into the card.
+        .background {
+            Button(action: select) {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(Color.clear)
+                    .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .disabled(!canSelect)
+            .accessibilityHidden(true)
+        }
         .conduitGlassSurface(cornerRadius: 20, tint: isCurrent ? .conduitAccent.opacity(0.12) : .clear)
         .overlay(alignment: .bottomLeading) {
             if let saveError { Text(saveError).font(.caption2).foregroundStyle(.red).padding(.horizontal, 12).padding(.bottom, 4) }
-        }
-        // The card itself selects the profile. The select button above only
-        // covers its text column, so the card's padding, the trailing
-        // accessory column, and the space beside the name all looked
-        // tappable while doing nothing. Taps on the nested controls (avatar,
-        // photo removal, reorder arrows) are consumed by those controls and
-        // never reach this gesture, so their own actions are unaffected.
-        //
-        // Accessibility deliberately stays on the inner button: VoiceOver gets
-        // the profile name as a button with the disabled state this row's
-        // `canSelect` gives it. The Kanban card's `.accessibilityElement(
-        // children: .combine)` treatment is wrong here — this row carries two
-        // further controls (choose photo, remove photo) that combining would
-        // fold into the card and hide.
-        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .onTapGesture {
-            guard canSelect else { return }
-            select()
         }
         .sheet(isPresented: $showingImagePicker) {
             ImagePicker(image: $pickedImage)

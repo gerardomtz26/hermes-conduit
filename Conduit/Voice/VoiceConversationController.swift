@@ -449,6 +449,11 @@ final class VoiceConversationController: ObservableObject {
     /// conversation identity (session ownership, awaiting state, transcript,
     /// user pause) is intentionally untouched here — `stop()` erases it for
     /// Close; suspension preserves it for restoration.
+    ///
+    /// INVARIANT: every path that retires in-flight Voice work goes through
+    /// here. `isCurrent(_:)` trusts the generation bump alone for teardown
+    /// fencing, so a retirement that clears session state or dismisses a
+    /// surface without this bump would let superseded work apply.
     private func releaseRuntimeResources() {
         operationGeneration &+= 1
         cachedRoutePolicy = nil
