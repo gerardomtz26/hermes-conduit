@@ -2907,6 +2907,85 @@ final class BotModeTests: XCTestCase {
         )
     }
 
+    /// A padded id must resolve in the registry wherever it is looked up: the
+    /// keys are normalized on write, so the scope fast path and the identity
+    /// guard have to normalize their queries too, or a Bot Chat reads as an
+    /// ordinary conversation in one of them.
+    func testPaddedSessionIDStillResolvesAsBotConversation() async {
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            openSessionWithProfile: { _, _, _, _ in
+                SessionResumeResult(
+                    sessionId: "runtime-1",
+                    storedSessionId: "stored-1",
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            findBotChat: { _, _ in
+                [BotChatLookupRow(id: "stored-1", resolvedID: "runtime-1", title: "Bot Chat")]
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        let opened = await harness.appState.openBotChat(for: makeBot(name: "atlas"))
+        XCTAssertTrue(opened)
+
+        XCTAssertEqual(harness.appState.botConversationProfileForTesting("runtime-1"), "atlas")
+        XCTAssertEqual(
+            harness.appState.botConversationProfileForTesting("  runtime-1  "),
+            "atlas",
+            "the padded spelling resolves through the same normalization the keys use"
+        )
+        XCTAssertNil(harness.appState.botConversationProfileForTesting("   "))
+    }
+
+    /// Refusal folds case, so a name that differs only in casing may be an
+    /// unrelated workspace: the user is told that instead of being told the
+    /// decision belongs to a Bot Chat.
+    func testCaseInsensitiveOnlyMatchReportsItsOwnReason() async {
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.makeSessionSummary(id: "ordinary-1", title: "Design review")] },
+            openSessionWithProfile: { _, id, _, _ in
+                SessionResumeResult(
+                    sessionId: id,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            botRoster: { _ in
+                BotRosterSnapshot(
+                    bots: [self.makeBot(name: "Atlas", canonicalID: "stored-atlas")],
+                    supportsBotProtocol: false
+                )
+            }
+        ))
+        let connection = HermesConnection(baseUrl: "https://one.example", ticket: "ticket")
+        harness.appState.client = HermesClient(connection: connection, profile: "default")
+        harness.appState.connection = connection
+
+        // Exactly the bot's spelling: the Bot Chat message.
+        _ = await harness.appState.openNotificationTarget(
+            ConduitNotificationTarget(profile: "Atlas", sessionId: "stored-atlas", type: "approval")
+        )
+        XCTAssertEqual(
+            harness.appState.errorMessage,
+            "This decision belongs to a Bot Chat. Open Bots to answer it."
+        )
+
+        // A different spelling that only matches with case folded: its own reason.
+        _ = await harness.appState.openNotificationTarget(
+            ConduitNotificationTarget(profile: "atlas", sessionId: "stored-atlas", type: "approval")
+        )
+        XCTAssertEqual(
+            harness.appState.errorMessage,
+            "Could not tell this notification's workspace apart from a Bot Chat. Open Bots or the workspace list to continue."
+        )
+    }
+
     // MARK: - harness
 
     /// The UserDefaults suite of the most recent harness, so tests can pin

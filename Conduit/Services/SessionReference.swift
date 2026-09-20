@@ -123,6 +123,25 @@ struct SessionBotOwnership {
         rosterCanonicalIDs.isEmpty && registryProfiles.isEmpty
     }
 
+    /// The bot profile this name matches, and whether the match was spelled
+    /// exactly. Refusal folds case (see `ownsProfile`), so the caller can tell
+    /// "this IS that bot's profile" from "this only matches with different
+    /// casing" — the second case may be an unrelated workspace.
+    func botProfileMatch(for profile: String) -> (name: String, isExact: Bool)? {
+        guard let normalized = SessionBotOwnership.normalized(profile) else { return nil }
+        if let rosterName = roster.first(where: {
+            $0.name.caseInsensitiveCompare(normalized) == .orderedSame
+        })?.name {
+            return (rosterName, rosterName == normalized)
+        }
+        if let registryName = registryProfiles.values.first(where: {
+            $0.caseInsensitiveCompare(normalized) == .orderedSame
+        }) {
+            return (registryName, registryName == normalized)
+        }
+        return nil
+    }
+
     /// Whether this profile is a bot's own profile — not a workspace the
     /// dashboard may adopt. Bots are ordinary Hermes profiles, so nothing but
     /// bot evidence distinguishes "switch the workspace to `Atlas`" from

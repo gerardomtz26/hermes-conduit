@@ -794,10 +794,16 @@ final class AppState: ObservableObject {
     /// ownership boundary at the published catalog so a stale row can never
     /// render under another workspace while a switch is in flight. Canonical
     /// Bot Chats are projected out here (never in the identity machinery's
-    /// own catalog views): they are reachable only through the Bots roster,
-    /// and a row is canonical by reserved title OR by positive bot ownership
-    /// (the roster's registries and this process's chat registry), so a
-    /// lineage tip whose title moved on is projected out too.
+    /// own catalog views): they are reachable only through the Bots roster.
+    /// The projection hides a row when it is canonical to the ROSTER (a
+    /// canonical id, or the reserved title stamped with a known bot's
+    /// profile) or when positive bot ownership names it under any identity —
+    /// including a lineage tip whose title moved on.
+    ///
+    /// The unconditional reserved-TITLE rule is deliberately NOT applied to
+    /// this LISTING (only to resume selection): a row titled "Bot Chat" that
+    /// no roster evidence reserves is an ordinary conversation the user can
+    /// still see and open (see `BotChatHygiene.isReservedCanonicalTitleRow`).
     var activeProfileSessions: [SessionSummary] {
         let botOwned = botOwnedSessionIDs
         return sessions.filter {
@@ -9209,7 +9215,14 @@ final class AppState: ObservableObject {
     /// that conversation is a canonical Bot Chat. Nil for ordinary sessions —
     /// the ordinary dashboard scope applies.
     private func botConversationProfile(for sessionID: String) -> String? {
-        botChatSessionProfiles[sessionID]
+        // Normalized like the KEYS `noteBotChatSession` writes and like
+        // `botScopeProfile`'s fast path: a padded id must not resolve in one
+        // place and miss in the other, which would classify a Bot Chat as an
+        // ordinary conversation and write the dashboard's title cache.
+        guard let normalized = ChatScrollIdentityNormalization.sessionID(sessionID) else {
+            return nil
+        }
+        return botChatSessionProfiles[normalized]
     }
 
     /// The presentation-cache namespace for a conversation. Canonical Bot
@@ -9415,7 +9428,9 @@ final class AppState: ObservableObject {
             transitionGeneration: transitionGeneration
         ) else { return false }
         let targetProfile = notificationProfileID(target.profile)
-        if let targetProfile, targetProfile != activeProfile, botModePhase != .gatewayUnsupported {
+        if let targetProfile, targetProfile != activeProfile,
+           botModePhase != .gatewayUnsupported,
+           !botOwnership.ownsProfile(targetProfile) {
             // The verdict below reads the roster as ABSENCE evidence, so it must
             // be evidence from NOW. The roster is otherwise loaded once per
             // connection and when the Bots surface opens, which leaves a window:
@@ -9435,9 +9450,19 @@ final class AppState: ObservableObject {
             // unverifiable case stop here.
             switch profileOwnershipVerdict(for: targetProfile) {
             case .botOwned:
-                errorMessage = AppLocalization.string(
-                    "This decision belongs to a Bot Chat. Open Bots to answer it."
-                )
+                // Ownership matching folds case (see `profileOwnershipVerdict`),
+                // so when the match is not spelled exactly like the bot's
+                // profile the target may be an unrelated workspace that merely
+                // shares the name with different casing. Say so instead of
+                // claiming this belongs to a Bot Chat.
+                let exact = botOwnership.botProfileMatch(for: targetProfile)?.isExact ?? true
+                errorMessage = exact
+                    ? AppLocalization.string(
+                        "This decision belongs to a Bot Chat. Open Bots to answer it."
+                    )
+                    : AppLocalization.string(
+                        "Could not tell this notification's workspace apart from a Bot Chat. Open Bots or the workspace list to continue."
+                    )
                 return false
             case .unverifiable:
                 // No usable Bot Mode evidence (the roster could not be loaded,
