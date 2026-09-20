@@ -3330,6 +3330,87 @@ final class BotModeTests: XCTestCase {
         XCTAssertEqual(harness.appState.activeSessionId, "stored-plain")
     }
 
+    /// A selection recorded while Bot Mode could not be probed is a GUESS: a bot
+    /// chat can be sitting in the workspace store during that window, so the
+    /// write is recorded UNVERIFIED rather than as a typed ordinary
+    /// conversation. Otherwise the next launch would trust the guess for good,
+    /// and the catalog-lags escape hatch would carry it forward.
+    func testEvidenceBlindSelectionIsRecordedUnverified() async {
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.makeSessionSummary(id: "ordinary-1", title: "Design review")] },
+            openSessionWithProfile: { _, id, _, _ in
+                SessionResumeResult(
+                    sessionId: id,
+                    storedSessionId: id,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            botRoster: { _ in
+                throw RpcError(code: 5000, message: "state.db is locked")
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        await harness.appState.refreshBotRoster()
+        guard case .failed = harness.appState.botModePhase else {
+            return XCTFail("expected a failed probe, got \(harness.appState.botModePhase)")
+        }
+
+        await harness.appState.syncSession(
+            purpose: .automaticReturn,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(harness.appState.activeSessionId, "ordinary-1")
+        XCTAssertEqual(
+            harness.store.lastSession(for: "default")?.isLegacyIDOnly,
+            true,
+            "an evidence-blind write is unverified, not a typed ordinary selection"
+        )
+
+        // With the roster verified, the same flow records a TYPED selection, so
+        // the escape hatch keeps working in the normal case.
+        let verified = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.makeSessionSummary(id: "ordinary-1", title: "Design review")] },
+            openSessionWithProfile: { _, id, _, _ in
+                SessionResumeResult(
+                    sessionId: id,
+                    storedSessionId: id,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            botRoster: { _ in
+                BotRosterSnapshot(bots: [], supportsBotProtocol: false)
+            }
+        ))
+        verified.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        await verified.appState.refreshBotRoster()
+        XCTAssertEqual(verified.appState.botModePhase, .available)
+
+        await verified.appState.syncSession(
+            purpose: .automaticReturn,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(verified.appState.activeSessionId, "ordinary-1")
+        XCTAssertEqual(
+            verified.store.lastSession(for: "default")?.isLegacyIDOnly,
+            false,
+            "a selection recorded with verified evidence stays typed"
+        )
+    }
+
     // MARK: - harness
 
     /// The UserDefaults suite of the most recent harness, so tests can pin
