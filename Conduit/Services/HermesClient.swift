@@ -1928,10 +1928,14 @@ enum MessageNormalizer {
         }
     }
 
-    /// The same instant `sessionUpdatedLabel` formats, kept machine-readable so
-    /// restoration can order conversations by ACTUAL activity instead of list
-    /// position. Values in milliseconds (and numeric strings) normalize to
-    /// epoch seconds.
+    /// The ordering instant for a session row, so restoration can rank
+    /// conversations by ACTUAL activity instead of list position. It reads the
+    /// same key list `sessionUpdatedLabel` walks, and deliberately DIVERGES
+    /// from it on one point: that function falls through to a weaker field
+    /// when a value cannot be formatted, while this returns nil, because an
+    /// instant taken from a different field than the one the gateway reported
+    /// ranks a row by a moment it does not describe. Units are normalized to
+    /// epoch seconds (s/ms/µs/ns).
     ///
     /// The FIRST field the gateway reports is authoritative activity: when it
     /// is present but carries no machine-readable instant (a localized date

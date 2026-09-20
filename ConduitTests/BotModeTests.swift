@@ -2749,6 +2749,74 @@ final class BotModeTests: XCTestCase {
         )
     }
 
+    /// A roster retained across a FAILED refresh is stale in the one direction
+    /// that matters: a bot registered since the last success is missing from it,
+    /// so absence stops being evidence. The verdict must go back to
+    /// `unverifiable` rather than reading that bot's profile as an ordinary
+    /// workspace.
+    func testStaleRosterAfterFailedRefreshIsNotAbsenceEvidence() async {
+        var shouldFail = false
+        let bot = makeBot(name: "Atlas", canonicalID: "stored-atlas")
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            refreshContext: { _, _ in },
+            botRoster: { _ in
+                if shouldFail {
+                    throw RpcError(code: 5000, message: "state.db is locked")
+                }
+                return BotRosterSnapshot(bots: [bot], supportsBotProtocol: false)
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        await harness.appState.refreshBotRoster()
+        XCTAssertEqual(harness.appState.botModePhase, .available)
+        XCTAssertEqual(
+            harness.appState.profileOwnershipVerdictForTesting("analyst"),
+            .ordinary,
+            "a verified roster makes absence meaningful"
+        )
+
+        // The next refresh fails; the roster stays on screen (stale).
+        shouldFail = true
+        await harness.appState.refreshBotRoster()
+        XCTAssertEqual(harness.appState.botRoster.map(\.name), ["Atlas"], "the roster is retained")
+        guard case .failed = harness.appState.botModePhase else {
+            return XCTFail("expected a failed refresh phase, got \(harness.appState.botModePhase)")
+        }
+
+        XCTAssertEqual(
+            harness.appState.profileOwnershipVerdictForTesting("analyst"),
+            .unverifiable,
+            "a bot added since the last successful refresh could be missing from the stale roster"
+        )
+        XCTAssertEqual(
+            harness.appState.profileOwnershipVerdictForTesting("Atlas"),
+            .botOwned,
+            "positive evidence from the retained roster still counts"
+        )
+    }
+
+    /// A mixed-case bot profile whose canonical row is stamped with a
+    /// differently-cased owner is still that bot's canonical chat: the row
+    /// hygiene check compares like `ownsProfile` does, not case-sensitively.
+    func testCanonicalRowOwnerMatchingIsCaseInsensitive() {
+        let bot = makeBot(name: "Atlas", canonicalID: "stored-atlas")
+        let row = makeSessionSummary(
+            id: "runtime-row",
+            title: BotMode.canonicalChatTitle,
+            storedID: nil,
+            profile: "atlas"
+        )
+
+        XCTAssertTrue(BotChatHygiene.isCanonicalBotChatRow(row, roster: [bot]))
+        XCTAssertTrue(
+            BotChatHygiene.ordinaryResumeCandidates([row], roster: [bot]).isEmpty,
+            "and it is therefore never an ordinary resume candidate"
+        )
+    }
+
     // MARK: - harness
 
     /// The UserDefaults suite of the most recent harness, so tests can pin

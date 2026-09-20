@@ -928,11 +928,14 @@ final class AppState: ObservableObject {
             // not this RPC) to protect against bots that cannot exist.
             return .ordinary
         }
-        // Otherwise a usable roster is what makes absence meaningful: it is the
-        // server's complete list of bots. Without one (never loaded, still
-        // loading, or a failed probe) absence proves nothing.
-        let rosterEvidenceIsUsable = botModePhase == .available || !botRoster.isEmpty
-        return rosterEvidenceIsUsable ? .ordinary : .unverifiable
+        // Otherwise absence only means something from a VERIFIED CURRENT
+        // answer: `.available` is a roster the server just confirmed, while a
+        // roster retained across a failed refresh is stale in the one
+        // direction that matters here — a bot registered since the last
+        // success would be missing from it and would read as an ordinary
+        // workspace. `.idle`/`.loading`/`.failed` are therefore unverifiable
+        // even when a stale roster is still on screen.
+        return botModePhase == .available ? .ordinary : .unverifiable
     }
 
     /// The bot profile a conversation's RPCs must ride, from every source of
@@ -946,7 +949,10 @@ final class AppState: ObservableObject {
     /// registry alone is not enough: it is cleared at every server-identity
     /// boundary and empty after a relaunch, and resolving a bot chat's scope
     /// as the dashboard profile addresses the wrong store.
-    private func botScopeProfile(forSessionIDs sessionIDs: Set<String>) -> String? {
+    private func botScopeProfile(
+        forSessionIDs sessionIDs: Set<String>,
+        workspaceProfile: String? = nil
+    ) -> String? {
         let identityIDs = Set(sessionIDs.compactMap { ChatScrollIdentityNormalization.sessionID($0) })
         guard !identityIDs.isEmpty else { return nil }
         // Registry first, as a plain dictionary lookup: this runs on the
@@ -959,7 +965,11 @@ final class AppState: ObservableObject {
         if let rosterScope = botOwnership.botProfileName(owningAny: identityIDs) {
             return rosterScope
         }
-        guard let reference = chatResumeCoordinator.lastSession(for: activeProfile),
+        // The durable reference is recorded per WORKSPACE profile, and this is
+        // called while opening a conversation that may not be the active one
+        // yet (a transition), so the caller names the workspace it is acting
+        // in rather than relying on `activeProfile`.
+        guard let reference = chatResumeCoordinator.lastSession(for: workspaceProfile ?? activeProfile),
               reference.kind == .bot,
               identityIDs.contains(reference.sessionID) else { return nil }
         return reference.resumeProfileScope
@@ -4827,8 +4837,11 @@ final class AppState: ObservableObject {
         // a previous conversation's aliases (the scroll identity unions them
         // when a resume continues the conversation it replaced), and a foreign
         // id must never pull this conversation onto a bot profile's store.
+        // The workspace profile is read from the same binding the rest of this
+        // body uses, so the durable-reference fallback cannot disagree with it.
+        let profile = activeProfile
         let conversationScopeProfile = conversationProfile
-            ?? botScopeProfile(forSessionIDs: [sessionId])
+            ?? botScopeProfile(forSessionIDs: [sessionId], workspaceProfile: profile)
         let priorReconciliation = reconciliation?.token == token ? reconciliation : nil
         let bufferedEvents = priorReconciliation?.bufferedEvents ?? []
         reconciliation = Reconciliation(
@@ -4850,7 +4863,6 @@ final class AppState: ObservableObject {
         reconciliationSessionWasNotFound = false
         refreshActiveChatScrollSessionIdentity(isReconciling: true)
         turnState = .synchronizing
-        let profile = activeProfile
         // The resume RPC can overlap a user-initiated config.set. Capture the
         // local-write position before launching either request so a response
         // from the older snapshot cannot clear the newer override.

@@ -163,10 +163,12 @@ struct SessionBotOwnership {
         }
     }
 
-    /// The BOT PROFILE the conversation's RPCs must ride, from the registry
-    /// first (this process opened the conversation and recorded its scope) and
-    /// the roster second (it names the canonical chat by id). Nil when nothing
-    /// attributes the conversation to a bot.
+    /// The BOT PROFILE the conversation's RPCs must ride: the ROSTER first
+    /// (its `bot.name` is the server's verbatim spelling, and a scope
+    /// persisted by an earlier build may be case-folded), then this process's
+    /// registry (which also covers a runtime id the roster does not name, such
+    /// as a lineage tip). Nil when nothing attributes the conversation to a
+    /// bot.
     func botProfileName(owningAny sessionIDs: Set<String>) -> String? {
         let ids = Set(sessionIDs.compactMap(SessionBotOwnership.normalized))
         guard !ids.isEmpty else { return nil }

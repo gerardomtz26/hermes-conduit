@@ -324,7 +324,12 @@ enum BotChatHygiene {
             if title == BotMode.canonicalChatTitle,
                let owner = row.profile?
                    .trimmingCharacters(in: .whitespacesAndNewlines),
-               !owner.isEmpty, owner == bot.name {
+               !owner.isEmpty,
+               // Case-insensitive, matching `ownsProfile` and the resume-scope
+               // resolution: a mixed-case bot profile ("Atlas") whose row is
+               // stamped "atlas" is still that bot's canonical chat, and two
+               // hygiene checks disagreeing about it is the latent trap.
+               owner.caseInsensitiveCompare(bot.name) == .orderedSame {
                 return true
             }
         }
