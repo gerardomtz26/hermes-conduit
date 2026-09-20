@@ -63,24 +63,29 @@ final class ProfilePickerUITests: XCTestCase {
         let target = selectableProfileDisplayName(in: app)
         let photoControl = photoControl(for: target, in: app)
 
-        // Control: an empty part of the picker must NOT select, or the signal
-        // below would prove nothing about the card.
-        let window = app.windows.firstMatch
-        tapInWindow(app, at: CGPoint(x: window.frame.midX, y: window.frame.maxY - 40))
+        // Control: a part of the picker that holds no selection target must not
+        // select anything, or the signal below would prove nothing about the
+        // card. The sheet title is a plain text, and the close control sits at
+        // the trailing edge, away from its centre.
+        let title = app.staticTexts[Identity.pickerTitle]
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "Picker title missing. Tree:\n\(app.debugDescription)")
+        tapInWindow(app, at: CGPoint(x: title.frame.midX, y: title.frame.midY))
         XCTAssertFalse(
             waitForSwitchAttempt(in: app, timeout: 2),
-            "An empty area of the picker must not select a profile. Tree:\n\(app.debugDescription)"
+            "A place with no selection target must not select a profile. Tree:\n\(app.debugDescription)"
         )
 
-        // The probe is the card's trailing accessory column: the row's own
-        // select button covers its text column only, so this slot is reached
-        // exclusively through the card-sized selection surface behind the row.
-        // `x` comes from the current row's marker, which sits in the same slot on
-        // every row, and `y` from the selectable row's avatar, so the probe does
-        // not depend on the card's reported bounds and lands inside no control.
+        // The probe is the gap just past the row's accessory: every interactive
+        // element in the row ends at that accessory's trailing edge, so a point
+        // beyond it is reached only by the card-sized selection surface behind
+        // the row. (Using the accessory's mid-point would land inside the text
+        // column's button on rows whose accessory is a narrow chevron — the
+        // mutation check for this test failed on exactly that mistake.) `x` comes
+        // from the current row's marker and `y` from the target row's avatar, so
+        // the probe is row-specific without depending on the card's bounds.
         let accessorySlot = app.staticTexts[Identity.currentMarker]
         XCTAssertTrue(accessorySlot.waitForExistence(timeout: 5), "No current profile marked. Tree:\n\(app.debugDescription)")
-        tapInWindow(app, at: CGPoint(x: accessorySlot.frame.midX, y: photoControl.frame.midY))
+        tapInWindow(app, at: CGPoint(x: accessorySlot.frame.maxX + 6, y: photoControl.frame.midY))
 
         XCTAssertTrue(
             waitForSwitchAttempt(in: app, timeout: 8),
@@ -102,7 +107,10 @@ final class ProfilePickerUITests: XCTestCase {
 
         photoControl(for: target, in: app).tap()
 
-        // Positive control: the nested control's own action ran.
+        // Positive control: the nested control's own action ran. The photo
+        // library's permission alert can appear on a fresh simulator and would
+        // otherwise block the picker the test waits for.
+        allowPhotoAccessIfAsked(app)
         let cancel = app.buttons["Cancel"]
         XCTAssertTrue(cancel.waitForExistence(timeout: 15), "The photo picker must appear. Tree:\n\(app.debugDescription)")
         cancel.tap()
@@ -154,10 +162,20 @@ final class ProfilePickerUITests: XCTestCase {
 
     /// The seeded profile that is not the active one: the card only selects when
     /// the row is selectable, and with two seeds exactly one always is.
+    ///
+    /// Determined from row geometry — the row whose photo control sits at a
+    /// different height than the current marker — rather than from the header
+    /// label, which always contains the literal word "Workspace" and would make
+    /// a name-substring test match every profile.
     private func selectableProfileDisplayName(in app: XCUIApplication) -> String {
-        let active = app.buttons[Identity.workspace].label
-        let candidate = Self.seededDisplayNames.first { !active.contains($0) }
-        XCTAssertNotNil(candidate, "Expected the header to name the active profile. Saw: \(active)")
+        let marker = app.staticTexts[Identity.currentMarker]
+        XCTAssertTrue(marker.waitForExistence(timeout: 5), "No current profile marked. Tree:\n\(app.debugDescription)")
+        let currentRowMidY = marker.frame.midY
+        let candidate = Self.seededDisplayNames.first { displayName in
+            let control = app.buttons["Choose photo for \(displayName)"]
+            return control.exists && abs(control.frame.midY - currentRowMidY) > 4
+        }
+        XCTAssertNotNil(candidate, "No selectable seeded row found. Tree:\n\(app.debugDescription)")
         return candidate ?? Self.seededDisplayNames[0]
     }
 
@@ -192,6 +210,17 @@ final class ProfilePickerUITests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.1)
         }
         return !element.exists
+    }
+
+    /// The photo control opens `UIImagePickerController`, which can ask for the
+    /// photo library on a fresh simulator. Allow it when asked so the picker the
+    /// test waits for can appear; a denial would leave the test failing on its
+    /// own assertion rather than on an unexpected alert.
+    private func allowPhotoAccessIfAsked(_ app: XCUIApplication) {
+        let allow = app.alerts.buttons["Allow"]
+        if allow.waitForExistence(timeout: 3) {
+            allow.tap()
+        }
     }
 
     /// Whether the app has reported a workspace-switch attempt. Under the

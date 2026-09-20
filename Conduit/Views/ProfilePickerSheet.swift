@@ -75,10 +75,11 @@ struct ProfilePickerSheet: View {
 /// surface on the body for why, and for the accessibility split between the
 /// card and its nested controls.
 ///
-/// Unlike the setup cards, this row has no automated coverage: the picker is
-/// only reachable with a connected dashboard AND more than one discovered
-/// profile, and the UI-test seams (`-CONDUIT_UI_TEST_CONNECTED_DASHBOARD`)
-/// supply neither, so the card's hit region cannot be probed from a test.
+/// Covered by `ConduitUITests/ProfilePickerUITests`: the picker is reached with
+/// the DEBUG-only `-CONDUIT_UI_TEST_CONNECTED_DASHBOARD` stub plus the
+/// `-CONDUIT_UI_TEST_PROFILES` roster seam in `AppState.uiTestSeededProfiles()`,
+/// which seeds through the same `orderedProfiles` a real `/api/profiles`
+/// discovery uses.
 private struct ProfilePickerRow: View {
     @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var appState: AppState
