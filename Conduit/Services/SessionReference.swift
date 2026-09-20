@@ -124,13 +124,20 @@ struct SessionBotOwnership {
     }
 
     /// Whether this profile is a bot's own profile — not a workspace the
-    /// dashboard may adopt. Bots are ordinary Hermes profiles, so nothing else
-    /// distinguishes "switch the workspace to `atlas`" from "open atlas's Bot
-    /// Chat"; the roster is the only evidence there is.
+    /// dashboard may adopt. Bots are ordinary Hermes profiles, so nothing but
+    /// bot evidence distinguishes "switch the workspace to `Atlas`" from
+    /// "open Atlas's Bot Chat": the roster names every bot, and the runtime
+    /// registry names the profiles known Bot Chats already ride (which is the
+    /// only evidence available while the roster is empty or unloaded).
     func ownsProfile(_ profile: String) -> Bool {
-        let normalized = profile.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalized.isEmpty else { return false }
-        return roster.contains { $0.name.caseInsensitiveCompare(normalized) == .orderedSame }
+        let normalized = SessionBotOwnership.normalized(profile)
+        guard let normalized else { return false }
+        if roster.contains(where: { $0.name.caseInsensitiveCompare(normalized) == .orderedSame }) {
+            return true
+        }
+        return registryProfiles.values.contains {
+            $0.caseInsensitiveCompare(normalized) == .orderedSame
+        }
     }
 
 
@@ -163,13 +170,16 @@ struct SessionBotOwnership {
     func botProfileName(owningAny sessionIDs: Set<String>) -> String? {
         let ids = Set(sessionIDs.compactMap(SessionBotOwnership.normalized))
         guard !ids.isEmpty else { return nil }
-        // The registry is keyed by EVERY id the conversation has ever answered
-        // to, so a rotated runtime id resolves to the same scope as the
-        // registry row.
+        // The ROSTER first: it is the server's own spelling of the profile a
+        // Bot Chat's RPCs must ride (`bot.name` verbatim), and a scope
+        // persisted by an earlier build was case-folded. The registry is the
+        // fallback — it is keyed by EVERY id the conversation has ever
+        // answered to, so a rotated runtime id still resolves.
+        if let rosterName = bot(owningAny: ids)?.name { return rosterName }
         for id in ids.sorted() {
             if let profile = registryProfiles[id] { return profile }
         }
-        return bot(owningAny: ids)?.name
+        return nil
     }
 
     /// The reference AS a Bot Mode reference when this evidence attributes any

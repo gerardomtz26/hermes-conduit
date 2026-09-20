@@ -282,6 +282,14 @@ final class ChatResumeStore {
     /// and a `.bot` reference is repaired to name its own scope — nil when no
     /// scope survives, in which case the entry is dropped rather than kept
     /// half-addressed.
+    ///
+    /// CASE IS PRESERVED for the scope. This value is not a dictionary key: it
+    /// becomes the `profile` parameter of `session.resume` and of the transcript
+    /// hydration, and the gateway keys its per-profile store by the EXACT name.
+    /// Case-folding belongs to `ChatScrollSessionKey` (which the caller derives
+    /// from the same reference), never to a profile name that will be sent over
+    /// RPC — the dashboard paths pass `activeProfile` verbatim for the same
+    /// reason.
     private static func normalized(_ reference: SessionReference) -> SessionReference? {
         guard let sessionID = ChatScrollIdentityNormalization.sessionID(reference.sessionID) else {
             return nil
@@ -289,15 +297,15 @@ final class ChatResumeStore {
         guard reference.kind == .bot else {
             return SessionReference(
                 kind: .dashboard,
-                scopeProfile: reference.scopeProfile,
+                scopeProfile: reference.scopeProfile.trimmingCharacters(in: .whitespacesAndNewlines),
                 botName: nil,
                 botLabel: nil,
                 sessionID: sessionID
             )
         }
-        guard let scope = ChatScrollIdentityNormalization.profile(
-            reference.botName ?? reference.scopeProfile
-        ) else { return nil }
+        guard let scope = Self.rpcProfileName(reference.botName ?? reference.scopeProfile) else {
+            return nil
+        }
         return SessionReference(
             kind: .bot,
             scopeProfile: scope,
@@ -305,6 +313,13 @@ final class ChatResumeStore {
             botLabel: reference.botLabel,
             sessionID: sessionID
         )
+    }
+
+    /// A profile name destined for an RPC: whitespace-trimmed, spelling
+    /// PRESERVED. Nil when nothing usable remains.
+    static func rpcProfileName(_ profile: String?) -> String? {
+        let trimmed = profile?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private static func normalizedLastSessions(

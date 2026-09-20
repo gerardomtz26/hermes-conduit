@@ -32,6 +32,18 @@ typealias ChatResumeReconnectScheduler = @MainActor (
     _ operation: @escaping @MainActor () async -> Void
 ) -> ChatResumeReconnectCancellation
 
+/// What the client can prove about a profile that a decision wants to make the
+/// dashboard workspace. `unverifiable` is not "ordinary by default": the caller
+/// decides, and the push-routing path fails closed on it.
+enum ProfileOwnershipVerdict: Equatable {
+    /// Positively a bot's own profile (roster, or a known Bot Chat's scope).
+    case botOwned
+    /// Verified not to be a bot: the roster loaded and does not name it.
+    case ordinary
+    /// No usable evidence either way.
+    case unverifiable
+}
+
 struct ChatResumeLifecycleOperations {
     typealias BranchResult = (sessionId: String, storedSessionId: String?, profile: String?)
 
@@ -879,6 +891,19 @@ final class AppState: ObservableObject {
 
     private var botOwnedSessionIDs: Set<String> {
         botOwnership.botOwnedIDs
+    }
+
+    /// What the client can PROVE about a profile a decision wants to switch the
+    /// dashboard to. A profile name alone proves nothing: bots are ordinary
+    /// Hermes profiles, so only bot evidence (or its verified absence)
+    /// distinguishes a workspace from a bot.
+    private func profileOwnershipVerdict(for profile: String) -> ProfileOwnershipVerdict {
+        if botOwnership.ownsProfile(profile) { return .botOwned }
+        // A usable roster is what makes absence meaningful: it is the server's
+        // complete list of bots. Without one (never loaded, still loading, or a
+        // failed/unsupported probe) absence proves nothing.
+        let rosterEvidenceIsUsable = botModePhase == .available || !botRoster.isEmpty
+        return rosterEvidenceIsUsable ? .ordinary : .unverifiable
     }
 
     /// The bot profile a conversation's RPCs must ride, from every source of
@@ -1989,12 +2014,22 @@ final class AppState: ObservableObject {
                 label: reference.botLabel
             )
             activeSessionId = reference.sessionID
-            let label = reference.botLabel?
-                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            activeSessionTitle = label.isEmpty
-                ? BotMode.canonicalChatTitle
-                : label
+            activeSessionTitle = Self.botConversationTitle(for: reference)
         }
+    }
+
+    /// The header title for a restored Bot Chat. The bot's display label when
+    /// the reference carries one, else the BOT PROFILE NAME — the same
+    /// last-resort fallback `BotProfile.displayLabel` uses. Never the reserved
+    /// wire title: that constant is an identity used for the exact-title lookup,
+    /// not a user-facing string, and it would tell the user nothing about which
+    /// bot they are looking at.
+    static func botConversationTitle(for reference: SessionReference) -> String {
+        let label = reference.botLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !label.isEmpty { return label }
+        let name = (reference.botName ?? reference.scopeProfile)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? AppLocalization.string("New conversation") : name
     }
 
     /// Registers a Bot Mode reference's identity so the conversation resolves
@@ -3212,7 +3247,9 @@ final class AppState: ObservableObject {
             continuationAutomaticWorkToken = rosterContinuation.automaticWorkToken
             handedOffAutomaticIntent = handedOffAutomaticIntent
                 || rosterContinuation.handedOffAutomaticIntent
-            await loadChatResumeBotRoster()
+            // (the roster load above is the only one: it already ran, and a
+            // second call would be a guarded no-op in production and a
+            // duplicate seam invocation in tests)
             guard let continuation = transportContinuation(
                 purpose: continuationPurpose,
                 automaticWorkToken: continuationAutomaticWorkToken,
@@ -5684,8 +5721,10 @@ final class AppState: ObservableObject {
         let retainedRestoredMessages = pendingDecisionRestorationMessages(for: result.sessionId)
         markChatViewportReplacement()
         // A canonical Bot Chat keeps the title the open just applied (the
-        // bot's display label) and never enters the dashboard's cold-restore
-        // selection: the ordinary create-adoption defaults apply only to
+        // bot's display label) and is recorded with kind `.bot`: cold launch
+        // restores the conversation the user was in, while the ordinary
+        // Sessions surface never adopts it. The create-adoption defaults
+        // (title, durable-identity persistence) apply only to
         // dashboard-profile conversations.
         let isBotConversation = botConversationProfile(for: result.sessionId) != nil
         setActiveSessionState(
@@ -9095,6 +9134,12 @@ final class AppState: ObservableObject {
         botConversationProfile(for: sessionID)
     }
 
+    /// The ownership verdict a cross-profile decision would reach for this
+    /// profile, so tests can pin all three cases without driving a switch.
+    func profileOwnershipVerdictForTesting(_ profile: String) -> ProfileOwnershipVerdict {
+        profileOwnershipVerdict(for: profile)
+    }
+
     /// The persisted selection for a workspace, so a test can pin that the
     /// conversation's KIND — not just its id — survived restoration.
     func storedSessionReferenceForTesting(_ profile: String) -> SessionReference? {
@@ -9320,7 +9365,7 @@ final class AppState: ObservableObject {
         ) else { return false }
         let targetProfile = notificationProfileID(target.profile)
         if let targetProfile, targetProfile != activeProfile, botRoster.isEmpty {
-            // The refusal below is only as good as the roster it reads: a
+            // The refusal below is only as good as the evidence it reads: a
             // cold process (or a gateway that has not answered yet) would
             // otherwise adopt a bot's profile as this workspace.
             await loadChatResumeBotRoster()
@@ -9329,13 +9374,26 @@ final class AppState: ObservableObject {
             // A bot's profile is not a workspace. Bots ARE ordinary Hermes
             // profiles, so a decision pushed from a Bot Chat names one; making
             // it this dashboard's profile would turn a bot conversation into
-            // the workspace's own context. Fail closed — routing a push into
-            // the Bots surface is a Bot Mode concern, not a workspace switch.
-            guard !botOwnership.ownsProfile(targetProfile) else {
+            // the workspace's own context. Routing a push INTO the Bots
+            // surface is out of scope, so both the positive and the
+            // unverifiable case stop here.
+            switch profileOwnershipVerdict(for: targetProfile) {
+            case .botOwned:
                 errorMessage = AppLocalization.string(
                     "This decision belongs to a Bot Chat. Open Bots to answer it."
                 )
                 return false
+            case .unverifiable:
+                // No usable Bot Mode evidence (the roster could not be loaded,
+                // or this gateway cannot list profiles): the target may be a
+                // bot's profile, and adopting it would hand a bot conversation
+                // the workspace's context. Fail closed rather than guess.
+                errorMessage = AppLocalization.string(
+                    "Could not verify that workspace for this notification. Reconnect and try again."
+                )
+                return false
+            case .ordinary:
+                break
             }
             guard await switchProfile(
                 to: targetProfile,

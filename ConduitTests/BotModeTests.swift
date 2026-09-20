@@ -2018,7 +2018,9 @@ final class BotModeTests: XCTestCase {
     /// profile.
     func testRelaunchRestoresPersistedBotSessionWithItsType() async {
         let suite = "BotModeTests.Relaunch.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            return XCTFail("Failed to create test UserDefaults suite")
+        }
         addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
         let operations = ChatResumeLifecycleOperations(
             openSessionWithProfile: { _, _, _, _ in
@@ -2429,6 +2431,249 @@ final class BotModeTests: XCTestCase {
         XCTAssertEqual(
             harness.appState.errorMessage,
             "This decision belongs to a Bot Chat. Open Bots to answer it."
+        )
+    }
+
+    // MARK: - review round 3: scope case + ownership evidence
+
+    /// A Hermes profile name is a wire identity, NOT a dictionary key: the
+    /// gateway keys its per-profile store by the EXACT spelling, and the
+    /// dashboard paths pass `activeProfile` verbatim. A mixed-case bot profile
+    /// must therefore survive persistence and come back verbatim — a
+    /// case-folded scope restores the conversation against a profile the
+    /// gateway does not have.
+    func testMixedCaseBotProfileScopeSurvivesRelaunchVerbatim() async {
+        let suite = "BotModeTests.ScopeCase.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            return XCTFail("Failed to create test UserDefaults suite")
+        }
+        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
+        let operations = ChatResumeLifecycleOperations(
+            openSessionWithProfile: { _, _, _, _ in
+                SessionResumeResult(
+                    sessionId: "runtime-1",
+                    storedSessionId: "stored-1",
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            findBotChat: { _, _ in
+                [BotChatLookupRow(id: "stored-1", resolvedID: "runtime-1", title: "Bot Chat")]
+            }
+        )
+        let bot = makeBot(name: "Atlas", canonicalID: "stored-1")
+
+        // First launch: the user opens the bot's chat.
+        let first = makeBotHarness(reusing: defaults, lifecycleOperations: operations)
+        first.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        let openedOnFirstLaunch = await first.appState.openBotChat(for: bot)
+        XCTAssertTrue(openedOnFirstLaunch)
+        XCTAssertEqual(
+            first.store.lastSession(for: "default")?.scopeProfile,
+            "Atlas",
+            "the persisted scope keeps the profile's canonical spelling"
+        )
+
+        // Relaunch: a fresh process over the same defaults.
+        var resumedProfiles: [String?] = []
+        let relaunched = makeBotHarness(
+            reusing: defaults,
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in [self.makeSessionSummary(id: "ordinary-1", title: "Design review")] },
+                openSessionWithProfile: { _, id, _, profile in
+                    resumedProfiles.append(profile)
+                    return SessionResumeResult(
+                        sessionId: id,
+                        storedSessionId: id,
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in }
+            )
+        )
+        relaunched.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        relaunched.appState.clearBotChatRegistryForTesting()
+
+        await relaunched.appState.syncSession(
+            purpose: .preserveCurrent,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(
+            resumedProfiles,
+            ["Atlas"],
+            "the resume addresses the profile by its canonical name, never a case-folded one"
+        )
+        XCTAssertEqual(
+            relaunched.store.lastSession(for: "default")?.resumeProfileScope,
+            "Atlas"
+        )
+    }
+
+    /// A Bot Chat opened in THIS process is bot evidence even when the roster
+    /// never loaded: the runtime registry names the profile its RPCs ride.
+    func testProfileOwnershipRecognizesRuntimeRegistryWithoutRoster() async {
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            openSessionWithProfile: { _, _, _, _ in
+                SessionResumeResult(
+                    sessionId: "runtime-1",
+                    storedSessionId: "stored-1",
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            findBotChat: { _, _ in
+                [BotChatLookupRow(id: "stored-1", resolvedID: "runtime-1", title: "Bot Chat")]
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        let openedTheBotChat = await harness.appState.openBotChat(for: makeBot(name: "Atlas"))
+        XCTAssertTrue(openedTheBotChat)
+        XCTAssertTrue(harness.appState.botRoster.isEmpty, "no roster was ever loaded")
+
+        XCTAssertEqual(
+            harness.appState.profileOwnershipVerdictForTesting("Atlas"),
+            .botOwned,
+            "the registry's exact-cased bot profile is recognized"
+        )
+        XCTAssertEqual(
+            harness.appState.profileOwnershipVerdictForTesting("atlas"),
+            .botOwned,
+            "and case-insensitively, so a differently-cased push cannot slip past"
+        )
+    }
+
+    /// Without a usable roster, absence of bot evidence proves nothing: the
+    /// verdict must be `unverifiable`, never a default "ordinary".
+    func testProfileOwnershipIsUnverifiableWithoutUsableRosterEvidence() async {
+        var rosterLoaded = false
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            refreshContext: { _, _ in },
+            botRoster: { _ in
+                rosterLoaded = true
+                throw RpcError(code: 5000, message: "state.db is locked")
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        await harness.appState.refreshBotRoster()
+        XCTAssertTrue(rosterLoaded)
+        XCTAssertTrue(harness.appState.botRoster.isEmpty)
+
+        XCTAssertEqual(
+            harness.appState.profileOwnershipVerdictForTesting("analyst"),
+            .unverifiable,
+            "a failed probe must not read as 'not a bot'"
+        )
+
+        // A successfully loaded roster IS usable evidence: absence now means
+        // this profile is an ordinary workspace.
+        let known = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            refreshContext: { _, _ in },
+            botRoster: { _ in
+                BotRosterSnapshot(bots: [self.makeBot(name: "Atlas", canonicalID: "stored-1")], supportsBotProtocol: false)
+            }
+        ))
+        known.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        await known.appState.refreshBotRoster()
+
+        XCTAssertEqual(known.appState.profileOwnershipVerdictForTesting("analyst"), .ordinary)
+        XCTAssertEqual(known.appState.profileOwnershipVerdictForTesting("Atlas"), .botOwned)
+    }
+
+    /// The push path itself: a bot-owned target fails closed with the Bot Chat
+    /// message; a target whose ownership cannot be established fails closed
+    /// too (adopting it could hand a bot conversation the workspace's context);
+    /// and a verifiably ordinary workspace still proceeds to switch.
+    func testNotificationRoutingFailsClosedWithoutOwnershipEvidence() async {
+        var resumedIDs: [String] = []
+        let unresolved = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.makeSessionSummary(id: "ordinary-1", title: "Design review")] },
+            openSessionWithProfile: { _, id, _, _ in
+                resumedIDs.append(id)
+                return SessionResumeResult(
+                    sessionId: id,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            botRoster: { _ in
+                throw RpcError(code: 5000, message: "state.db is locked")
+            }
+        ))
+        let connection = HermesConnection(baseUrl: "https://one.example", ticket: "ticket")
+        unresolved.appState.client = HermesClient(connection: connection, profile: "default")
+        unresolved.appState.connection = connection
+        await unresolved.appState.refreshBotRoster()
+
+        let refused = await unresolved.appState.openNotificationTarget(
+            ConduitNotificationTarget(profile: "analyst", sessionId: "stored-1", type: "approval")
+        )
+
+        XCTAssertFalse(refused, "an unverifiable workspace is not adopted")
+        XCTAssertEqual(unresolved.appState.activeProfile, "default")
+        XCTAssertTrue(resumedIDs.isEmpty)
+        XCTAssertEqual(
+            unresolved.appState.errorMessage,
+            "Could not verify that workspace for this notification. Reconnect and try again."
+        )
+
+        // Verifiably ordinary: the guard lets the switch attempt through, so
+        // the failure (if any) is not the Bot Mode refusal.
+        let ordinaryTarget = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.makeSessionSummary(id: "ordinary-1", title: "Design review")] },
+            openSessionWithProfile: { _, id, _, _ in
+                resumedIDs.append(id)
+                return SessionResumeResult(
+                    sessionId: id,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            botRoster: { _ in
+                BotRosterSnapshot(bots: [self.makeBot(name: "Atlas", canonicalID: "stored-atlas")], supportsBotProtocol: false)
+            }
+        ))
+        ordinaryTarget.appState.client = HermesClient(connection: connection, profile: "default")
+        ordinaryTarget.appState.connection = connection
+        await ordinaryTarget.appState.refreshBotRoster()
+
+        XCTAssertEqual(
+            ordinaryTarget.appState.profileOwnershipVerdictForTesting("analyst"),
+            .ordinary
+        )
+        _ = await ordinaryTarget.appState.openNotificationTarget(
+            ConduitNotificationTarget(profile: "analyst", sessionId: "stored-1", type: "approval")
+        )
+        XCTAssertNotEqual(
+            ordinaryTarget.appState.errorMessage,
+            "This decision belongs to a Bot Chat. Open Bots to answer it.",
+            "an ordinary workspace is not refused as Bot Mode"
+        )
+        XCTAssertNotEqual(
+            ordinaryTarget.appState.errorMessage,
+            "Could not verify that workspace for this notification. Reconnect and try again.",
+            "and it is not refused for missing evidence either"
         )
     }
 

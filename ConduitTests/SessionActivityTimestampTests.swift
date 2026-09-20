@@ -20,6 +20,24 @@ final class SessionActivityTimestampTests: XCTestCase {
         XCTAssertEqual(milliseconds, 1_700_000_000)
     }
 
+    /// Every unit a gateway might report resolves to the same instant: a
+    /// single divide used to leave microsecond/nanosecond payloads in the
+    /// future and ranking "newest" forever.
+    func testMicrosecondAndNanosecondUnitsNormalizeToo() throws {
+        let seconds = try XCTUnwrap(
+            MessageNormalizer.sessionActivityTimestamp(in: ["last_active": .number(1_700_000_000)])
+        )
+        let micros = try XCTUnwrap(
+            MessageNormalizer.sessionActivityTimestamp(in: ["last_active": .number(1_700_000_000_000_000)])
+        )
+        let nanos = try XCTUnwrap(
+            MessageNormalizer.sessionActivityTimestamp(in: ["last_active": .number(1_700_000_000_000_000_000)])
+        )
+
+        XCTAssertEqual(micros, seconds)
+        XCTAssertEqual(nanos, seconds)
+    }
+
     func testNumericStringsAreAccepted() throws {
         XCTAssertEqual(
             try XCTUnwrap(

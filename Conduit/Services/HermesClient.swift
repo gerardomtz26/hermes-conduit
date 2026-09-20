@@ -1958,10 +1958,20 @@ enum MessageNormalizer {
         return nil
     }
 
+    /// A positive, finite epoch instant in SECONDS from whatever unit the
+    /// gateway reported. Gateways differ (and some have changed over time):
+    /// seconds are ~1.7e9, milliseconds ~1.7e12, microseconds ~1.7e15,
+    /// nanoseconds ~1.7e18. No real instant exceeds ~4e10 seconds (year 3300),
+    /// so scaling anything larger down by 1000 until it fits reads every unit
+    /// correctly — while a single divide (the old rule) left µs/ns payloads
+    /// ranking "newest" forever.
     private static func normalizedSessionTimestamp(_ timestamp: Double) -> TimeInterval? {
-        let seconds = timestamp > 10_000_000_000 ? timestamp / 1_000 : timestamp
-        // A non-finite value would rank "newest" forever.
-        guard seconds > 0, seconds.isFinite else { return nil }
+        guard timestamp.isFinite else { return nil }
+        var seconds = timestamp
+        while seconds > 40_000_000_000 {
+            seconds /= 1_000
+        }
+        guard seconds > 0 else { return nil }
         return seconds
     }
 
