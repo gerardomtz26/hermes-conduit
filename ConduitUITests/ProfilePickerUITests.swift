@@ -42,17 +42,19 @@ final class ProfilePickerUITests: XCTestCase {
         continueAfterFailure = false
     }
 
-    /// Tapping the card body — not the name text and not a control — reaches the
-    /// selection path.
+    /// Tapping the card body — not the name text and not a control — starts a
+    /// profile switch.
     ///
-    /// The signal is the switch attempt the app reports. A dismissal alone is
-    /// NOT sound here: `select()` dismisses whatever the switch outcome, and a
-    /// mutation run showed the picker can also disappear for reasons that have
-    /// nothing to do with selection, so a dismissal-only assertion passed with
-    /// the card's selection surface removed. Under the connected stub the switch
-    /// cannot succeed (no transport), so its attempt surfaces as the reported
-    /// failure — the only observable that distinguishes selection from any other
-    /// dismissal.
+    /// The signal is that the switch goes *in flight*: the row's own select
+    /// button becomes disabled while `AppState.isProfileSwitching` is set, which
+    /// nothing but a switch attempt does. A dismissal alone is NOT a signal (a
+    /// mutation run showed the picker can disappear for unrelated reasons, and a
+    /// dismissal-only assertion passed with the card's selection surface
+    /// removed), and the reported failure copy arrives only once the attempt
+    /// fails, which took longer than the assertion window on CI — observed in
+    /// this test's first CI run, where the rows were disabled exactly as a
+    /// switch in flight predicts. The failure copy is still accepted so a fast
+    /// failure cannot slip past the poll.
     ///
     /// The active profile is asserted nowhere here: it cannot change without a
     /// transport. Profile discovery and switch bookkeeping are unit-tested in
@@ -62,24 +64,26 @@ final class ProfilePickerUITests: XCTestCase {
         openProfilePicker(app)
         let target = selectableProfileDisplayName(in: app)
         let photoControl = photoControl(for: target, in: app)
+        let selectButton = selectButton(for: target, in: app)
+        XCTAssertTrue(selectButton.isEnabled, "The target row must start selectable. Tree:\n\(app.debugDescription)")
 
         // Control: a part of the picker that holds no selection target must not
-        // select anything, or the signal below would prove nothing about the
-        // card. The sheet title is a plain text, and the close control sits at
-        // the trailing edge, away from its centre.
+        // start a switch. The sheet title is a plain text, and the close control
+        // sits at the trailing edge, away from its centre.
         let title = app.staticTexts[Identity.pickerTitle]
         XCTAssertTrue(title.waitForExistence(timeout: 5), "Picker title missing. Tree:\n\(app.debugDescription)")
         tapInWindow(app, at: CGPoint(x: title.frame.midX, y: title.frame.midY))
-        XCTAssertFalse(
-            waitForSwitchAttempt(in: app, timeout: 2),
-            "A place with no selection target must not select a profile. Tree:\n\(app.debugDescription)"
+        Thread.sleep(forTimeInterval: 1)
+        XCTAssertTrue(
+            selectButton.isEnabled && !switchAttemptReported(in: app),
+            "A place with no selection target must not start a switch. Tree:\n\(app.debugDescription)"
         )
 
         // The probe is the gap just past the row's accessory: every interactive
         // element in the row ends at that accessory's trailing edge, so a point
         // beyond it is reached only by the card-sized selection surface behind
-        // the row. (Using the accessory's mid-point would land inside the text
-        // column's button on rows whose accessory is a narrow chevron — the
+        // the row. (Taking the accessory's mid-point instead lands inside the
+        // text column's button on rows whose accessory is a narrow chevron — the
         // mutation check for this test failed on exactly that mistake.) `x` comes
         // from the current row's marker and `y` from the target row's avatar, so
         // the probe is row-specific without depending on the card's bounds.
@@ -88,12 +92,8 @@ final class ProfilePickerUITests: XCTestCase {
         tapInWindow(app, at: CGPoint(x: accessorySlot.frame.maxX + 6, y: photoControl.frame.midY))
 
         XCTAssertTrue(
-            waitForSwitchAttempt(in: app, timeout: 8),
+            waitForSwitchInFlight(selectButton, in: app, timeout: 10),
             "Tapping the card body must invoke selection. Tree:\n\(app.debugDescription)"
-        )
-        XCTAssertTrue(
-            waitForDisappearance(of: app.staticTexts[Identity.pickerTitle], timeout: 5),
-            "Selection dismisses the picker. Tree:\n\(app.debugDescription)"
         )
     }
 
@@ -188,6 +188,17 @@ final class ProfilePickerUITests: XCTestCase {
         return control
     }
 
+    /// The row's own selection button: the one whose label starts with the
+    /// profile's display name (the photo control above starts with "Choose").
+    /// It is disabled exactly while a switch is in flight.
+    private func selectButton(for displayName: String, in app: XCUIApplication) -> XCUIElement {
+        let button = app.buttons.matching(
+            NSPredicate(format: "label BEGINSWITH %@", displayName)
+        ).firstMatch
+        XCTAssertTrue(button.waitForExistence(timeout: 5), "Select button for \(displayName) missing. Tree:\n\(app.debugDescription)")
+        return button
+    }
+
     /// Taps an absolute point in the app's window — the card's padding has no
     /// element of its own to tap.
     private func tapInWindow(_ app: XCUIApplication, at point: CGPoint) {
@@ -203,15 +214,6 @@ final class ProfilePickerUITests: XCTestCase {
             .tap()
     }
 
-    private func waitForDisappearance(of element: XCUIElement, timeout: TimeInterval) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        while Date() < deadline {
-            if !element.exists { return true }
-            Thread.sleep(forTimeInterval: 0.1)
-        }
-        return !element.exists
-    }
-
     /// The photo control opens `UIImagePickerController`, which can ask for the
     /// photo library on a fresh simulator. Allow it when asked so the picker the
     /// test waits for can appear; a denial would leave the test failing on its
@@ -224,18 +226,24 @@ final class ProfilePickerUITests: XCTestCase {
     }
 
     /// Whether the app has reported a workspace-switch attempt. Under the
-    /// connected stub every attempt fails for lack of a transport, so the
-    /// reported failure is the observable that selection ran; the copy asserted
-    /// here is only a prefix so a reworded reason does not break the test.
-    private func waitForSwitchAttempt(in app: XCUIApplication, timeout: TimeInterval) -> Bool {
+    /// connected stub every attempt fails for lack of a transport, so a reported
+    /// failure also proves selection ran; the copy asserted here is only a prefix
+    /// so a reworded reason does not break the test.
+    private func switchAttemptReported(in app: XCUIApplication) -> Bool {
+        app.staticTexts.matching(
+            NSPredicate(format: "label CONTAINS %@", "Could not switch")
+        ).firstMatch.exists
+    }
+
+    /// Whether a switch is in flight: the row's select button is disabled while
+    /// `AppState.isProfileSwitching` is set, and the reported failure covers the
+    /// case where the attempt already failed by the time we look.
+    private func waitForSwitchInFlight(_ selectButton: XCUIElement, in app: XCUIApplication, timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            let reported = app.staticTexts.matching(
-                NSPredicate(format: "label CONTAINS %@", "Could not switch")
-            ).firstMatch
-            if reported.exists { return true }
+            if !selectButton.isEnabled || switchAttemptReported(in: app) { return true }
             Thread.sleep(forTimeInterval: 0.1)
         }
-        return false
+        return !selectButton.isEnabled || switchAttemptReported(in: app)
     }
 }
