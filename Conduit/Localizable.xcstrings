@@ -15051,6 +15051,36 @@
         }
       }
     },
+    "This decision belongs to a Bot Chat. Open Bots to answer it." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此决定属于某个 Bot Chat。请打开 Bots 进行回答。"
+          }
+        }
+      }
+    },
+    "Could not verify that workspace for this notification. Reconnect and try again." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法为此通知核实该工作区。请重新连接后重试。"
+          }
+        }
+      }
+    },
+    "Could not tell this notification's workspace apart from a Bot Chat. Open Bots or the workspace list to continue." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法区分此通知所属的工作区与 Bot Chat。请打开 Bots 或工作区列表继续。"
+          }
+        }
+      }
+    },
     "Could not load bots." : {
       "localizations" : {
         "zh-Hans" : {

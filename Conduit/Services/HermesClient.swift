@@ -1917,6 +1917,7 @@ enum MessageNormalizer {
                 title: obj["title"]?.stringValue ?? obj["preview"]?.stringValue ?? AppLocalization.string("Untitled conversation"),
                 model: obj["model"]?.stringValue ?? "Hermes",
                 updatedLabel: sessionUpdatedLabel(in: obj),
+                lastActivityAt: sessionActivityTimestamp(in: obj),
                 profile: explicitProfile ?? profile,
                 source: classifySource(obj),
                 isActive: false,
@@ -1927,12 +1928,65 @@ enum MessageNormalizer {
         }
     }
 
+    /// The ordering instant for a session row, so restoration can rank
+    /// conversations by ACTUAL activity instead of list position. It reads the
+    /// same key list `sessionUpdatedLabel` walks, and deliberately DIVERGES
+    /// from it on one point: that function falls through to a weaker field
+    /// when a value cannot be formatted, while this returns nil, because an
+    /// instant taken from a different field than the one the gateway reported
+    /// ranks a row by a moment it does not describe. Units are normalized to
+    /// epoch seconds (s/ms/µs/ns).
+    ///
+    /// The FIRST field the gateway reports is authoritative activity: when it
+    /// is present but carries no machine-readable instant (a localized date
+    /// string, a placeholder, a non-scalar), the row has NO ordering evidence
+    /// and this returns nil. Scanning weaker fields would substitute a
+    /// DIFFERENT instant for the one the gateway chose — a wrong-but-plausible
+    /// value ranks a row it does not describe, which is worse than ranking it
+    /// behind every dated row. Only a MISSING or null field falls through to
+    /// the next key.
+    static func sessionActivityTimestamp(in object: [String: AnyCodable]) -> TimeInterval? {
+        for key in sessionActivityKeys {
+            guard let value = object[key], value != .null else { continue }
+            switch value {
+            case .number(let timestamp):
+                return normalizedSessionTimestamp(timestamp)
+            case .string(let text):
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let timestamp = Double(trimmed) else { return nil }
+                return normalizedSessionTimestamp(timestamp)
+            default:
+                return nil
+            }
+        }
+        return nil
+    }
+
+    /// A positive, finite epoch instant in SECONDS from whatever unit the
+    /// gateway reported. Gateways differ (and some have changed over time):
+    /// seconds are ~1.7e9, milliseconds ~1.7e12, microseconds ~1.7e15,
+    /// nanoseconds ~1.7e18. No real instant exceeds ~4e10 seconds (year 3300),
+    /// so scaling anything larger down by 1000 until it fits reads every unit
+    /// correctly — while a single divide (the old rule) left µs/ns payloads
+    /// ranking "newest" forever.
+    private static func normalizedSessionTimestamp(_ timestamp: Double) -> TimeInterval? {
+        guard timestamp.isFinite else { return nil }
+        var seconds = timestamp
+        while seconds > 40_000_000_000 {
+            seconds /= 1_000
+        }
+        guard seconds > 0 else { return nil }
+        return seconds
+    }
+
+    private static let sessionActivityKeys = [
+        "last_active", "lastActive", "updated_at", "updatedAt", "updated",
+        "last_message_at", "lastMessageAt", "latest_message_at", "latestMessageAt",
+        "modified_at", "modifiedAt", "created_at", "createdAt", "timestamp", "time"
+    ]
+
     private static func sessionUpdatedLabel(in object: [String: AnyCodable]) -> String {
-        let keys = [
-            "last_active", "lastActive", "updated_at", "updatedAt", "updated",
-            "last_message_at", "lastMessageAt", "latest_message_at", "latestMessageAt",
-            "modified_at", "modifiedAt", "created_at", "createdAt", "timestamp", "time"
-        ]
+        let keys = sessionActivityKeys
 
         for key in keys {
             guard let value = object[key], value != .null else { continue }
@@ -1954,7 +2008,11 @@ enum MessageNormalizer {
     }
 
     private static func formattedSessionTimestamp(_ timestamp: Double) -> String {
-        let seconds = timestamp > 10_000_000_000 ? timestamp / 1_000 : timestamp
+        // The SAME unit normalization the ordering instant uses: a µs/ns
+        // payload must not display one date and rank by another.
+        guard let seconds = normalizedSessionTimestamp(timestamp) else {
+            return String(timestamp)
+        }
         let date = Date(timeIntervalSince1970: seconds)
         guard date.timeIntervalSince1970 > 0 else { return String(timestamp) }
         if Calendar.current.isDateInToday(date) {

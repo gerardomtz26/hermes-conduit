@@ -313,7 +313,13 @@ enum BotChatHygiene {
         let rowIDs = Set([row.id, row.storedSessionId].compactMap { $0 } + row.alternateIds)
         for bot in roster {
             if let canonical = bot.canonicalSession {
-                if rowIDs.contains(canonical.id) { return true }
+                // Trimmed like `SessionBotOwnership` builds its registry ids, so
+                // the hygiene rule and the ownership verdict cannot disagree about
+                // a whitespace-padded server id.
+                if let canonicalID = ChatScrollIdentityNormalization.sessionID(canonical.id),
+                   rowIDs.contains(canonicalID) {
+                    return true
+                }
                 if let resolved = canonical.resolvedID?
                     .trimmingCharacters(in: .whitespacesAndNewlines),
                     !resolved.isEmpty, rowIDs.contains(resolved) {
@@ -324,7 +330,14 @@ enum BotChatHygiene {
             if title == BotMode.canonicalChatTitle,
                let owner = row.profile?
                    .trimmingCharacters(in: .whitespacesAndNewlines),
-               !owner.isEmpty, owner == bot.name {
+               !owner.isEmpty,
+               // Case-insensitive, matching `ownsProfile` and the resume-scope
+               // resolution: a mixed-case bot profile ("Atlas") whose row is
+               // stamped "atlas" is still that bot's canonical chat, and two
+               // hygiene checks disagreeing about it is the latent trap.
+               owner.caseInsensitiveCompare(
+                   bot.name.trimmingCharacters(in: .whitespacesAndNewlines)
+               ) == .orderedSame {
                 return true
             }
         }
@@ -337,15 +350,20 @@ enum BotChatHygiene {
     /// never mutated, and ordinary list presentation keeps exactly the
     /// hygiene it had.
     ///
-    /// Two independent signals, because they cover different moments:
+    /// Three independent signals, because they cover different moments:
     ///
     /// 1. `isCanonicalBotChatRow` — registry evidence, when a roster is
     ///    loaded (a bot's canonical ids, or the reserved title stamped on
     ///    that bot's profile).
     /// 2. the reserved exact title ALONE, which is load-bearing rather than
-    ///    redundant: at cold launch `botRoster` is empty, so registry
-    ///    evidence cannot fire, and a stale/legacy visible row wearing the
-    ///    canonical title would otherwise be the newest candidate.
+    ///    redundant: a stale/legacy visible row would otherwise be the
+    ///    newest candidate, and the row's own profile stamp may name a bot
+    ///    this client does not list.
+    /// 3. `botOwnedSessionIDs` — positive bot ownership resolved by the
+    ///    caller from the roster's canonical registries AND this process's
+    ///    bot-chat registry. This is what catches a canonical row whose title
+    ///    no longer names the canonical chat (a compaction moved the
+    ///    conversation to a lineage tip) or whose profile stamp is missing.
     ///
     /// Selecting a canonical row builds the dashboard workspace's active
     /// conversation, cold-restore selection, and persisted title from a
@@ -353,11 +371,37 @@ enum BotChatHygiene {
     /// be unselectable here regardless of client-side registry state.
     static func ordinaryResumeCandidates(
         _ rows: [SessionSummary],
-        roster: [BotProfile]
+        roster: [BotProfile],
+        botOwnedSessionIDs: Set<String> = []
     ) -> [SessionSummary] {
         rows.filter { row in
-            !isCanonicalBotChatRow(row, roster: roster) && !isReservedCanonicalTitleRow(row)
+            guard !isCanonicalBotChatRow(row, roster: roster),
+                  !isReservedCanonicalTitleRow(row) else { return false }
+            return !isBotOwnedRow(row, botOwnedSessionIDs: botOwnedSessionIDs)
         }
+    }
+
+    /// Row-level form of the ownership rule: a conversation the client
+    /// positively attributes to Bot Mode, under ANY of its identities — the
+    /// runtime id, the durable row, an alias, or the LINEAGE ROOT a compaction
+    /// moved the conversation off of (a listing can link the tip row to the
+    /// canonical registry only through that root). The caller supplies the
+    /// evidence set (`SessionBotOwnership.botOwnedIDs`), so the sessions
+    /// surface and the resume selection can never disagree about which rows are
+    /// a bot's forever chat.
+    static func isBotOwnedRow(
+        _ row: SessionSummary,
+        botOwnedSessionIDs: Set<String>
+    ) -> Bool {
+        guard !botOwnedSessionIDs.isEmpty else { return false }
+        if botOwnedSessionIDs.contains(row.id) { return true }
+        if let stored = row.storedSessionId, botOwnedSessionIDs.contains(stored) {
+            return true
+        }
+        if let root = row.lineageRootId, botOwnedSessionIDs.contains(root) {
+            return true
+        }
+        return row.alternateIds.contains { botOwnedSessionIDs.contains($0) }
     }
 
     /// The roster-independent half of the reservation: a row titled exactly

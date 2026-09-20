@@ -32,6 +32,18 @@ typealias ChatResumeReconnectScheduler = @MainActor (
     _ operation: @escaping @MainActor () async -> Void
 ) -> ChatResumeReconnectCancellation
 
+/// What the client can prove about a profile that a decision wants to make the
+/// dashboard workspace. `unverifiable` is not "ordinary by default": the caller
+/// decides, and the push-routing path fails closed on it.
+enum ProfileOwnershipVerdict: Equatable {
+    /// Positively a bot's own profile (roster, or a known Bot Chat's scope).
+    case botOwned
+    /// Verified not to be a bot: the roster loaded and does not name it.
+    case ordinary
+    /// No usable evidence either way.
+    case unverifiable
+}
+
 struct ChatResumeLifecycleOperations {
     typealias BranchResult = (sessionId: String, storedSessionId: String?, profile: String?)
 
@@ -104,6 +116,10 @@ struct ChatResumeLifecycleOperations {
     var loadBusyInputMode: (@MainActor (HermesClient) async -> Void)?
     var loadProfileDisplayPreferences: (@MainActor () async -> Void)?
     var loadSlashCommands: (@MainActor () async -> Void)?
+    /// Bot Mode's connect-time roster/registry load. Tests substitute it so a
+    /// harness never reaches the network for bot evidence; production runs the
+    /// ordinary `refreshBotRoster()` (single-flight, epoch-fenced).
+    var loadBotRoster: (@MainActor () async -> Void)?
     var compressSession: (@MainActor (
         HermesClient,
         String,
@@ -168,6 +184,7 @@ struct ChatResumeLifecycleOperations {
         loadBusyInputMode: (@MainActor (HermesClient) async -> Void)? = nil,
         loadProfileDisplayPreferences: (@MainActor () async -> Void)? = nil,
         loadSlashCommands: (@MainActor () async -> Void)? = nil,
+        loadBotRoster: (@MainActor () async -> Void)? = nil,
         compressSession: (@MainActor (
             HermesClient,
             String,
@@ -205,6 +222,7 @@ struct ChatResumeLifecycleOperations {
         self.loadBusyInputMode = loadBusyInputMode
         self.loadProfileDisplayPreferences = loadProfileDisplayPreferences
         self.loadSlashCommands = loadSlashCommands
+        self.loadBotRoster = loadBotRoster
         self.compressSession = compressSession
         self.botRoster = botRoster
         self.findBotChat = findBotChat
@@ -777,10 +795,21 @@ final class AppState: ObservableObject {
     /// render under another workspace while a switch is in flight. Canonical
     /// Bot Chats are projected out here (never in the identity machinery's
     /// own catalog views): they are reachable only through the Bots roster.
+    /// The projection hides a row when it is canonical to the ROSTER (a
+    /// canonical id, or the reserved title stamped with a known bot's
+    /// profile) or when positive bot ownership names it under any identity —
+    /// including a lineage tip whose title moved on.
+    ///
+    /// The unconditional reserved-TITLE rule is deliberately NOT applied to
+    /// this LISTING (only to resume selection): a row titled "Bot Chat" that
+    /// no roster evidence reserves is an ordinary conversation the user can
+    /// still see and open (see `BotChatHygiene.isReservedCanonicalTitleRow`).
     var activeProfileSessions: [SessionSummary] {
-        sessions.filter {
+        let botOwned = botOwnedSessionIDs
+        return sessions.filter {
             sessionBelongsToProfile($0, profile: activeProfile)
                 && !BotChatHygiene.isCanonicalBotChatRow($0, roster: botRoster)
+                && !BotChatHygiene.isBotOwnedRow($0, botOwnedSessionIDs: botOwned)
         }
     }
 
@@ -797,7 +826,9 @@ final class AppState: ObservableObject {
     @Published private(set) var botModePhase: BotModePhase = .idle
     /// The read-only roster. Hermes remains authoritative; nothing bot-related
     /// is durably persisted client-side.
-    @Published private(set) var botRoster: [BotProfile] = []
+    @Published private(set) var botRoster: [BotProfile] = [] {
+        didSet { invalidateBotOwnershipCache() }
+    }
     @Published private(set) var isRefreshingBotRoster = false
     /// Bumped at every server-identity boundary; responses captured under an
     /// older epoch are dropped, so a stale async roster can never overwrite
@@ -838,6 +869,15 @@ final class AppState: ObservableObject {
     /// session-destroyed event), a bounded cleanup could hook there —
     /// none exists today, so correctness wins over the small dictionary.
     private var botChatSessionProfiles: [String: String] = [:]
+    /// The bot's display label per canonical-chat session id — the title a
+    /// restored Bot Chat presents. Runtime-only like the registry above (same
+    /// lifetime: entries are kept until the server-identity boundary, with no
+    /// per-session eviction, because a late lifecycle event can still arrive
+    /// addressed to an id that is no longer live), and
+    /// persisted into a `SessionReference`'s `botLabel` when the conversation
+    /// becomes the workspace's last-selected one, so a cold launch can show
+    /// the bot's name before the roster has loaded.
+    private var botChatSessionLabels: [String: String] = [:]
     /// One resolve/create/open flight per bot name: double-tapping a row must
     /// not mint two canonical chats (upstream `canonicalCreations`). The box
     /// exists so a stale flight's cleanup can never evict a newer flight's
@@ -847,6 +887,145 @@ final class AppState: ObservableObject {
         var task: Task<Bool, Never>?
     }
     private var botChatOpenFlights: [String: BotChatOpenFlight] = [:]
+
+    /// Every id the client can POSITIVELY attribute to Bot Mode right now: the
+    /// roster's canonical registry (id + lineage tip) and the runtime
+    /// registry. Restoration and sessions-list hygiene both read this instead
+    /// of re-deriving the rule, so they can never disagree about whether an id
+    /// belongs to a bot's forever chat.
+    /// Derived once per evidence change. Both of its sources are cold paths
+    /// (a roster refresh, a bot-chat open), while its readers are hot: the
+    /// sidebar projection runs on render and `presentationProfile(for:)` runs
+    /// on every stream/tool/approval event, and the registry keeps aliases for
+    /// the process lifetime — so rebuilding the value per read would scan a
+    /// growing roster on the event path.
+    private var cachedBotOwnership: (generation: Int, ownership: SessionBotOwnership)?
+    private var botOwnershipGeneration = 0
+
+    /// Whether the roster on hand was verified since the CURRENT connection
+    /// began. Cleared whenever a connection (or reconnect) is established, so
+    /// absence evidence can never outlive the socket that produced it.
+    private var botRosterVerifiedForCurrentConnection = false
+
+    private func invalidateBotOwnershipCache() {
+        botOwnershipGeneration &+= 1
+    }
+
+    private var botOwnership: SessionBotOwnership {
+        if let cached = cachedBotOwnership, cached.generation == botOwnershipGeneration {
+            return cached.ownership
+        }
+        let ownership = SessionBotOwnership(
+            roster: botRoster,
+            registryProfiles: botChatSessionProfiles
+        )
+        cachedBotOwnership = (botOwnershipGeneration, ownership)
+        return ownership
+    }
+
+    private var botOwnedSessionIDs: Set<String> {
+        botOwnership.botOwnedIDs
+    }
+
+    /// Whether bot evidence can be READ right now: a roster the SERVER confirmed
+    /// on the CURRENT connection, or a gateway that cannot host bots at all. A
+    /// failed, pending, or inherited-from-a-previous-connection roster leaves
+    /// evidence unavailable, which is what makes an unverified reference
+    /// non-authoritative (see `profileOwnershipVerdict`, which draws the same
+    /// line for cross-profile routing).
+    private var botEvidenceIsAvailable: Bool {
+        botModePhase == .gatewayUnsupported
+            || (botModePhase == .available && botRosterVerifiedForCurrentConnection)
+    }
+
+    /// Refuses a push whose target is bot-owned, with copy that matches how
+    /// confident the match is: ownership folds case, so an exact spelling IS that
+    /// bot's profile while a case-only match may be an unrelated workspace that
+    /// merely shares the name. Both refusal sites use this, so the copy cannot
+    /// depend on which check happened to fire first.
+    private func refuseBotOwnedRouting(for profile: String) {
+        let exact = botOwnership.botProfileMatch(for: profile)?.isExact ?? true
+        errorMessage = exact
+            ? AppLocalization.string(
+                "This decision belongs to a Bot Chat. Open Bots to answer it."
+            )
+            : AppLocalization.string(
+                "Could not tell this notification's workspace apart from a Bot Chat. Open Bots or the workspace list to continue."
+            )
+    }
+
+    /// What the client can PROVE about a profile a decision wants to switch the
+    /// dashboard to. A profile name alone proves nothing: bots are ordinary
+    /// Hermes profiles, so only bot evidence (or its verified absence)
+    /// distinguishes a workspace from a bot.
+    private func profileOwnershipVerdict(for profile: String) -> ProfileOwnershipVerdict {
+        // Positive evidence first, whatever the capability phase says.
+        if botOwnership.ownsProfile(profile) { return .botOwned }
+        if botModePhase == .gatewayUnsupported {
+            // `profiles.list` IS the Bot Mode capability probe: a gateway that
+            // does not implement it has no Bot Mode, so no profile on it can be
+            // a bot's — refusing every cross-profile route here would break
+            // working routing (profiles are discovered over the HTTP bridge,
+            // not this RPC) to protect against bots that cannot exist.
+            return .ordinary
+        }
+        // Refusal is case-INsensitive on purpose, and asymmetric on purpose: two
+        // Hermes profiles can differ only by case on a case-sensitive host, but
+        // refusing a workspace switch is recoverable and visible ("Open Bots…"),
+        // while adopting a bot's profile as the dashboard workspace is the
+        // failure this path exists to prevent. Audit both directions before
+        // changing this to an exact match.
+        // Absence means something only when evidence was VERIFIED for this
+        // connection: a roster retained across a failed refresh, a reconnect,
+        // or a pending probe is stale in the one direction that matters here —
+        // a bot registered since the last successful answer would be missing
+        // from it and would read as an ordinary workspace. Same predicate as the
+        // resume path (`botEvidenceIsAvailable`), so the two cannot drift.
+        return botEvidenceIsAvailable ? .ordinary : .unverifiable
+    }
+
+    /// The bot profile a conversation's RPCs must ride, from every source of
+    /// authority the process has, in order: this process's bot-chat registry
+    /// (it opened the conversation and recorded the scope), the roster's
+    /// canonical registries, and finally the durable reference the open
+    /// persisted — the only authority for a conversation opened in an EARLIER
+    /// process, before the connect-time roster load has an answer.
+    ///
+    /// Nil means an ordinary conversation of the dashboard profile. The
+    /// registry alone is not enough: it is cleared at every server-identity
+    /// boundary and empty after a relaunch, and resolving a bot chat's scope
+    /// as the dashboard profile addresses the wrong store.
+    private func botScopeProfile(
+        forSessionIDs sessionIDs: Set<String>,
+        workspaceProfile: String? = nil
+    ) -> String? {
+        let identityIDs = Set(sessionIDs.compactMap { ChatScrollIdentityNormalization.sessionID($0) })
+        guard !identityIDs.isEmpty else { return nil }
+        // Registry first, as a plain dictionary lookup: this runs on the
+        // presentation path (every stream event resolves a namespace), and
+        // building the ownership value there would re-scan the roster for
+        // each event. The roster is consulted only on a miss.
+        // The fast path answers from this process's own observation, but only
+        // while there is no roster to be authoritative about spelling: a scope
+        // persisted by a build that case-folded it must not outlive the
+        // roster's verbatim `bot.name` (see `botProfileName`).
+        if botRoster.isEmpty {
+            for id in identityIDs.sorted() {
+                if let scope = botChatSessionProfiles[id] { return scope }
+            }
+        }
+        if let rosterScope = botOwnership.botProfileName(owningAny: identityIDs) {
+            return rosterScope
+        }
+        // The durable reference is recorded per WORKSPACE profile, and this is
+        // called while opening a conversation that may not be the active one
+        // yet (a transition), so the caller names the workspace it is acting
+        // in rather than relying on `activeProfile`.
+        guard let reference = chatResumeCoordinator.lastSession(for: workspaceProfile ?? activeProfile),
+              reference.kind == .bot,
+              identityIDs.contains(reference.sessionID) else { return nil }
+        return reference.resumeProfileScope
+    }
 
     /// Kept as a computed compatibility surface for views that only need the
     /// currently-running flag. New code should use `turnState` for actions.
@@ -1700,8 +1879,20 @@ final class AppState: ObservableObject {
 
     func restoreActiveSessionState(for profile: String) {
         clearPendingDecisionRestorationGuard()
-        activeSessionId = chatResumeCoordinator.lastSessionID(for: profile)
-        activeSessionTitle = activeSessionTitlesByProfile[profile] ?? AppLocalization.string("New conversation")
+        // The stored reference's KIND decides how its conversation restores.
+        // Positive bot evidence reclassifies a legacy id-only reference (every
+        // install upgrading from a build that could not record the kind), so a
+        // Bot Chat written there before this build is not adopted as an
+        // ordinary conversation of the workspace; with no evidence the
+        // reference keeps its recorded kind and restores exactly as before.
+        let reference = chatResumeCoordinator.lastSession(for: profile).map { stored in
+            chatResumeCoordinator.reclassifySession(
+                stored,
+                for: profile,
+                ownership: botOwnership
+            )
+        }
+        adoptSessionReference(reference, for: profile)
     }
 
     private func restorePinnedSessions(for profile: String) {
@@ -1765,27 +1956,33 @@ final class AppState: ObservableObject {
         restoredPendingDecisionCardsAwaitingConfirmation = nil
     }
 
+    /// Adopts a conversation as the active one and records it as the
+    /// workspace's stored selection — WITH its kind, resolved from the bot
+    /// registry and the conversation's own identities. Every adoption path
+    /// (open, resume, rebind, restore) goes through here, so a Bot Chat can
+    /// never be recorded as an ordinary conversation of whatever workspace
+    /// happened to be active.
     private func setActiveSessionState(
         id: String?,
-        title: String? = nil,
-        recordsResumeSelection: Bool = true
+        title: String? = nil
     ) {
         if activeSessionId != id {
             clearPendingDecisionRestorationGuard()
             resetResponseHapticTurn()
         }
         activeSessionId = id
-        if recordsResumeSelection {
-            if let persistedID = ChatSessionPersistenceIdentity.canonicalID(
-                for: id,
-                identity: activeChatScrollSessionIdentity,
-                catalog: sessions + cronSessions,
-                activeProfile: activeProfile
-            ) {
-                chatResumeCoordinator.rememberSessionID(persistedID, for: activeProfile)
-            } else {
-                chatResumeCoordinator.rememberSessionID(nil, for: activeProfile)
-            }
+        if let persistedID = ChatSessionPersistenceIdentity.canonicalID(
+            for: id,
+            identity: activeChatScrollSessionIdentity,
+            catalog: sessions + cronSessions,
+            activeProfile: activeProfile
+        ) {
+            chatResumeCoordinator.rememberSession(
+                sessionReference(forPersistedID: persistedID, activeSessionID: id),
+                for: activeProfile
+            )
+        } else {
+            chatResumeCoordinator.rememberSession(nil, for: activeProfile)
         }
         if let title {
             activeSessionTitle = title
@@ -1798,6 +1995,168 @@ final class AppState: ObservableObject {
         activeSessionTitle = title
         activeSessionTitlesByProfile[activeProfile] = title
         persistActiveSessionTitles()
+    }
+
+    // MARK: - Session references (durable conversation identity)
+
+    /// The typed reference for a conversation being selected. The kind decides
+    /// how the selection is restored later, so it is resolved from EVERY
+    /// identity the conversation currently answers to — the id being persisted,
+    /// the active id, and the scroll identity's confirmed aliases — never from
+    /// the persisted id alone. A resume can rotate the runtime id, and the
+    /// rotated id is registered by the reconcile that adopted it; judging by a
+    /// single id would let a Bot Chat be recorded as an ordinary conversation
+    /// of whatever workspace happened to be active.
+    private func sessionReference(
+        forPersistedID persistedID: String,
+        activeSessionID: String?
+    ) -> SessionReference {
+        // ONLY ids that positively belong to the conversation being recorded.
+        // Everything else here would classify a foreign conversation:
+        // - the scroll identity's alias set is deliberately widened when a
+        //   resume continues the conversation it replaced;
+        // - `reconciliation.requestedSessionId` is the PREVIOUS conversation's
+        //   id during an open (the boundary is taken before the new id lands).
+        // A rotated runtime id is still covered: it is the active id by the time
+        // this runs, and the reconcile publishes it as `resolvedSessionId`.
+        let candidates = Set([persistedID, activeSessionID, reconciliation?.resolvedSessionId]
+            .compactMap { $0 })
+        let ownership = botOwnership
+        if let botProfile = ownership.botProfileName(owningAny: candidates) {
+            // The label captured when the conversation was opened wins over
+            // the roster's current label: the open applied that string to the
+            // visible surface, and a roster refresh must not silently rename
+            // the restored conversation.
+            // Ordered candidates, never the Set's iteration order: two
+            // identities of one conversation can carry different captured
+            // labels, and the restored title must not vary by launch.
+            let orderedCandidates = [persistedID, activeSessionID]
+                .compactMap { $0 }
+                .reduce(into: candidates.sorted()) { result, id in
+                    result.removeAll { $0 == id }
+                    result.insert(id, at: 0)
+                }
+            let captured = orderedCandidates
+                .compactMap { ChatScrollIdentityNormalization.sessionID($0) }
+                .compactMap { botChatSessionLabels[$0] }.first?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let rosterLabel = ownership.bot(owningAny: candidates)?.displayLabel
+            return .bot(
+                botName: botProfile,
+                label: (captured?.isEmpty == false ? captured : nil) ?? rosterLabel,
+                sessionID: persistedID
+            )
+        }
+        // A `.dashboard` write made while bot evidence is UNREADABLE is not a
+        // verified ordinary conversation: a bot chat can be sitting in the
+        // workspace store during a failed/pending probe, and recording it as
+        // typed would let the next launch trust that classification for good.
+        // It is recorded as unverified instead, so the authority gates apply to
+        // it exactly as they do to a migrated id — and `referenceIfBot` heals it
+        // in the one direction that matters once evidence returns.
+        return .dashboard(
+            profile: activeProfile,
+            sessionID: persistedID,
+            isUnverified: !botEvidenceIsAvailable
+        )
+    }
+
+    /// Every identity that can be positively linked to a stored reference
+    /// right now: the current scroll identity's confirmed aliases, plus every
+    /// id of the catalog row the reference resolves to (including its lineage
+    /// root). Bot evidence can live on any of them — a compaction tip or a
+    /// rotated runtime is a perfectly normal place for it — while the stored
+    /// value names the durable row.
+    /// Evidence is taken from the catalog ROW that names the stored id: the
+    /// row's own ids are positive provenance. The scroll identity's aliases
+    /// are deliberately NOT used here — it unions the aliases of the
+    /// conversation a resume continues, and a foreign bot id must never heal
+    /// an ordinary conversation into Bot Mode.
+    static func aliasesForStoredReference(
+        _ reference: SessionReference?,
+        catalog: [SessionSummary]
+    ) -> Set<String> {
+        guard let sessionID = reference?.sessionID else { return [] }
+        var aliases = Set<String>()
+        if let row = catalog.first(where: { session in
+            session.id == sessionID
+                || session.storedSessionId == sessionID
+                || session.alternateIds.contains(sessionID)
+                || session.lineageRootId == sessionID
+        }) {
+            aliases.formUnion([row.id, row.storedSessionId, row.lineageRootId].compactMap { $0 })
+            aliases.formUnion(row.alternateIds)
+        }
+        aliases.remove(sessionID)
+        return aliases
+    }
+
+    /// Adopts a restored reference as the active conversation. A Bot Mode
+    /// reference re-registers its runtime identity BEFORE anything resumes, so
+    /// the follow-up sync addresses the BOT's profile store, presents the
+    /// bot's label, and never writes the dashboard's title cache — while an
+    /// ordinary conversation restores exactly as it always did.
+    private func adoptSessionReference(
+        _ reference: SessionReference?,
+        for profile: String
+    ) {
+        guard let reference else {
+            activeSessionId = nil
+            activeSessionTitle = activeSessionTitlesByProfile[profile]
+                ?? AppLocalization.string("New conversation")
+            return
+        }
+        switch reference.kind {
+        case .dashboard:
+            activeSessionId = reference.sessionID
+            activeSessionTitle = activeSessionTitlesByProfile[profile]
+                ?? AppLocalization.string("New conversation")
+        case .bot:
+            noteBotChatSession(
+                reference.sessionID,
+                profile: reference.botName ?? reference.scopeProfile,
+                label: reference.botLabel
+            )
+            activeSessionId = reference.sessionID
+            activeSessionTitle = Self.botConversationTitle(for: reference)
+        }
+    }
+
+    /// The header title for a restored Bot Chat. The bot's display label when
+    /// the reference carries one, else the BOT PROFILE NAME — the same
+    /// last-resort fallback `BotProfile.displayLabel` uses. Never the reserved
+    /// wire title: that constant is an identity used for the exact-title lookup,
+    /// not a user-facing string, and it would tell the user nothing about which
+    /// bot they are looking at.
+    static func botConversationTitle(for reference: SessionReference) -> String {
+        let label = reference.botLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !label.isEmpty { return label }
+        let name = (reference.botName ?? reference.scopeProfile)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return name.isEmpty ? AppLocalization.string("New conversation") : name
+    }
+
+    /// Registers a Bot Mode reference's identity so the conversation resolves
+    /// through the bot's profile for the rest of the process. Idempotent, and
+    /// deliberately never writes the dashboard profile's title cache: the
+    /// reserved wire title is an identity, not a user-facing dashboard title.
+    private func registerBotSessionReference(_ reference: SessionReference) {
+        guard reference.kind == .bot else { return }
+        noteBotChatSession(
+            reference.sessionID,
+            profile: reference.botName ?? reference.scopeProfile,
+            label: reference.botLabel
+        )
+    }
+
+    /// Shows the bot's name for a restored Bot Chat. The label is
+    /// conversation presentation (the bot's display label, never the reserved
+    /// wire title) and stays out of the workspace's persisted title cache.
+    private func applyBotSessionLabel(_ reference: SessionReference) {
+        guard reference.kind == .bot else { return }
+        // Same resolver as the relaunch path, so a Bot Chat cannot show one
+        // title when restored and another when re-adopted.
+        activeSessionTitle = Self.botConversationTitle(for: reference)
     }
 
     private func persistActiveSessionTitles() {
@@ -2399,7 +2758,8 @@ final class AppState: ObservableObject {
         sessionYoloStore.clearAllOverrides()
         // Bot Mode state is per-server: the roster, the capability phase, and
         // the in-memory bot-chat profile registry all describe the outgoing
-        // gateway and are re-probed when the Bots surface is next opened.
+        // gateway. The next connection re-probes them before it decides which
+        // conversation this workspace was in.
         invalidateBotModeState()
         return true
     }
@@ -2410,8 +2770,10 @@ final class AppState: ObservableObject {
     /// mutate state against the outgoing server.
     private func invalidateBotModeState() {
         botRosterEpoch += 1
+        botRosterVerifiedForCurrentConnection = false
         botChatOpenFlights.values.forEach { $0.task?.cancel() }
         botChatSessionProfiles.removeAll()
+        botChatSessionLabels.removeAll()
         botChatOpenFlights.removeAll()
         botRoster = []
         botRosterRefreshToken = nil
@@ -2973,8 +3335,17 @@ final class AppState: ObservableObject {
             reconnectAttempts = 0
             connectedAt = Date()
             KeychainHelper.saveConnection(conn, dashboardID: adoptedDashboardID)
+            botRosterVerifiedForCurrentConnection = false
 
-            await loadChatResumeProfiles()
+            // Bot Mode evidence must exist before the sync below decides which
+            // conversation this workspace was in — loaded CONCURRENTLY with
+            // the profile list so the decision never pays two round trips.
+            async let profilesLoad: Void = loadChatResumeProfiles()
+            async let rosterLoad: Void = loadChatResumeBotRoster()
+            _ = await (profilesLoad, rosterLoad)
+            // One continuation guard covers both loads: it re-reads the
+            // continuation AFTER the suspension, so a superseded transport is
+            // caught here without a second, identical evaluation.
             guard let continuation = transportContinuation(
                 purpose: continuationPurpose,
                 automaticWorkToken: continuationAutomaticWorkToken,
@@ -3994,25 +4365,114 @@ final class AppState: ObservableObject {
             // A canonical Bot Chat is reserved presentation state reachable
             // only through the Bots roster: it must never be chosen as this
             // workspace's ordinary resume target. Selection-only — the
-            // published catalog above stays raw — and deliberately
-            // roster-INDEPENDENT, because a cold launch has no roster yet and
-            // a stale visible canonical row would otherwise be the newest
-            // candidate, making itself the active conversation, the
-            // cold-restore selection, and the persisted title's source.
+            // published catalog above stays raw. Two independent signals:
+            // the reserved title (which needs no roster, so a cold launch is
+            // covered) and positive bot ownership (the roster's canonical
+            // registries plus this process's bot-chat registry, which cover a
+            // row whose title no longer names the canonical chat).
+            // The saved reference's KIND decides how it may be restored. A Bot
+            // Mode conversation is not this workspace's conversation: seeding
+            // its bot scope first makes the resume below address the BOT's
+            // profile store, carry the bot's label, and never claim the
+            // dashboard profile's persisted title — while the reserved-title
+            // and ownership filters keep the ordinary selection from ever
+            // adopting it. Under "jump to latest activity" the user opted out
+            // of "where I left off" entirely, so Bot Mode is never entered
+            // automatically.
+            // The stored reference's kind (with positive evidence healing a
+            // legacy id-only record) plus any identity the catalog links to it
+            // — a compaction or runtime rebind can leave the bot evidence on
+            // an ALIAS of the stored id, so the union is consulted here just
+            // as it is when recording.
+            var storedReference = chatResumeCoordinator.lastSession(for: profile)
+            // Absence evidence decides something only for an UNVERIFIED
+            // reference, and it must be evidence from NOW when it does: the
+            // roster is verified per connection, so a bot registered mid-session
+            // would be missing from it and a legacy pointer would look resolved.
+            // Re-verify here in exactly that case (a legacy pointer keeps the
+            // cost until it is rewritten as verified; a typed reference — the
+            // normal case — never pays it, because absence never decides for it).
+            // Only a PREVIOUS ANSWER can be stale. `.idle`/`.loading` have none,
+            // and the connect path has already awaited its probe before this runs,
+            // so re-verifying here is always a re-check of something — never a
+            // fresh RPC on a path that has not probed yet (which would put a bare
+            // network round trip in front of every resume in a context that only
+            // wants to know whether its one answer still holds).
+            let rosterAnswerMayBeStale: Bool = {
+                switch botModePhase {
+                case .available, .failed: return true
+                case .idle, .loading, .gatewayUnsupported: return false
+                }
+            }()
+            if storedReference?.isUnverified == true, rosterAnswerMayBeStale {
+                await refreshBotRoster()
+                guard automaticChatResumeWorkIsCurrent(
+                        automaticWorkToken,
+                        syncOperationID: automaticOperationID
+                      ),
+                      chatViewportTransitionIsCurrent(requiredViewportTransitionGeneration),
+                      token == reconciliationToken,
+                      profile == activeProfile,
+                      let activeClient = self.client,
+                      activeClient === client else {
+                    settleReconciliation(token, automaticSyncOperationID: automaticOperationID)
+                    return chatResumeSyncInterruptionOutcome(for: automaticWorkToken)
+                }
+                storedReference = chatResumeCoordinator.lastSession(for: profile)
+            }
+            // Bot evidence is READ HERE, after any refresh above: `botOwnership`
+            // is a snapshot, and the re-verification can discover a bot the
+            // earlier snapshot did not know — healing and the candidate filter
+            // must both see that answer, not the one that prompted the refresh.
+            let ownership = botOwnership
             let resumeCandidates = BotChatHygiene.ordinaryResumeCandidates(
                 allSessions,
-                roster: botRoster
+                roster: botRoster,
+                botOwnedSessionIDs: ownership.botOwnedIDs
             )
+            let storedReferenceAliases = Self.aliasesForStoredReference(
+                storedReference,
+                catalog: allSessions
+            )
+            let healedReference = ownership.referenceIfBot(
+                storedReference,
+                aliases: storedReferenceAliases
+            )
+            let botSavedReference = purpose == .automaticReturn
+                && chatResumeCoordinator.behavior == .continueWhereLeftOff
+                ? healedReference
+                : nil
+            if let botSavedReference {
+                registerBotSessionReference(botSavedReference)
+                applyBotSessionLabel(botSavedReference)
+            }
             // A cold launch can receive a catalog before Hermes has indexed
             // the just-created/in-flight conversation. When Continue Where I
             // Left Off names a saved identity that is absent from that
             // catalog, resume it directly rather than letting the catalog's
-            // first row replace the user's conversation.
-            let missingSavedSessionID = chatResumeCoordinator.missingSavedSessionID(
-                in: allSessions,
-                profile: profile,
-                purpose: purpose
-            )
+            // first row replace the user's conversation. An id the client
+            // positively attributes to Bot Mode — under ANY of its identities
+            // — is exempt: it is restored through the Bot Mode path above,
+            // never as an ordinary conversation of this workspace.
+            // An UNTYPED (v1-migrated) reference is not authority to resume a
+            // catalog-absent conversation while bot evidence is unavailable:
+            // it carries no kind, and a bot chat written there by a build that
+            // could not record one would be resumed as an ordinary
+            // conversation of this workspace. Our own v2 writes carry the kind,
+            // so they keep the escape hatch unconditionally — and a gateway
+            // that cannot host Bot Mode cannot hold a bot chat either.
+            let savedReferenceIsAuthoritative = !(storedReference?.isUnverified ?? false)
+                || botEvidenceIsAvailable
+            let missingSavedSessionID = botSavedReference?.sessionID
+                ?? (savedReferenceIsAuthoritative
+                    ? chatResumeCoordinator.missingSavedSessionID(
+                        in: allSessions,
+                        profile: profile,
+                        purpose: purpose,
+                        botOwnedSessionIDs: ownership.botOwnedIDs,
+                        savedSessionAliases: storedReferenceAliases
+                      )
+                    : nil)
             if let missingSavedSessionID {
                 chatResumeRestorationRequest = nil
                 chatResumeCoordinator.prepareDirectTarget(
@@ -4126,7 +4586,10 @@ final class AppState: ObservableObject {
                         return .superseded
                     }
                     let handledMissingSessionError = errorMessage
-                    chatResumeCoordinator.rememberSessionID(nil, for: profile)
+                    // Clears whatever kind the reference recorded for this
+                    // workspace: the conversation's authoritative absence is
+                    // not evidence about which surface it belonged to.
+                    chatResumeCoordinator.rememberSession(nil, for: profile)
                     if let fallback = selectChatResumeTarget(
                         in: resumeCandidates,
                         profile: profile,
@@ -4359,11 +4822,23 @@ final class AppState: ObservableObject {
         if purpose == .automaticReturn {
             chatResumeRestorationRequest = nil
         }
+        // The stored selection is authoritative only when its kind is known or
+        // bot evidence could be read: a v1-migrated id cannot be told from a
+        // bot chat, and adopting a catalog row by it is the fail-open the
+        // typed payload exists to close.
+        let savedReferenceIsAuthoritative = !(chatResumeCoordinator.lastSession(for: profile)?.isUnverified ?? false)
+            || botEvidenceIsAvailable
         return chatResumeCoordinator.selectTarget(
             in: catalog,
             profile: profile,
             purpose: purpose,
-            currentSessionID: currentSessionID
+            currentSessionID: currentSessionID,
+            // Positive bot ownership is decided at the moment of selection:
+            // the registry and roster both change across a session, and a
+            // conversation must never be adopted by the workspace because the
+            // evidence arrived a moment after the decision.
+            botOwnedSessionIDs: botOwnedSessionIDs,
+            savedSelectionIsAuthoritative: savedReferenceIsAuthoritative
         )
     }
 
@@ -4464,9 +4939,23 @@ final class AppState: ObservableObject {
         }
         // Canonical Bot Chats live in the bot's profile: every re-entry path
         // (explicit open, reconnect, refresh, preserve-current sync) resolves
-        // the resume scope through the in-memory registry, so a re-resume can
-        // never land on the dashboard profile and lose the session.
-        let conversationScopeProfile = conversationProfile ?? botConversationProfile(for: sessionId)
+        // the resume scope from authoritative bot evidence, so a re-resume can
+        // never land on the dashboard profile and lose the session. The
+        // in-memory registry is only ONE of the three sources — it is cleared
+        // at every server-identity boundary and empty in a fresh process, so
+        // the roster's canonical registries and the durable reference's own
+        // recorded scope are consulted too. Order matters: the registry is
+        // this process's own observation, the roster is the server's current
+        // answer, the reference is what the open recorded.
+        // Deliberately the ADDRESSED id alone: `acceptedSessionIDs` can carry
+        // a previous conversation's aliases (the scroll identity unions them
+        // when a resume continues the conversation it replaced), and a foreign
+        // id must never pull this conversation onto a bot profile's store.
+        // The workspace profile is read from the same binding the rest of this
+        // body uses, so the durable-reference fallback cannot disagree with it.
+        let profile = activeProfile
+        let conversationScopeProfile = conversationProfile
+            ?? botScopeProfile(forSessionIDs: [sessionId], workspaceProfile: profile)
         let priorReconciliation = reconciliation?.token == token ? reconciliation : nil
         let bufferedEvents = priorReconciliation?.bufferedEvents ?? []
         reconciliation = Reconciliation(
@@ -4488,7 +4977,6 @@ final class AppState: ObservableObject {
         reconciliationSessionWasNotFound = false
         refreshActiveChatScrollSessionIdentity(isReconciling: true)
         turnState = .synchronizing
-        let profile = activeProfile
         // The resume RPC can overlap a user-initiated config.set. Capture the
         // local-write position before launching either request so a response
         // from the older snapshot cannot clear the newer override.
@@ -5314,6 +5802,11 @@ final class AppState: ObservableObject {
                 title: activeSessionTitle,
                 model: runtime.model.isEmpty ? "Hermes" : runtime.model,
                 updatedLabel: AppLocalization.string("now"),
+                // A locally-created conversation's activity is NOW: without
+                // this instant its row would rank behind every dated row in
+                // the "latest activity" fallback, abandoning a conversation
+                // whose first turn is still in flight.
+                lastActivityAt: Date().timeIntervalSince1970,
                 profile: activeProfile,
                 source: .chat,
                 isActive: true,
@@ -5383,17 +5876,23 @@ final class AppState: ObservableObject {
         let retainedRestoredMessages = pendingDecisionRestorationMessages(for: result.sessionId)
         markChatViewportReplacement()
         // A canonical Bot Chat keeps the title the open just applied (the
-        // bot's display label) and never enters the dashboard's cold-restore
-        // selection: the ordinary create-adoption defaults apply only to
+        // bot's display label) and is recorded with kind `.bot`: cold launch
+        // restores the conversation the user was in, while the ordinary
+        // Sessions surface never adopts it. The create-adoption defaults
+        // (title, durable-identity persistence) apply only to
         // dashboard-profile conversations.
         let isBotConversation = botConversationProfile(for: result.sessionId) != nil
         setActiveSessionState(
             id: result.sessionId,
-            title: isBotConversation ? nil : AppLocalization.string("New conversation"),
-            recordsResumeSelection: !isBotConversation
+            title: isBotConversation ? nil : AppLocalization.string("New conversation")
         )
+        // The durable identity is recorded for BOTH kinds — the reference's
+        // own kind is resolved from the bot registry, so a Bot Chat persists
+        // as a Bot Chat. Only the dashboard profile's title cache stays
+        // ordinary-only: the bot's label belongs to the conversation, not to
+        // the workspace's title bookkeeping.
+        persistAdmittedDurableSessionIdentity(from: result)
         if !isBotConversation {
-            persistAdmittedDurableSessionIdentity(from: result)
             updateActiveSessionTitle(
                 for: result.sessionId,
                 fallbackSessionId: reconciliation?.requestedSessionId
@@ -5612,7 +6111,10 @@ final class AppState: ObservableObject {
                 chatResumeCoordinator.migrateSessionIdentity(from: runtimeKey, to: durableKey)
             }
         }
-        chatResumeCoordinator.rememberSessionID(durableKey.sessionID, for: durableKey.profile)
+        chatResumeCoordinator.rememberSession(
+            sessionReference(forPersistedID: durableKey.sessionID, activeSessionID: activeSessionId),
+            for: durableKey.profile
+        )
     }
 
     static func hasPendingDecision(in messages: [ChatMessage]) -> Bool {
@@ -6465,6 +6967,14 @@ final class AppState: ObservableObject {
             lastConnectionFailure = nil
             reconnectAttempts = 0
             connectedAt = Date()
+            // Bot Mode evidence before the sync: a reconnect re-runs the same
+            botRosterVerifiedForCurrentConnection = false
+            // resume decision as a cold launch, and a server-identity boundary
+            // clears the roster. Without the reload, a canonical chat whose
+            // title no longer reads "Bot Chat" would be eligible as this
+            // workspace's conversation again.
+            await loadChatResumeBotRoster()
+            guard refreshTransportContinuation() else { return }
             guard let continuation = await synchronizeTransportContinuation(
                 purpose: continuationPurpose,
                 automaticWorkToken: continuationAutomaticWorkToken,
@@ -6518,6 +7028,42 @@ final class AppState: ObservableObject {
         } else {
             await loadProfiles()
         }
+    }
+
+    /// Bot Mode's capability probe and canonical registry, loaded once per
+    /// connection — BEFORE the resume decision reads it.
+    ///
+    /// Bot conversations share the session id space with the Sessions surface,
+    /// so "is this id a bot's forever chat?" can only be answered from
+    /// evidence: the roster's canonical registries plus this process's chat
+    /// registry. Loading it here (rather than only when the Bots surface opens)
+    /// is what makes that evidence available while a workspace is still
+    /// deciding which conversation it was in — otherwise the strongest signal
+    /// the restore path can have is a row's title, and a canonical chat whose
+    /// title no longer reads "Bot Chat" passes as an ordinary conversation.
+    ///
+    /// Failures are never fatal: a gateway without Bot Mode answers a missing
+    /// method, and the phase marks the capability gap for the Bots surface
+    /// while ordinary sessions are untouched.
+    private func loadChatResumeBotRoster() async {
+        if let loadBotRoster = chatResumeLifecycleOperations.loadBotRoster {
+            await loadBotRoster()
+            return
+        }
+        guard botModePhase != .gatewayUnsupported else { return }
+        // One verified roster per CONNECTION. The skip avoids re-fetching on
+        // the resume path within a connection, but it must not cross a
+        // reconnection: a same-server reconnect re-reads this evidence,
+        // because a bot registered since the last successful refresh would be
+        // missing from a roster that still reports `.available` — and absence
+        // is what the authority gates read.
+        guard botRosterVerifiedForCurrentConnection else {
+            await refreshBotRoster()
+            return
+        }
+        // Already verified for this connection: nothing left to do (the
+        // trailing `botRoster.isEmpty` guard that used to sit here returned to
+        // the end of the function either way).
     }
 
     private func loadChatResumeBusyInputMode(using client: HermesClient) async {
@@ -8452,6 +8998,7 @@ final class AppState: ObservableObject {
             // the roster VIEW hides meta-hidden rows for display only.
             botRoster = BotProfile.displayOrder(snapshot.bots)
             botModePhase = .available
+            botRosterVerifiedForCurrentConnection = true
         } catch {
             guard botModeStateIsCurrent(epoch: epoch, dashboardID: dashboardID),
                   !Task.isCancelled else { return }
@@ -8572,8 +9119,8 @@ final class AppState: ObservableObject {
         epoch: Int,
         client: HermesClient
     ) async -> Bool {
-        noteBotChatSession(resumeID, profile: bot.name)
-        noteBotChatSession(registryID, profile: bot.name)
+        noteBotChatSession(resumeID, profile: bot.name, label: bot.displayLabel)
+        noteBotChatSession(registryID, profile: bot.name, label: bot.displayLabel)
         let outcome = await performSessionOpen(
             resumeID,
             reusing: nil,
@@ -8639,9 +9186,9 @@ final class AppState: ObservableObject {
             return failBotChatOpen(bot, error: error, stage: .title)
         }
         guard botOpenFenceIsCurrent(epoch: epoch, client: client) else { return false }
-        noteBotChatSession(created.sessionId, profile: bot.name)
+        noteBotChatSession(created.sessionId, profile: bot.name, label: bot.displayLabel)
         if let stored = created.storedSessionId {
-            noteBotChatSession(stored, profile: bot.name)
+            noteBotChatSession(stored, profile: bot.name, label: bot.displayLabel)
         }
         return await openCanonicalBotChat(
             bot,
@@ -8726,15 +9273,70 @@ final class AppState: ObservableObject {
         )
     }
 
-    private func noteBotChatSession(_ sessionID: String?, profile: String) {
-        guard let sessionID,
-              !sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        botChatSessionProfiles[sessionID] = profile
+    private func noteBotChatSession(
+        _ sessionID: String?,
+        profile: String,
+        label: String? = nil
+    ) {
+        // The KEY is normalized exactly like every lookup that reads this map
+        // (`botScopeProfile` normalizes its query ids), so a padded id cannot
+        // register an entry the fast path will never find.
+        guard let sessionID = ChatScrollIdentityNormalization.sessionID(sessionID),
+              let scope = ChatResumeStore.rpcProfileName(profile) else { return }
+        botChatSessionProfiles[sessionID] = scope
+        invalidateBotOwnershipCache()
+        if let label = label?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty {
+            botChatSessionLabels[sessionID] = label
+        }
     }
 
     #if DEBUG
     func noteBotChatSessionForTesting(_ sessionID: String, profile: String) {
         noteBotChatSession(sessionID, profile: profile)
+    }
+
+    /// The bot profile a conversation is scoped to, or nil for an ordinary
+    /// conversation. Test-only read of the in-memory registry, so a test can
+    /// pin WHICH scope a restored conversation would address.
+    func botConversationProfileForTesting(_ sessionID: String) -> String? {
+        botConversationProfile(for: sessionID)
+    }
+
+    /// The ownership verdict a cross-profile decision would reach for this
+    /// profile, so tests can pin all three cases without driving a switch.
+    func profileOwnershipVerdictForTesting(_ profile: String) -> ProfileOwnershipVerdict {
+        profileOwnershipVerdict(for: profile)
+    }
+
+    /// The persisted selection for a workspace, so a test can pin that the
+    /// conversation's KIND — not just its id — survived restoration.
+    func storedSessionReferenceForTesting(_ profile: String) -> SessionReference? {
+        chatResumeCoordinator.lastSession(for: profile)
+    }
+
+    /// Whether the ownership match for a name was spelled exactly, so a test can
+    /// pin the diagnostic copy's input without driving a routed push.
+    func botProfileMatchForTesting(_ profile: String) -> (name: String, isExact: Bool)? {
+        botOwnership.botProfileMatch(for: profile)
+    }
+
+    /// Simulates the next connection boundary for evidence freshness: the roster
+    /// on hand becomes unverified (as it does at every connect/reconnect)
+    /// without clearing it, so a test can pin that absence stops being evidence.
+    func unverifyBotRosterForCurrentConnectionForTesting() {
+        botRosterVerifiedForCurrentConnection = false
+    }
+
+    /// Drops the in-memory bot-chat registry AND its captured labels — the
+    /// two pieces `invalidateBotModeState` clears — while leaving the durable
+    /// reference in place, so a test can pin that the reference alone still
+    /// resolves the conversation's scope. The roster is deliberately left
+    /// alone: tests that need the server-identity boundary drive
+    /// `prepareChatResumeForConnection`, which also clears the resume store.
+    func clearBotChatRegistryForTesting() {
+        botChatSessionProfiles.removeAll()
+        botChatSessionLabels.removeAll()
+        invalidateBotOwnershipCache()
     }
     #endif
 
@@ -8742,7 +9344,14 @@ final class AppState: ObservableObject {
     /// that conversation is a canonical Bot Chat. Nil for ordinary sessions —
     /// the ordinary dashboard scope applies.
     private func botConversationProfile(for sessionID: String) -> String? {
-        botChatSessionProfiles[sessionID]
+        // Normalized like the KEYS `noteBotChatSession` writes and like
+        // `botScopeProfile`'s fast path: a padded id must not resolve in one
+        // place and miss in the other, which would classify a Bot Chat as an
+        // ordinary conversation and write the dashboard's title cache.
+        guard let normalized = ChatScrollIdentityNormalization.sessionID(sessionID) else {
+            return nil
+        }
+        return botChatSessionProfiles[normalized]
     }
 
     /// The presentation-cache namespace for a conversation. Canonical Bot
@@ -8752,7 +9361,15 @@ final class AppState: ObservableObject {
     /// conversations resolve to the dashboard profile exactly as before.
     private func presentationProfile(for sessionID: String?) -> String {
         guard let sessionID else { return activeProfile }
-        return botConversationProfile(for: sessionID) ?? activeProfile
+        // Same authority chain as the resume scope: a restored Bot Chat must
+        // reconcile its presentation under the bot's namespace even when this
+        // process never opened it (relaunch) and the roster has not answered.
+        // The active conversation contributes its aliases only for ITSELF —
+        // another conversation's ids must never inherit that namespace.
+        // The addressed id ONLY: the scroll identity's aliases can include the
+        // conversation this one replaced, and a foreign bot id must never
+        // namespace an ordinary conversation's presentation.
+        return botScopeProfile(forSessionIDs: [sessionID]) ?? activeProfile
     }
 
     @discardableResult
@@ -8838,17 +9455,12 @@ final class AppState: ObservableObject {
         )
         let token = beginReconciliation()
         let acceptedSessionIDs = knownSessionIDs(for: sessionId)
-        // A bot chat is not the dashboard workspace's selected conversation:
-        // it must never seed the cold-restore resume store with a pointer
-        // the ordinary restore path cannot resume (upstream keeps bot tabs
-        // out of the main workspace's selection for the same reason). The
-        // registry conjunct covers a KNOWN bot conversation opened through
-        // the ordinary path, exactly like the title guard below.
-        setActiveSessionState(
-            id: sessionId,
-            recordsResumeSelection: conversationProfile == nil
-                && botConversationProfile(for: sessionId) == nil
-        )
+        // A bot chat is not the dashboard workspace's ORDINARY selection, but
+        // it IS the conversation the user is viewing: the recorded reference
+        // carries its kind, so the Sessions surface never adopts it while a
+        // cold launch still restores exactly what was on screen. Ownership
+        // comes from the bot registry (seeded above), never the id's shape.
+        setActiveSessionState(id: sessionId)
         messages = []
         persistedTranscriptWindow = nil
         // Freshness evidence belongs to the conversation it was captured
@@ -8944,8 +9556,60 @@ final class AppState: ObservableObject {
             id: notificationAttemptID,
             transitionGeneration: transitionGeneration
         ) else { return false }
+        // The name the PUSH carried, not the one it resolves to: a bot-owned
+        // name that case-insensitively matches a workspace profile would
+        // otherwise route this decision into that workspace's store (and, when
+        // it matches the ACTIVE profile, skip the refusal below entirely).
+        if let notified = target.profile, botOwnership.ownsProfile(notified) {
+            refuseBotOwnedRouting(for: notified)
+            return false
+        }
         let targetProfile = notificationProfileID(target.profile)
+        if let targetProfile, targetProfile != activeProfile,
+           botModePhase != .gatewayUnsupported,
+           !botOwnership.ownsProfile(targetProfile) {
+            // The verdict below reads the roster as ABSENCE evidence, so it must
+            // be evidence from NOW. The roster is otherwise loaded once per
+            // connection and when the Bots surface opens, which leaves a window:
+            // a bot registered after that load is missing from a roster that
+            // still reports `.available`, and its profile would read as an
+            // ordinary workspace. One refresh at this user-initiated decision
+            // (single-flight, epoch-fenced) closes it — and a refresh that fails
+            // leaves the verdict unverifiable, which refuses.
+            await refreshBotRoster()
+            // The refresh ALWAYS suspends (it creates or joins a task), so
+            // this attempt must re-prove it still owns the route before it
+            // reads the verdict or writes an error: a newer tap can have
+            // replaced the attempt and begun its own viewport transition
+            // while this one was waiting.
+            guard notificationOpenAttemptIsCurrent(
+                id: notificationAttemptID,
+                transitionGeneration: transitionGeneration
+            ) else { return false }
+        }
         if let targetProfile, targetProfile != activeProfile {
+            // A bot's profile is not a workspace. Bots ARE ordinary Hermes
+            // profiles, so a decision pushed from a Bot Chat names one; making
+            // it this dashboard's profile would turn a bot conversation into
+            // the workspace's own context. Routing a push INTO the Bots
+            // surface is out of scope, so both the positive and the
+            // unverifiable case stop here.
+            switch profileOwnershipVerdict(for: targetProfile) {
+            case .botOwned:
+                refuseBotOwnedRouting(for: targetProfile)
+                return false
+            case .unverifiable:
+                // No usable Bot Mode evidence (the roster could not be loaded,
+                // or this gateway cannot list profiles): the target may be a
+                // bot's profile, and adopting it would hand a bot conversation
+                // the workspace's context. Fail closed rather than guess.
+                errorMessage = AppLocalization.string(
+                    "Could not verify that workspace for this notification. Reconnect and try again."
+                )
+                return false
+            case .ordinary:
+                break
+            }
             guard await switchProfile(
                 to: targetProfile,
                 reusing: transitionGeneration
@@ -9326,6 +9990,9 @@ final class AppState: ObservableObject {
                 title: title,
                 model: runtime.model.isEmpty ? "Hermes" : runtime.model,
                 updatedLabel: AppLocalization.string("now"),
+                // Fresh activity, like the create path: a branch is the
+                // newest conversation the moment it exists.
+                lastActivityAt: Date().timeIntervalSince1970,
                 profile: activeProfile,
                 source: .chat,
                 isActive: true,
@@ -11568,21 +12235,28 @@ final class AppState: ObservableObject {
             // still own this submission. If the user navigated away, do not
             // rebind and do not send compression to the recovered runtime.
             guard isCurrentComposerSubmission(context) else { throw originalError }
-            // Rebind through the canonical state helper: updates
-            // `activeSessionId` and re-anchors the persisted identity. A
-            // bot chat rebind never seeds the dashboard's cold-restore
-            // selection, exactly like its open.
-            setActiveSessionState(
-                id: recoveredSessionID,
-                recordsResumeSelection: recoveryProfile == nil
-            )
-            // Re-register the recovered runtime: every later scope
-            // resolution (reconnect reconcile, backfill ownership,
-            // post-compress rehydration) resolves through this registry.
+            // Register the recovered identity BEFORE the state helper below
+            // resolves the conversation's kind: the reference must record a
+            // Bot Chat as a Bot Chat, and the rotated runtime id is only
+            // registered here.
             if let recoveryProfile {
-                noteBotChatSession(recoveredSessionID, profile: recoveryProfile)
-                noteBotChatSession(storedSessionID, profile: recoveryProfile)
+                // Labels are keyed by normalized ids, like the registry.
+                let normalizedSessionID = ChatScrollIdentityNormalization.sessionID(sessionID)
+                noteBotChatSession(
+                    recoveredSessionID,
+                    profile: recoveryProfile,
+                    label: normalizedSessionID.flatMap { botChatSessionLabels[$0] }
+                )
+                noteBotChatSession(
+                    storedSessionID,
+                    profile: recoveryProfile,
+                    label: normalizedSessionID.flatMap { botChatSessionLabels[$0] }
+                )
             }
+            // Rebind through the canonical state helper: updates
+            // `activeSessionId` and re-anchors the persisted identity with
+            // the conversation's own kind.
+            setActiveSessionState(id: recoveredSessionID)
             onRecover(recoveredSessionID)
             // Re-base the submission onto the recovered runtime: the old
             // context describes the dead runtime and would fail every

@@ -15,7 +15,8 @@ final class ChatResumePolicyTests: XCTestCase {
     private func session(
         _ id: String,
         alternates: [String] = [],
-        source: SessionSource = .chat
+        source: SessionSource = .chat,
+        lastActivityAt: TimeInterval? = nil
     ) -> SessionSummary {
         SessionSummary(
             id: id,
@@ -23,11 +24,100 @@ final class ChatResumePolicyTests: XCTestCase {
             title: id,
             model: "Hermes",
             updatedLabel: "now",
+            lastActivityAt: lastActivityAt,
             profile: "default",
             source: source,
             isActive: false,
             isArchived: false,
             lineageRootId: nil
+        )
+    }
+
+    // MARK: - authoritative "latest"
+
+    /// List position is not recency: the sync path prepends a retained
+    /// active-turn row and merges cached rows behind live ones, so the newest
+    /// conversation is the one with the greatest activity instant.
+    func testLatestActivityFallbackOrdersByTimestampNotListPosition() {
+        let selected = ChatResumeSessionResolver.target(
+            in: [
+                session("older", lastActivityAt: 100),
+                session("newer", lastActivityAt: 500),
+                session("undated")
+            ],
+            behavior: .latestActivity,
+            purpose: .automaticReturn,
+            savedSessionID: nil,
+            currentSessionID: nil
+        )
+
+        XCTAssertEqual(selected?.id, "newer")
+    }
+
+    /// Rows without a machine-readable instant cannot outrank one that has it.
+    func testUndatedRowsNeverOutrankTimestampedOnes() {
+        XCTAssertEqual(
+            ChatResumeSessionResolver.latestChat(in: [
+                session("undated-first"),
+                session("dated", lastActivityAt: 10)
+            ])?.id,
+            "dated"
+        )
+    }
+
+    /// With no timestamps at all, the server's own ordering is the only
+    /// evidence there is — the historical first-row behavior stands.
+    func testUndatedCatalogKeepsServerOrdering() {
+        XCTAssertEqual(
+            ChatResumeSessionResolver.latestChat(in: [session("first"), session("second")])?.id,
+            "first"
+        )
+    }
+
+    /// A conversation the client knows to be a Bot Chat is never adopted as the
+    /// workspace's conversation — not by the stored-id match and not by the
+    /// latest-activity fallback.
+    func testBotOwnedConversationIsNeverAnOrdinarySelection() {
+        let botRow = session("runtime-bot", lastActivityAt: 900)
+        let ordinary = session("ordinary-1", lastActivityAt: 100)
+        let ownership: Set<String> = ["runtime-bot", "stored-bot"]
+
+        // The stored id resolves only to a bot-owned row, so ordinary selection
+        // declines it and falls through to the workspace's own newest
+        // conversation. The bot conversation is restored through the Bot Mode
+        // path (the caller owns the reference's kind), never adopted here.
+        XCTAssertEqual(
+            ChatResumeSessionResolver.target(
+                in: [botRow, ordinary],
+                behavior: .continueWhereLeftOff,
+                purpose: .automaticReturn,
+                savedSessionID: "runtime-bot",
+                currentSessionID: "runtime-bot",
+                botOwnedSessionIDs: ownership
+            )?.id,
+            "ordinary-1"
+        )
+        XCTAssertEqual(
+            ChatResumeSessionResolver.target(
+                in: [botRow, ordinary],
+                behavior: .latestActivity,
+                purpose: .automaticReturn,
+                savedSessionID: nil,
+                currentSessionID: nil,
+                botOwnedSessionIDs: ownership
+            )?.id,
+            "ordinary-1",
+            "a newer bot chat is not the workspace's latest conversation"
+        )
+        XCTAssertNil(
+            ChatResumeSessionResolver.missingSavedSessionID(
+                in: [ordinary],
+                behavior: .continueWhereLeftOff,
+                purpose: .automaticReturn,
+                savedSessionID: "stored-bot",
+                botOwnedSessionIDs: ownership
+            ),
+            "the missing-saved-session escape hatch never resumes a bot conversation as ordinary"
         )
     }
 

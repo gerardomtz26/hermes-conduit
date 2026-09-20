@@ -50,25 +50,52 @@ final class ChatResumeCoordinator {
         store.setBehavior(behavior)
     }
 
+    /// The conversation the user was in for this workspace profile — id AND
+    /// kind. Restoration must act on the kind: a Bot Chat is not an ordinary
+    /// conversation of the workspace that happened to be active when it was
+    /// opened.
+    func lastSession(for profile: String) -> SessionReference? {
+        store.lastSession(for: profile)
+    }
+
     func lastSessionID(for profile: String) -> String? {
         store.lastSessionID(for: profile)
     }
 
-    func rememberSessionID(_ sessionID: String?, for profile: String) {
-        store.setLastSessionID(sessionID, for: profile)
+    func rememberSession(_ reference: SessionReference?, for profile: String) {
+        store.setLastSession(reference, for: profile)
+    }
+
+    /// Reclassifies a stored reference in place (a legacy id-only selection
+    /// that positive bot evidence now attributes to a Bot Chat). Returns the
+    /// reference that must be used for restoration either way.
+    func reclassifySession(
+        _ reference: SessionReference,
+        for profile: String,
+        ownership: SessionBotOwnership
+    ) -> SessionReference {
+        guard let resolved = ownership.referenceIfBot(reference) else { return reference }
+        if resolved != reference {
+            store.setLastSession(resolved, for: profile)
+        }
+        return resolved
     }
 
     func missingSavedSessionID(
         in catalog: [SessionSummary],
         profile: String,
-        purpose: ChatResumeSyncPurpose
+        purpose: ChatResumeSyncPurpose,
+        botOwnedSessionIDs: Set<String> = [],
+        savedSessionAliases: Set<String> = []
     ) -> String? {
         ChatResumeSessionResolver.missingSavedSessionID(
             in: catalog,
             behavior: store.behavior,
             purpose: purpose,
             savedSessionID: store.lastSessionID(for: profile),
-            activeProfile: profile
+            activeProfile: profile,
+            botOwnedSessionIDs: botOwnedSessionIDs,
+            savedSessionAliases: savedSessionAliases
         )
     }
 
@@ -76,7 +103,9 @@ final class ChatResumeCoordinator {
         in catalog: [SessionSummary],
         profile: String,
         purpose: ChatResumeSyncPurpose,
-        currentSessionID: String?
+        currentSessionID: String?,
+        botOwnedSessionIDs: Set<String> = [],
+        savedSelectionIsAuthoritative: Bool = true
     ) -> SessionSummary? {
         let savedSessionID = store.lastSessionID(for: profile)
         let selected = ChatResumeSessionResolver.target(
@@ -85,7 +114,9 @@ final class ChatResumeCoordinator {
             purpose: purpose,
             savedSessionID: savedSessionID,
             currentSessionID: currentSessionID,
-            activeProfile: profile
+            activeProfile: profile,
+            botOwnedSessionIDs: botOwnedSessionIDs,
+            savedSelectionIsAuthoritative: savedSelectionIsAuthoritative
         )
 
         guard purpose == .automaticReturn else { return selected }

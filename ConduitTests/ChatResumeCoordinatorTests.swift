@@ -260,7 +260,7 @@ final class ChatResumeCoordinatorTests: XCTestCase {
         let harness = makeHarness()
         let key = ChatScrollSessionKey(profile: "default", sessionID: "stored-a")
         harness.coordinator.setBehavior(.latestActivity)
-        harness.coordinator.rememberSessionID("stored-a", for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: "stored-a"), for: "default")
         harness.coordinator.recordViewport(.latest, for: key)
         _ = harness.coordinator.selectTarget(
             in: [session("stored-a")],
