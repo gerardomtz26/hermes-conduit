@@ -313,7 +313,13 @@ enum BotChatHygiene {
         let rowIDs = Set([row.id, row.storedSessionId].compactMap { $0 } + row.alternateIds)
         for bot in roster {
             if let canonical = bot.canonicalSession {
-                if rowIDs.contains(canonical.id) { return true }
+                // Trimmed like `SessionBotOwnership` builds its registry ids, so
+                // the hygiene rule and the ownership verdict cannot disagree about
+                // a whitespace-padded server id.
+                if let canonicalID = ChatScrollIdentityNormalization.sessionID(canonical.id),
+                   rowIDs.contains(canonicalID) {
+                    return true
+                }
                 if let resolved = canonical.resolvedID?
                     .trimmingCharacters(in: .whitespacesAndNewlines),
                     !resolved.isEmpty, rowIDs.contains(resolved) {

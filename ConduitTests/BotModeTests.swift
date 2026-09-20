@@ -3512,6 +3512,124 @@ final class BotModeTests: XCTestCase {
         )
     }
 
+    /// Absence evidence decides something only for an UNVERIFIED reference, and
+    /// when it does, it must be evidence from NOW: the roster is verified per
+    /// connection, so a bot registered mid-session would be missing from it and a
+    /// legacy pointer would look resolved. The resume path re-verifies in exactly
+    /// that case — and then heals the pointer instead of adopting it.
+    func testUnverifiedReferenceReverifiesRosterBeforeTrustingAbsence() async {
+        var botRegistered = false
+        var resumedIDs: [String] = []
+        var resumedProfiles: [String?] = []
+        let harness = makeBotHarness(
+            configureDefaults: { defaults in
+                defaults.set(try? JSONSerialization.data(withJSONObject: [
+                    "version": 1,
+                    "behavior": "continueWhereLeftOff",
+                    "lastSessionIDsByProfile": ["default": "stored-of-the-tip"],
+                    "snapshots": []
+                ]), forKey: ChatResumeStore.defaultStorageKey)
+            },
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in [self.makeSessionSummary(id: "ordinary-1", title: "Design review")] },
+                openSessionWithProfile: { _, id, _, profile in
+                    resumedIDs.append(id)
+                    resumedProfiles.append(profile)
+                    return SessionResumeResult(
+                        sessionId: id,
+                        storedSessionId: id,
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in },
+                botRoster: { _ in
+                    BotRosterSnapshot(
+                        bots: botRegistered
+                            ? [self.makeBot(name: "Atlas", canonicalID: "stored-of-the-tip")]
+                            : [],
+                        supportsBotProtocol: false
+                    )
+                }
+            )
+        )
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        // Connect-time verification: the gateway knows no bots yet.
+        await harness.appState.refreshBotRoster()
+        XCTAssertEqual(harness.appState.botModePhase, .available)
+
+        // The bot's canonical chat appears mid-session, under the id the legacy
+        // pointer names.
+        botRegistered = true
+        harness.appState.activeSessionId = nil
+
+        await harness.appState.syncSession(
+            purpose: .automaticReturn,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(
+            resumedProfiles,
+            ["Atlas"],
+            "the re-verified roster identifies the pointer as a Bot Chat"
+        )
+        XCTAssertEqual(resumedIDs, ["stored-of-the-tip"])
+        XCTAssertEqual(
+            harness.store.lastSession(for: "default")?.kind,
+            SessionReference.Kind.bot,
+            "and the legacy pointer is healed rather than adopted as ordinary"
+        )
+    }
+
+    /// A push carries the profile NAME. When that name is a bot's, it must not
+    /// ride in under a workspace whose name differs only by case — least of all
+    /// when the case-insensitive resolution lands on the ACTIVE workspace, which
+    /// skips the cross-profile refusal entirely.
+    func testPushNamingBotProfileIsRefusedEvenWhenItResolvesToTheActiveWorkspace() async {
+        let harness = makeBotHarness(
+            configureDefaults: { defaults in
+                defaults.set("atlas", forKey: "conduit.activeProfile")
+            },
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in [self.makeSessionSummary(id: "ordinary-1", title: "Design review")] },
+                openSessionWithProfile: { _, id, _, _ in
+                    SessionResumeResult(
+                        sessionId: id,
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in },
+                botRoster: { _ in
+                    BotRosterSnapshot(
+                        bots: [self.makeBot(name: "Atlas", canonicalID: "stored-atlas")],
+                        supportsBotProtocol: false
+                    )
+                }
+            )
+        )
+        let connection = HermesConnection(baseUrl: "https://one.example", ticket: "ticket")
+        harness.appState.client = HermesClient(connection: connection, profile: "atlas")
+        harness.appState.connection = connection
+        harness.appState.profiles = ["atlas"]
+        await harness.appState.refreshBotRoster()
+        XCTAssertEqual(harness.appState.activeProfile, "atlas")
+
+        let routed = await harness.appState.openNotificationTarget(
+            ConduitNotificationTarget(profile: "Atlas", sessionId: "stored-atlas", type: "approval")
+        )
+
+        XCTAssertFalse(routed, "the bot's decision is not routed into the workspace it collides with")
+        XCTAssertEqual(
+            harness.appState.errorMessage,
+            "This decision belongs to a Bot Chat. Open Bots to answer it."
+        )
+    }
+
     // MARK: - harness
 
     /// The UserDefaults suite of the most recent harness, so tests can pin

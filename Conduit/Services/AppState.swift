@@ -4374,7 +4374,30 @@ final class AppState: ObservableObject {
             // — a compaction or runtime rebind can leave the bot evidence on
             // an ALIAS of the stored id, so the union is consulted here just
             // as it is when recording.
-            let storedReference = chatResumeCoordinator.lastSession(for: profile)
+            var storedReference = chatResumeCoordinator.lastSession(for: profile)
+            // Absence evidence decides something only for an UNVERIFIED
+            // reference, and it must be evidence from NOW when it does: the
+            // roster is verified per connection, so a bot registered mid-session
+            // would be missing from it and a legacy pointer would look resolved.
+            // Re-verify here in exactly that case (a legacy pointer keeps the
+            // cost until it is rewritten as verified; a typed reference — the
+            // normal case — never pays it, because absence never decides for it).
+            if storedReference?.isUnverified == true, botModePhase != .gatewayUnsupported {
+                await refreshBotRoster()
+                guard automaticChatResumeWorkIsCurrent(
+                        automaticWorkToken,
+                        syncOperationID: automaticOperationID
+                      ),
+                      chatViewportTransitionIsCurrent(requiredViewportTransitionGeneration),
+                      token == reconciliationToken,
+                      profile == activeProfile,
+                      let activeClient = self.client,
+                      activeClient === client else {
+                    settleReconciliation(token, automaticSyncOperationID: automaticOperationID)
+                    return chatResumeSyncInterruptionOutcome(for: automaticWorkToken)
+                }
+                storedReference = chatResumeCoordinator.lastSession(for: profile)
+            }
             let storedReferenceAliases = Self.aliasesForStoredReference(
                 storedReference,
                 catalog: allSessions
@@ -9499,6 +9522,16 @@ final class AppState: ObservableObject {
             id: notificationAttemptID,
             transitionGeneration: transitionGeneration
         ) else { return false }
+        // The name the PUSH carried, not the one it resolves to: a bot-owned
+        // name that case-insensitively matches a workspace profile would
+        // otherwise route this decision into that workspace's store (and, when
+        // it matches the ACTIVE profile, skip the refusal below entirely).
+        if let notified = target.profile, botOwnership.ownsProfile(notified) {
+            errorMessage = AppLocalization.string(
+                "This decision belongs to a Bot Chat. Open Bots to answer it."
+            )
+            return false
+        }
         let targetProfile = notificationProfileID(target.profile)
         if let targetProfile, targetProfile != activeProfile,
            botModePhase != .gatewayUnsupported,
