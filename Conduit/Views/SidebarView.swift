@@ -58,6 +58,7 @@ struct SidebarView: View {
                             }
                             .disabled(appState.isProfileSwitching)
                             .conduitGlassControl(cornerRadius: 18, tint: .conduitAccent.opacity(0.08))
+                            .accessibilityIdentifier("sidebar.workspace")
 
                             Spacer(minLength: 0)
 

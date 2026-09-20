@@ -157,6 +157,14 @@ extension View {
     /// Uses the native iOS 26 glass compositor when it is available. The
     /// fallback intentionally stays material-based rather than attempting to
     /// imitate glass with custom blur stacks.
+    ///
+    /// The two branches must keep the same corner radius and the same covered
+    /// area: callers declare their hit shapes from the radius they pass in
+    /// (see `contentShape` on the card components), so a branch that drew a
+    /// smaller surface than the other would silently make part of a card
+    /// untappable on that OS path. The fallback cannot be exercised by any
+    /// simulator runtime the project has available (iOS 26.5 only, locally and
+    /// in CI), which is why this parity note stands in for a test of it.
     @ViewBuilder
     func conduitGlassSurface(
         cornerRadius: CGFloat,

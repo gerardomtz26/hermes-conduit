@@ -174,6 +174,41 @@ final class AppStateVoiceCapabilityTests: XCTestCase {
         )
     }
 
+    /// Attaching a presentation to a live Voice conversation must republish the
+    /// app-foreground gate, not only the capture gate. This is the healing path
+    /// a CarPlay-only session relies on when it hands the conversation back to a
+    /// phone whose gate a previous boundary left closed: without it, the next
+    /// Listen or provider test is treated as backgrounded work and discarded —
+    /// the stale-gate failure this PR fixed, one layer down.
+    func testAttachingToALiveVoiceConversationReopensTheApplicationForegroundGate() {
+        let appState = makeReadyAppState()
+        appState.voiceConversationController.beginVoiceTurn(sessionID: "session-1")
+        XCTAssertTrue(appState.voiceConversationController.hasLiveVoiceSession)
+        appState.voiceConversationController.setApplicationForegroundActive(false)
+        XCTAssertFalse(appState.voiceConversationController.isApplicationForegroundGateOpen)
+
+        let attached = appState.attachToLiveVoiceConversation()
+
+        XCTAssertTrue(attached, "the bridge and voice capability state are installed, so the gateway attaches")
+        XCTAssertTrue(
+            appState.voiceConversationController.isApplicationForegroundGateOpen,
+            "attaching a presentation means the app is on screen"
+        )
+    }
+
+    /// The attachment is only for a live conversation: without one the call is a
+    /// no-op and must not silently reopen a gate on its own (that would make the
+    /// foreground fact claimable from a non-presenting surface).
+    func testAttachingWithoutALiveConversationLeavesTheGateClosed() {
+        let appState = makeReadyAppState()
+        appState.voiceConversationController.setApplicationForegroundActive(false)
+
+        let attached = appState.attachToLiveVoiceConversation()
+
+        XCTAssertFalse(attached)
+        XCTAssertFalse(appState.voiceConversationController.isApplicationForegroundGateOpen)
+    }
+
     private func makeReadyAppState() -> AppState {
         makeAppState(
             snapshot: VoiceCapabilitySnapshot(

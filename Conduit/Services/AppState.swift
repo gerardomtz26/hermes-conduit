@@ -2753,6 +2753,25 @@ final class AppState: ObservableObject {
               index + 1 < arguments.count else { return .hostNotFound }
         return arguments[index + 1] == "none" ? nil : .hostNotFound
     }
+
+    /// UI-test-only profile roster: `-CONDUIT_UI_TEST_PROFILES "work,staging"`
+    /// (comma-separated). Needed because the connection-scoped reset that runs
+    /// before this seeds nothing back — it clears `profiles` — and a stub has no
+    /// transport for `/api/profiles` discovery to repopulate it from, so a
+    /// profile-scoped UI test would otherwise only ever see `default`. The names
+    /// go through the same `orderedProfiles` the launch hydration uses, so a
+    /// seeded roster behaves exactly like a discovered one (active profile and
+    /// `default` are unioned in, order included).
+    private static func uiTestSeededProfiles() -> [String]? {
+        let arguments = ProcessInfo.processInfo.arguments
+        guard let index = arguments.firstIndex(of: "-CONDUIT_UI_TEST_PROFILES"),
+              index + 1 < arguments.count else { return nil }
+        let names = arguments[index + 1]
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return names.isEmpty ? nil : names
+    }
 #endif
 
     func loadSavedConnection() {
@@ -2775,6 +2794,10 @@ final class AppState: ObservableObject {
             isConnected = true
             isConnecting = false
             showLogin = false
+            if let seededProfiles = Self.uiTestSeededProfiles() {
+                lifecycleLog.notice("UI-test profile roster seeded: \(seededProfiles.count, privacy: .public) profiles")
+                profiles = orderedProfiles(seededProfiles + [activeProfile, "default"])
+            }
             return
         }
         #endif
