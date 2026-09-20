@@ -46,6 +46,13 @@ struct BotRosterView: View {
                         icon: "exclamationmark.triangle",
                         message: message
                     )
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .conduitGlassSurface(cornerRadius: 18, tint: .yellow.opacity(0.10))
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 3, leading: 0, bottom: 3, trailing: 0))
                 }
             }
             Section(AppLocalization.string("Bots")) {
@@ -133,6 +140,11 @@ struct BotRosterView: View {
 
 /// One roster row. Tap resolves the canonical Bot Chat and opens it; the
 /// preview/activity text comes from what `profiles.list` already supplies.
+///
+/// Rows carry their own rounded card, the same treatment `SessionRow` and
+/// `CronJobRow` give the sibling sidebar tabs: a plain-styled `List` with the
+/// system row chrome cleared would otherwise render the roster as one
+/// sharp-edged slab that ignores the rounded glass surfaces above it.
 private struct BotRosterRow: View {
     let bot: BotProfile
     @EnvironmentObject private var appState: AppState
@@ -165,10 +177,22 @@ private struct BotRosterRow: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.tertiary)
             }
-            .padding(.vertical, 2)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(
+                Color.primary.opacity(0.045),
+                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.08), lineWidth: 1)
+            }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
+        .listRowInsets(EdgeInsets(top: 3, leading: 0, bottom: 3, trailing: 0))
         .accessibilityLabel(Text(bot.displayLabel))
         .accessibilityHint(Text(AppLocalization.string("Opens this bot's chat.")))
     }

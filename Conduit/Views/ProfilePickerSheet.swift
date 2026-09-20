@@ -85,6 +85,11 @@ private struct ProfilePickerRow: View {
     @State private var pickedImage: UIImage?
     @State private var saveError: String?
     private var isCurrent: Bool { profile == appState.activeProfile }
+    /// One rule for both selection paths: the text column's button and the
+    /// card-wide gesture below must agree on when a profile can be selected.
+    private var canSelect: Bool {
+        !isCurrent && !appState.isProfileSwitching && !isReordering
+    }
 
     var body: some View {
         HStack(spacing: 12) {
@@ -115,7 +120,7 @@ private struct ProfilePickerRow: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
             }
-            .buttonStyle(.plain).disabled(isCurrent || appState.isProfileSwitching || isReordering)
+            .buttonStyle(.plain).disabled(!canSelect)
 
             if isReordering {
                 VStack(spacing: 0) {
@@ -150,6 +155,9 @@ private struct ProfilePickerRow: View {
         }
         .padding(12)
         .conduitGlassSurface(cornerRadius: 20, tint: isCurrent ? .conduitAccent.opacity(0.12) : .clear)
+        .overlay(alignment: .bottomLeading) {
+            if let saveError { Text(saveError).font(.caption2).foregroundStyle(.red).padding(.horizontal, 12).padding(.bottom, 4) }
+        }
         // The card itself selects the profile. The select button above only
         // covers its text column, so the card's padding, the trailing
         // accessory column, and the space beside the name all looked
@@ -158,11 +166,8 @@ private struct ProfilePickerRow: View {
         // never reach this gesture, so their own actions are unaffected.
         .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .onTapGesture {
-            guard !isCurrent, !isReordering, !appState.isProfileSwitching else { return }
+            guard canSelect else { return }
             select()
-        }
-        .overlay(alignment: .bottomLeading) {
-            if let saveError { Text(saveError).font(.caption2).foregroundStyle(.red).padding(.horizontal, 12).padding(.bottom, 4) }
         }
         .sheet(isPresented: $showingImagePicker) {
             ImagePicker(image: $pickedImage)
