@@ -919,10 +919,6 @@ final class AppState: ObservableObject {
         botOwnership.botOwnedIDs
     }
 
-    /// What the client can PROVE about a profile a decision wants to switch the
-    /// dashboard to. A profile name alone proves nothing: bots are ordinary
-    /// Hermes profiles, so only bot evidence (or its verified absence)
-    /// distinguishes a workspace from a bot.
     /// Whether bot evidence can be READ right now: a verified-current roster,
     /// or a gateway that cannot host bots at all. A failed or pending probe
     /// leaves evidence unavailable, which is what makes an untyped reference
@@ -932,6 +928,10 @@ final class AppState: ObservableObject {
         botModePhase == .available || botModePhase == .gatewayUnsupported
     }
 
+    /// What the client can PROVE about a profile a decision wants to switch the
+    /// dashboard to. A profile name alone proves nothing: bots are ordinary
+    /// Hermes profiles, so only bot evidence (or its verified absence)
+    /// distinguishes a workspace from a bot.
     private func profileOwnershipVerdict(for profile: String) -> ProfileOwnershipVerdict {
         // Positive evidence first, whatever the capability phase says.
         if botOwnership.ownsProfile(profile) { return .botOwned }
@@ -980,8 +980,14 @@ final class AppState: ObservableObject {
         // presentation path (every stream event resolves a namespace), and
         // building the ownership value there would re-scan the roster for
         // each event. The roster is consulted only on a miss.
-        for id in identityIDs.sorted() {
-            if let scope = botChatSessionProfiles[id] { return scope }
+        // The fast path answers from this process's own observation, but only
+        // while there is no roster to be authoritative about spelling: a scope
+        // persisted by a build that case-folded it must not outlive the
+        // roster's verbatim `bot.name` (see `botProfileName`).
+        if botRoster.isEmpty {
+            for id in identityIDs.sorted() {
+                if let scope = botChatSessionProfiles[id] { return scope }
+            }
         }
         if let rosterScope = botOwnership.botProfileName(owningAny: identityIDs) {
             return rosterScope
@@ -9456,6 +9462,15 @@ final class AppState: ObservableObject {
             // (single-flight, epoch-fenced) closes it — and a refresh that fails
             // leaves the verdict unverifiable, which refuses.
             await refreshBotRoster()
+            // The refresh ALWAYS suspends (it creates or joins a task), so
+            // this attempt must re-prove it still owns the route before it
+            // reads the verdict or writes an error: a newer tap can have
+            // replaced the attempt and begun its own viewport transition
+            // while this one was waiting.
+            guard notificationOpenAttemptIsCurrent(
+                id: notificationAttemptID,
+                transitionGeneration: transitionGeneration
+            ) else { return false }
         }
         if let targetProfile, targetProfile != activeProfile {
             // A bot's profile is not a workspace. Bots ARE ordinary Hermes

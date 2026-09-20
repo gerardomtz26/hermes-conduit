@@ -3141,6 +3141,61 @@ final class BotModeTests: XCTestCase {
         XCTAssertEqual(resumedIDs, ["stored-typed"])
     }
 
+    /// `refreshBotRoster()` ALWAYS suspends (it creates or joins a task), so a
+    /// routing attempt must re-prove it still owns the route after it returns.
+    /// Without that check, a superseded attempt reads the verdict and writes its
+    /// refusal over whatever the newer attempt is doing.
+    func testSupersededRoutingAttemptStandsDownAfterTheRosterRefresh() async {
+        var supersededDuringRefresh = false
+        var appStateRef: AppState?
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.makeSessionSummary(id: "ordinary-1", title: "Design review")] },
+            openSessionWithProfile: { _, id, _, _ in
+                SessionResumeResult(
+                    sessionId: id,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            botRoster: { _ in
+                if !supersededDuringRefresh {
+                    supersededDuringRefresh = true
+                    // A newer tap (or any explicit navigation) takes the route
+                    // while this attempt is suspended in its roster refresh.
+                    _ = appStateRef?.requestOpenSession("ordinary-1")
+                    // Let the newer navigation establish its transition.
+                    try? await Task.sleep(for: .milliseconds(50))
+                }
+                return BotRosterSnapshot(
+                    bots: [self.makeBot(name: "Atlas", canonicalID: "stored-atlas")],
+                    supportsBotProtocol: false
+                )
+            }
+        ))
+        let connection = HermesConnection(baseUrl: "https://one.example", ticket: "ticket")
+        harness.appState.client = HermesClient(connection: connection, profile: "default")
+        harness.appState.connection = connection
+        appStateRef = harness.appState
+
+        let routed = await harness.appState.openNotificationTarget(
+            ConduitNotificationTarget(profile: "Atlas", sessionId: "stored-atlas", type: "approval")
+        )
+
+        XCTAssertTrue(supersededDuringRefresh)
+        XCTAssertFalse(routed)
+        XCTAssertNotEqual(
+            harness.appState.errorMessage,
+            "This decision belongs to a Bot Chat. Open Bots to answer it.",
+            "a superseded attempt must not publish its refusal over the newer navigation"
+        )
+        XCTAssertNotEqual(
+            harness.appState.errorMessage,
+            "Could not verify that workspace for this notification. Reconnect and try again."
+        )
+        XCTAssertEqual(harness.appState.activeProfile, "default")
+    }
+
     // MARK: - harness
 
     /// The UserDefaults suite of the most recent harness, so tests can pin
