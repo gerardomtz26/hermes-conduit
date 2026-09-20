@@ -938,6 +938,22 @@ final class AppState: ObservableObject {
             || (botModePhase == .available && botRosterVerifiedForCurrentConnection)
     }
 
+    /// Refuses a push whose target is bot-owned, with copy that matches how
+    /// confident the match is: ownership folds case, so an exact spelling IS that
+    /// bot's profile while a case-only match may be an unrelated workspace that
+    /// merely shares the name. Both refusal sites use this, so the copy cannot
+    /// depend on which check happened to fire first.
+    private func refuseBotOwnedRouting(for profile: String) {
+        let exact = botOwnership.botProfileMatch(for: profile)?.isExact ?? true
+        errorMessage = exact
+            ? AppLocalization.string(
+                "This decision belongs to a Bot Chat. Open Bots to answer it."
+            )
+            : AppLocalization.string(
+                "Could not tell this notification's workspace apart from a Bot Chat. Open Bots or the workspace list to continue."
+            )
+    }
+
     /// What the client can PROVE about a profile a decision wants to switch the
     /// dashboard to. A profile name alone proves nothing: bots are ordinary
     /// Hermes profiles, so only bot evidence (or its verified absence)
@@ -4354,12 +4370,6 @@ final class AppState: ObservableObject {
             // covered) and positive bot ownership (the roster's canonical
             // registries plus this process's bot-chat registry, which cover a
             // row whose title no longer names the canonical chat).
-            let ownership = botOwnership
-            let resumeCandidates = BotChatHygiene.ordinaryResumeCandidates(
-                allSessions,
-                roster: botRoster,
-                botOwnedSessionIDs: ownership.botOwnedIDs
-            )
             // The saved reference's KIND decides how it may be restored. A Bot
             // Mode conversation is not this workspace's conversation: seeding
             // its bot scope first makes the resume below address the BOT's
@@ -4382,7 +4392,19 @@ final class AppState: ObservableObject {
             // Re-verify here in exactly that case (a legacy pointer keeps the
             // cost until it is rewritten as verified; a typed reference — the
             // normal case — never pays it, because absence never decides for it).
-            if storedReference?.isUnverified == true, botModePhase != .gatewayUnsupported {
+            // Only a PREVIOUS ANSWER can be stale. `.idle`/`.loading` have none,
+            // and the connect path has already awaited its probe before this runs,
+            // so re-verifying here is always a re-check of something — never a
+            // fresh RPC on a path that has not probed yet (which would put a bare
+            // network round trip in front of every resume in a context that only
+            // wants to know whether its one answer still holds).
+            let rosterAnswerMayBeStale: Bool = {
+                switch botModePhase {
+                case .available, .failed: return true
+                case .idle, .loading, .gatewayUnsupported: return false
+                }
+            }()
+            if storedReference?.isUnverified == true, rosterAnswerMayBeStale {
                 await refreshBotRoster()
                 guard automaticChatResumeWorkIsCurrent(
                         automaticWorkToken,
@@ -4398,6 +4420,16 @@ final class AppState: ObservableObject {
                 }
                 storedReference = chatResumeCoordinator.lastSession(for: profile)
             }
+            // Bot evidence is READ HERE, after any refresh above: `botOwnership`
+            // is a snapshot, and the re-verification can discover a bot the
+            // earlier snapshot did not know — healing and the candidate filter
+            // must both see that answer, not the one that prompted the refresh.
+            let ownership = botOwnership
+            let resumeCandidates = BotChatHygiene.ordinaryResumeCandidates(
+                allSessions,
+                roster: botRoster,
+                botOwnedSessionIDs: ownership.botOwnedIDs
+            )
             let storedReferenceAliases = Self.aliasesForStoredReference(
                 storedReference,
                 catalog: allSessions
@@ -7029,7 +7061,9 @@ final class AppState: ObservableObject {
             await refreshBotRoster()
             return
         }
-        guard botRoster.isEmpty else { return }
+        // Already verified for this connection: nothing left to do (the
+        // trailing `botRoster.isEmpty` guard that used to sit here returned to
+        // the end of the function either way).
     }
 
     private func loadChatResumeBusyInputMode(using client: HermesClient) async {
@@ -9527,9 +9561,7 @@ final class AppState: ObservableObject {
         // otherwise route this decision into that workspace's store (and, when
         // it matches the ACTIVE profile, skip the refusal below entirely).
         if let notified = target.profile, botOwnership.ownsProfile(notified) {
-            errorMessage = AppLocalization.string(
-                "This decision belongs to a Bot Chat. Open Bots to answer it."
-            )
+            refuseBotOwnedRouting(for: notified)
             return false
         }
         let targetProfile = notificationProfileID(target.profile)
@@ -9564,19 +9596,7 @@ final class AppState: ObservableObject {
             // unverifiable case stop here.
             switch profileOwnershipVerdict(for: targetProfile) {
             case .botOwned:
-                // Ownership matching folds case (see `profileOwnershipVerdict`),
-                // so when the match is not spelled exactly like the bot's
-                // profile the target may be an unrelated workspace that merely
-                // shares the name with different casing. Say so instead of
-                // claiming this belongs to a Bot Chat.
-                let exact = botOwnership.botProfileMatch(for: targetProfile)?.isExact ?? true
-                errorMessage = exact
-                    ? AppLocalization.string(
-                        "This decision belongs to a Bot Chat. Open Bots to answer it."
-                    )
-                    : AppLocalization.string(
-                        "Could not tell this notification's workspace apart from a Bot Chat. Open Bots or the workspace list to continue."
-                    )
+                refuseBotOwnedRouting(for: targetProfile)
                 return false
             case .unverifiable:
                 // No usable Bot Mode evidence (the roster could not be loaded,

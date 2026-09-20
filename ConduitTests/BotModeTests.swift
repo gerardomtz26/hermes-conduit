@@ -3630,6 +3630,126 @@ final class BotModeTests: XCTestCase {
         )
     }
 
+    /// The catalog-PRESENT twin of the re-verification test, and the one that can
+    /// tell stale evidence from fresh: the refreshed roster discovers the bot
+    /// while the conversation's row is ALREADY in the catalog under a
+    /// non-reserved title, so title hygiene cannot save it and the only thing
+    /// standing between the workspace and the bot's conversation is that healing
+    /// read the POST-refresh ownership. With a stale snapshot the row is adopted
+    /// as an ordinary conversation of this workspace (workspace scope, no bot
+    /// registration); with fresh evidence it heals to `.bot`, the Bot Mode open
+    /// runs, and the resume addresses the bot's profile by its exact name.
+    func testCatalogPresentBotChatHealsFromFreshlyVerifiedOwnership() async {
+        var botRegistered = false
+        var resumedIDs: [String] = []
+        var resumedProfiles: [String?] = []
+        // The canonical chat's row: listed under the durable id the stored
+        // pointer names, with a title that says nothing about Bot Mode and a
+        // lineage root for realism.
+        let botRow = SessionSummary(
+            id: "stored-of-the-tip",
+            storedSessionId: nil,
+            alternateIds: ["runtime-tip"],
+            title: "Weekly digest",
+            model: "Hermes",
+            updatedLabel: "now",
+            lastActivityAt: 100,
+            profile: "default",
+            source: .chat,
+            isActive: false,
+            isArchived: false,
+            lineageRootId: "canonical-root"
+        )
+        // A NEWER ordinary conversation: if the stale snapshot were used, the
+        // bot row would not be recognised as bot-owned and would win the
+        // saved-id match instead of healing.
+        let newerOrdinary = makeSessionSummary(
+            id: "ordinary-newer",
+            title: "Design review",
+            lastActivityAt: 900
+        )
+        let harness = makeBotHarness(
+            configureDefaults: { defaults in
+                // An UNVERIFIED (v1) selection naming the bot chat's row.
+                defaults.set(try? JSONSerialization.data(withJSONObject: [
+                    "version": 1,
+                    "behavior": "continueWhereLeftOff",
+                    "lastSessionIDsByProfile": ["default": "stored-of-the-tip"],
+                    "snapshots": []
+                ]), forKey: ChatResumeStore.defaultStorageKey)
+            },
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in [botRow, newerOrdinary] },
+                openSessionWithProfile: { _, id, _, profile in
+                    resumedIDs.append(id)
+                    resumedProfiles.append(profile)
+                    return SessionResumeResult(
+                        sessionId: id,
+                        storedSessionId: id,
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in },
+                botRoster: { _ in
+                    BotRosterSnapshot(
+                        bots: botRegistered
+                            ? [self.makeBot(name: "Atlas", canonicalID: "stored-of-the-tip")]
+                            : [],
+                        supportsBotProtocol: false
+                    )
+                }
+            )
+        )
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        // Connect-time verification knows no bots; the catalog already carries
+        // the canonical chat's row.
+        await harness.appState.refreshBotRoster()
+        XCTAssertEqual(harness.appState.botModePhase, .available)
+        XCTAssertEqual(harness.appState.botRoster.map(\.name), [])
+        XCTAssertTrue(harness.store.lastSession(for: "default")?.isUnverified ?? false)
+
+        // The bot appears on the gateway mid-session, and only the sync's own
+        // re-verification can see it.
+        botRegistered = true
+        harness.appState.activeSessionId = nil
+
+        await harness.appState.syncSession(
+            purpose: .automaticReturn,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(
+            resumedProfiles,
+            ["Atlas"],
+            "the resume addresses the BOT's profile by its exact name, which a stale snapshot cannot produce"
+        )
+        XCTAssertEqual(
+            resumedIDs,
+            ["stored-of-the-tip"],
+            "the bot chat is resumed, not the newer ordinary conversation"
+        )
+        XCTAssertEqual(
+            harness.store.lastSession(for: "default")?.kind,
+            SessionReference.Kind.bot,
+            "and the unverified selection is healed to `.bot`"
+        )
+        XCTAssertEqual(
+            harness.appState.botConversationProfileForTesting("stored-of-the-tip"),
+            "Atlas",
+            "the bot scope is registered for later re-resumes"
+        )
+        XCTAssertEqual(
+            harness.appState.activeSessionTitle,
+            "Atlas",
+            "and the bot's label is applied to the restored conversation"
+        )
+    }
+
     // MARK: - harness
 
     /// The UserDefaults suite of the most recent harness, so tests can pin
