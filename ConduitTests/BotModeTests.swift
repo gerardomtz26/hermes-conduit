@@ -2677,6 +2677,78 @@ final class BotModeTests: XCTestCase {
         )
     }
 
+    /// A gateway that cannot list profiles has no Bot Mode at all — the probe
+    /// IS `profiles.list` — so no profile on it can be a bot's. Refusing every
+    /// cross-profile route there would break working routing to protect against
+    /// bots that cannot exist.
+    func testProfileOwnershipTreatsUnsupportedGatewayAsOrdinary() async {
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            refreshContext: { _, _ in },
+            botRoster: { _ in
+                throw RpcError(code: -32601, message: "unknown method: profiles.list")
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        await harness.appState.refreshBotRoster()
+
+        XCTAssertEqual(harness.appState.botModePhase, .gatewayUnsupported)
+        XCTAssertEqual(
+            harness.appState.profileOwnershipVerdictForTesting("analyst"),
+            .ordinary,
+            "a gateway without Bot Mode cannot host bot profiles"
+        )
+    }
+
+    /// The ownership evidence is cached for the render/event paths, so a
+    /// registry mutation must be reflected immediately: a stale cache would
+    /// read a just-opened Bot Chat's profile as an ordinary workspace and let
+    /// the push guard fail open.
+    func testOwnershipEvidenceCacheIsInvalidatedByRegistryMutation() async {
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            openSessionWithProfile: { _, _, _, _ in
+                SessionResumeResult(
+                    sessionId: "runtime-1",
+                    storedSessionId: "stored-1",
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            findBotChat: { _, _ in
+                [BotChatLookupRow(id: "stored-1", resolvedID: "runtime-1", title: "Bot Chat")]
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        // Prime the cache with no evidence at all…
+        XCTAssertEqual(
+            harness.appState.profileOwnershipVerdictForTesting("Atlas"),
+            .unverifiable
+        )
+
+        // …then open a bot chat, which registers the profile its RPCs ride.
+        let opened = await harness.appState.openBotChat(for: makeBot(name: "Atlas"))
+        XCTAssertTrue(opened)
+
+        XCTAssertEqual(
+            harness.appState.profileOwnershipVerdictForTesting("Atlas"),
+            .botOwned,
+            "the freshly registered scope is visible without a roster"
+        )
+
+        // And clearing the registry is reflected too.
+        harness.appState.clearBotChatRegistryForTesting()
+        XCTAssertEqual(
+            harness.appState.profileOwnershipVerdictForTesting("Atlas"),
+            .unverifiable
+        )
+    }
+
     // MARK: - harness
 
     /// The UserDefaults suite of the most recent harness, so tests can pin

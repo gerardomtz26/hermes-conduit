@@ -820,7 +820,9 @@ final class AppState: ObservableObject {
     @Published private(set) var botModePhase: BotModePhase = .idle
     /// The read-only roster. Hermes remains authoritative; nothing bot-related
     /// is durably persisted client-side.
-    @Published private(set) var botRoster: [BotProfile] = []
+    @Published private(set) var botRoster: [BotProfile] = [] {
+        didSet { invalidateBotOwnershipCache() }
+    }
     @Published private(set) var isRefreshingBotRoster = false
     /// Bumped at every server-identity boundary; responses captured under an
     /// older epoch are dropped, so a stale async roster can never overwrite
@@ -882,11 +884,29 @@ final class AppState: ObservableObject {
     /// registry. Restoration and sessions-list hygiene both read this instead
     /// of re-deriving the rule, so they can never disagree about whether an id
     /// belongs to a bot's forever chat.
+    /// Derived once per evidence change. Both of its sources are cold paths
+    /// (a roster refresh, a bot-chat open), while its readers are hot: the
+    /// sidebar projection runs on render and `presentationProfile(for:)` runs
+    /// on every stream/tool/approval event, and the registry keeps aliases for
+    /// the process lifetime — so rebuilding the value per read would scan a
+    /// growing roster on the event path.
+    private var cachedBotOwnership: (generation: Int, ownership: SessionBotOwnership)?
+    private var botOwnershipGeneration = 0
+
+    private func invalidateBotOwnershipCache() {
+        botOwnershipGeneration &+= 1
+    }
+
     private var botOwnership: SessionBotOwnership {
-        SessionBotOwnership(
+        if let cached = cachedBotOwnership, cached.generation == botOwnershipGeneration {
+            return cached.ownership
+        }
+        let ownership = SessionBotOwnership(
             roster: botRoster,
             registryProfiles: botChatSessionProfiles
         )
+        cachedBotOwnership = (botOwnershipGeneration, ownership)
+        return ownership
     }
 
     private var botOwnedSessionIDs: Set<String> {
@@ -898,10 +918,19 @@ final class AppState: ObservableObject {
     /// Hermes profiles, so only bot evidence (or its verified absence)
     /// distinguishes a workspace from a bot.
     private func profileOwnershipVerdict(for profile: String) -> ProfileOwnershipVerdict {
+        // Positive evidence first, whatever the capability phase says.
         if botOwnership.ownsProfile(profile) { return .botOwned }
-        // A usable roster is what makes absence meaningful: it is the server's
-        // complete list of bots. Without one (never loaded, still loading, or a
-        // failed/unsupported probe) absence proves nothing.
+        if botModePhase == .gatewayUnsupported {
+            // `profiles.list` IS the Bot Mode capability probe: a gateway that
+            // does not implement it has no Bot Mode, so no profile on it can be
+            // a bot's — refusing every cross-profile route here would break
+            // working routing (profiles are discovered over the HTTP bridge,
+            // not this RPC) to protect against bots that cannot exist.
+            return .ordinary
+        }
+        // Otherwise a usable roster is what makes absence meaningful: it is the
+        // server's complete list of bots. Without one (never loaded, still
+        // loading, or a failed probe) absence proves nothing.
         let rosterEvidenceIsUsable = botModePhase == .available || !botRoster.isEmpty
         return rosterEvidenceIsUsable ? .ordinary : .unverifiable
     }
@@ -9117,6 +9146,7 @@ final class AppState: ObservableObject {
         guard let sessionID,
               !sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         botChatSessionProfiles[sessionID] = profile
+        invalidateBotOwnershipCache()
         if let label = label?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty {
             botChatSessionLabels[sessionID] = label
         }
@@ -9151,6 +9181,7 @@ final class AppState: ObservableObject {
     /// pin that the reference alone still resolves the conversation's scope.
     func clearBotChatRegistryForTesting() {
         botChatSessionProfiles.removeAll()
+        invalidateBotOwnershipCache()
     }
     #endif
 
