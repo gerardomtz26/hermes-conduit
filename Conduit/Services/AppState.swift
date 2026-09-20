@@ -928,6 +928,12 @@ final class AppState: ObservableObject {
             // not this RPC) to protect against bots that cannot exist.
             return .ordinary
         }
+        // Refusal is case-INsensitive on purpose, and asymmetric on purpose: two
+        // Hermes profiles can differ only by case on a case-sensitive host, but
+        // refusing a workspace switch is recoverable and visible ("Open Bots…"),
+        // while adopting a bot's profile as the dashboard workspace is the
+        // failure this path exists to prevent. Audit both directions before
+        // changing this to an exact match.
         // Otherwise absence only means something from a VERIFIED CURRENT
         // answer: `.available` is a roster the server just confirmed, while a
         // roster retained across a failed refresh is stale in the one
@@ -2089,9 +2095,9 @@ final class AppState: ObservableObject {
     /// wire title) and stays out of the workspace's persisted title cache.
     private func applyBotSessionLabel(_ reference: SessionReference) {
         guard reference.kind == .bot else { return }
-        let label = reference.botLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !label.isEmpty else { return }
-        activeSessionTitle = label
+        // Same resolver as the relaunch path, so a Bot Chat cannot show one
+        // title when restored and another when re-adopted.
+        activeSessionTitle = Self.botConversationTitle(for: reference)
     }
 
     private func persistActiveSessionTitles() {
@@ -9155,8 +9161,10 @@ final class AppState: ObservableObject {
         profile: String,
         label: String? = nil
     ) {
-        guard let sessionID,
-              !sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        // The KEY is normalized exactly like every lookup that reads this map
+        // (`botScopeProfile` normalizes its query ids), so a padded id cannot
+        // register an entry the fast path will never find.
+        guard let sessionID = ChatScrollIdentityNormalization.sessionID(sessionID) else { return }
         botChatSessionProfiles[sessionID] = profile
         invalidateBotOwnershipCache()
         if let label = label?.trimmingCharacters(in: .whitespacesAndNewlines), !label.isEmpty {
@@ -9407,11 +9415,16 @@ final class AppState: ObservableObject {
             transitionGeneration: transitionGeneration
         ) else { return false }
         let targetProfile = notificationProfileID(target.profile)
-        if let targetProfile, targetProfile != activeProfile, botRoster.isEmpty {
-            // The refusal below is only as good as the evidence it reads: a
-            // cold process (or a gateway that has not answered yet) would
-            // otherwise adopt a bot's profile as this workspace.
-            await loadChatResumeBotRoster()
+        if let targetProfile, targetProfile != activeProfile, botModePhase != .gatewayUnsupported {
+            // The verdict below reads the roster as ABSENCE evidence, so it must
+            // be evidence from NOW. The roster is otherwise loaded once per
+            // connection and when the Bots surface opens, which leaves a window:
+            // a bot registered after that load is missing from a roster that
+            // still reports `.available`, and its profile would read as an
+            // ordinary workspace. One refresh at this user-initiated decision
+            // (single-flight, epoch-fenced) closes it — and a refresh that fails
+            // leaves the verdict unverifiable, which refuses.
+            await refreshBotRoster()
         }
         if let targetProfile, targetProfile != activeProfile {
             // A bot's profile is not a workspace. Bots ARE ordinary Hermes

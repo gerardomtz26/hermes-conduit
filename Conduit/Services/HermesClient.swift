@@ -2008,7 +2008,11 @@ enum MessageNormalizer {
     }
 
     private static func formattedSessionTimestamp(_ timestamp: Double) -> String {
-        let seconds = timestamp > 10_000_000_000 ? timestamp / 1_000 : timestamp
+        // The SAME unit normalization the ordering instant uses: a µs/ns
+        // payload must not display one date and rank by another.
+        guard let seconds = normalizedSessionTimestamp(timestamp) else {
+            return String(timestamp)
+        }
         let date = Date(timeIntervalSince1970: seconds)
         guard date.timeIntervalSince1970 > 0 else { return String(timestamp) }
         if Calendar.current.isDateInToday(date) {

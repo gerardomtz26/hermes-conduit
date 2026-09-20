@@ -577,7 +577,7 @@ final class CompactResumeTranscriptTests: XCTestCase {
                 ops.loadSlashCommands = {}
             }
         )
-        harness.coordinator.rememberSessionID(active.id, for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: active.id), for: "default")
         harness.appState.sessions = [active]
         harness.appState.activeSessionId = active.id
 
@@ -1317,7 +1317,7 @@ final class CompactResumeTranscriptTests: XCTestCase {
         // A reconnect re-reconciles the same session without clearing the
         // transcript; the refreshed tail grafts onto the backfilled prefix.
         holdsRefreshedTail.isOn = true
-        harness.coordinator.rememberSessionID("stored-a", for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: "stored-a"), for: "default")
         await harness.appState.connect(
             with: HermesConnection(baseUrl: "https://one.example", ticket: "graft-ticket")
         )
@@ -1521,7 +1521,7 @@ final class CompactResumeTranscriptTests: XCTestCase {
         // The automatic reconnect reconciles under the catalog's stored ID;
         // the alias-aware graft gate must still recognize the window.
         holdsRefreshedTail.isOn = true
-        harness.coordinator.rememberSessionID("stored-a", for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: "stored-a"), for: "default")
         await harness.appState.connect(
             with: HermesConnection(baseUrl: "https://one.example", ticket: "alias-graft-ticket")
         )
@@ -2076,7 +2076,7 @@ final class CompactResumeTranscriptTests: XCTestCase {
         // The reconnect re-reconciles under the stored ID while the catalog
         // is still alias-stale; resume re-homes active to runtime-a again.
         holdsRefreshedTail.isOn = true
-        harness.coordinator.rememberSessionID("stored-a", for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: "stored-a"), for: "default")
         await harness.appState.connect(
             with: HermesConnection(baseUrl: "https://one.example", ticket: "stale-alias-graft")
         )

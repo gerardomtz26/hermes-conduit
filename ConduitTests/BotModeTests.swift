@@ -2817,6 +2817,96 @@ final class BotModeTests: XCTestCase {
         )
     }
 
+    /// A roster loaded at connect is not evidence about what the gateway knows
+    /// NOW: a bot registered since then is missing from it, and its profile
+    /// would read as an ordinary workspace. The routing decision therefore
+    /// refreshes the roster itself, so the absence it reads is current.
+    func testRoutingRefreshesRosterBeforeTrustingAbsence() async {
+        var botRegistered = false
+        var resumedIDs: [String] = []
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.makeSessionSummary(id: "ordinary-1", title: "Design review")] },
+            openSessionWithProfile: { _, id, _, _ in
+                resumedIDs.append(id)
+                return SessionResumeResult(
+                    sessionId: id,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            botRoster: { _ in
+                BotRosterSnapshot(
+                    bots: botRegistered ? [self.makeBot(name: "Atlas", canonicalID: "stored-atlas")] : [],
+                    supportsBotProtocol: false
+                )
+            }
+        ))
+        let connection = HermesConnection(baseUrl: "https://one.example", ticket: "ticket")
+        harness.appState.client = HermesClient(connection: connection, profile: "default")
+        harness.appState.connection = connection
+
+        // Connect-time load: the gateway knows no bots yet.
+        await harness.appState.refreshBotRoster()
+        XCTAssertEqual(harness.appState.botModePhase, .available)
+        XCTAssertTrue(harness.appState.botRoster.isEmpty)
+
+        // The bot is registered on the gateway, with no client-side refresh.
+        botRegistered = true
+
+        let routed = await harness.appState.openNotificationTarget(
+            ConduitNotificationTarget(profile: "Atlas", sessionId: "stored-atlas", type: "approval")
+        )
+
+        XCTAssertFalse(routed, "the profile became a bot's between the load and the decision")
+        XCTAssertEqual(harness.appState.activeProfile, "default")
+        XCTAssertTrue(resumedIDs.isEmpty)
+        XCTAssertEqual(
+            harness.appState.errorMessage,
+            "This decision belongs to a Bot Chat. Open Bots to answer it."
+        )
+    }
+
+    /// The decision-time refresh must not break the ordinary case: a target that
+    /// is still absent from the refreshed roster is a workspace.
+    func testRoutingStillProceedsForWorkspaceAbsentFromFreshRoster() async {
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.makeSessionSummary(id: "ordinary-1", title: "Design review")] },
+            openSessionWithProfile: { _, id, _, _ in
+                SessionResumeResult(
+                    sessionId: id,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            botRoster: { _ in
+                BotRosterSnapshot(
+                    bots: [self.makeBot(name: "Atlas", canonicalID: "stored-atlas")],
+                    supportsBotProtocol: false
+                )
+            }
+        ))
+        let connection = HermesConnection(baseUrl: "https://one.example", ticket: "ticket")
+        harness.appState.client = HermesClient(connection: connection, profile: "default")
+        harness.appState.connection = connection
+
+        _ = await harness.appState.openNotificationTarget(
+            ConduitNotificationTarget(profile: "analyst", sessionId: "stored-1", type: "approval")
+        )
+
+        XCTAssertNotEqual(
+            harness.appState.errorMessage,
+            "This decision belongs to a Bot Chat. Open Bots to answer it.",
+            "an ordinary workspace is never refused as Bot Mode"
+        )
+        XCTAssertNotEqual(
+            harness.appState.errorMessage,
+            "Could not verify that workspace for this notification. Reconnect and try again.",
+            "and the fresh roster is usable evidence, not unverifiable"
+        )
+    }
+
     // MARK: - harness
 
     /// The UserDefaults suite of the most recent harness, so tests can pin

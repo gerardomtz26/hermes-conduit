@@ -66,11 +66,6 @@ final class ChatResumeCoordinator {
         store.setLastSession(reference, for: profile)
     }
 
-    /// Records a conversation of the workspace's Sessions surface.
-    func rememberSessionID(_ sessionID: String?, for profile: String) {
-        store.setLastSessionID(sessionID, for: profile)
-    }
-
     /// Reclassifies a stored reference in place (a legacy id-only selection
     /// that positive bot evidence now attributes to a Bot Chat). Returns the
     /// reference that must be used for restoration either way.

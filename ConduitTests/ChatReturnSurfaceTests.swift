@@ -273,7 +273,7 @@ final class ChatReturnSurfaceTests: XCTestCase {
         let harness = makeHarness(behavior: .continueWhereLeftOff, surface: .sessions)
         let saved = session("stored-saved")
         let other = session("stored-other")
-        harness.coordinator.rememberSessionID(saved.id, for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: saved.id), for: "default")
         harness.appState.sessions = [other, saved]
         // Continue-where-left-off returns into the remembered session.
         harness.appState.activeSessionId = saved.id
@@ -308,7 +308,7 @@ final class ChatReturnSurfaceTests: XCTestCase {
         let cronEntry = session("stored-cron", source: .cron)
         // Latest-activity ignores the remembered ID and picks the first chat
         // entry of the automatic-return catalog, which is newest-first.
-        harness.coordinator.rememberSessionID(olderChat.id, for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: olderChat.id), for: "default")
         harness.appState.sessions = [newestChat, cronEntry, olderChat]
         harness.appState.activeSessionId = newestChat.id
 

@@ -140,11 +140,14 @@ final class ChatResumeStore {
         persist()
     }
 
-    /// Records a conversation of this workspace's Sessions surface. Kept as
-    /// the id-shaped entry point for existing callers and fixtures; a Bot
-    /// Mode conversation must be recorded through `setLastSession(_:for:)`
-    /// with its kind, or it would be indistinguishable from an ordinary
-    /// conversation after a relaunch.
+    /// Records a conversation of this workspace's Sessions surface.
+    ///
+    /// FIXTURE- AND MIGRATION-ONLY: production records through
+    /// `setLastSession(_:for:)`, which carries the kind. A bare id cannot
+    /// express one, so reaching for this in production would record a Bot
+    /// Chat as an ordinary conversation — the defect this store's v2 payload
+    /// exists to prevent. Test fixtures keep it because they predate the kind
+    /// and describe ordinary conversations.
     func setLastSessionID(_ sessionID: String?, for profile: String) {
         guard let sessionID else {
             setLastSession(nil, for: profile)

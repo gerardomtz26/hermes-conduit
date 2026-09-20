@@ -2746,7 +2746,7 @@ final class AppStateChatResumeTests: XCTestCase {
             sessionPresentationCache: cache,
             conversationIdentityIndex: index
         )
-        harness.coordinator.rememberSessionID("stored-a", for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: "stored-a"), for: "default")
         harness.store.save(
             ChatScrollSnapshot(anchorMessageID: "anchor", followsLatest: false),
             for: ChatScrollSessionKey(profile: "default", sessionID: "stored-a"),
@@ -3469,7 +3469,7 @@ final class AppStateChatResumeTests: XCTestCase {
                 mintTicket: { _ in "refreshed-ticket" }
             )
         )
-        harness.coordinator.rememberSessionID("stored-saved", for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: "stored-saved"), for: "default")
         harness.appState.connection = HermesConnection(
             baseUrl: "https://one.example",
             ticket: "saved-ticket"
@@ -3517,7 +3517,7 @@ final class AppStateChatResumeTests: XCTestCase {
                 loadSlashCommands: {}
             )
         )
-        harness.coordinator.rememberSessionID(active.id, for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: active.id), for: "default")
         harness.appState.sessions = [active]
         harness.appState.activeSessionId = active.id
         let connection = HermesConnection(
@@ -4355,7 +4355,7 @@ final class AppStateChatResumeTests: XCTestCase {
         let harness = makeHarness()
         let oldKey = ChatScrollSessionKey(profile: "default", sessionID: "stored-a")
         let oldReading = ChatScrollSnapshot(anchorMessageID: "anchor-12", followsLatest: false)
-        harness.coordinator.rememberSessionID("stored-a", for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: "stored-a"), for: "default")
         harness.appState.recordChatViewport(oldReading, for: oldKey)
         harness.coordinator.freezeViewport()
 
@@ -4389,7 +4389,7 @@ final class AppStateChatResumeTests: XCTestCase {
         let key = ChatScrollSessionKey(profile: "default", sessionID: "same-session")
 
         XCTAssertFalse(harness.appState.prepareChatResumeForConnection(to: "https://one.example"))
-        harness.coordinator.rememberSessionID("same-session", for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: "same-session"), for: "default")
         harness.coordinator.recordViewport(
             ChatScrollSnapshot(anchorMessageID: "server-one-anchor", followsLatest: false),
             for: key
@@ -4423,7 +4423,7 @@ final class AppStateChatResumeTests: XCTestCase {
         ))
         let key = ChatScrollSessionKey(profile: "default", sessionID: "stored-missing")
         let saved = ChatScrollSnapshot(anchorMessageID: "saved-anchor", followsLatest: false)
-        harness.coordinator.rememberSessionID("stored-missing", for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: "stored-missing"), for: "default")
         harness.coordinator.recordViewport(saved, for: key)
         harness.coordinator.flush()
         installComposerClient(in: harness)
@@ -4458,7 +4458,7 @@ final class AppStateChatResumeTests: XCTestCase {
             anchorMessageID: "sentinel-anchor",
             followsLatest: false
         )
-        harness.coordinator.rememberSessionID("sentinel-session", for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: "sentinel-session"), for: "default")
         harness.coordinator.recordViewport(snapshot, for: key)
         harness.coordinator.flush()
 
@@ -4490,7 +4490,7 @@ final class AppStateChatResumeTests: XCTestCase {
         )
         XCTAssertNil(harness.defaults.string(forKey: "conduit.chatResumeServerIdentity.v1"))
         XCTAssertNil(harness.defaults.string(forKey: "conduit.dashboardURL"))
-        harness.coordinator.rememberSessionID("sentinel-session", for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: "sentinel-session"), for: "default")
         harness.coordinator.recordViewport(snapshot, for: key)
         harness.coordinator.flush()
 
@@ -4513,7 +4513,7 @@ final class AppStateChatResumeTests: XCTestCase {
             }
         )
         let key = ChatScrollSessionKey(profile: "default", sessionID: "same-session")
-        harness.coordinator.rememberSessionID("same-session", for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: "same-session"), for: "default")
         harness.coordinator.recordViewport(.latest, for: key)
         harness.coordinator.flush()
         harness.appState.rememberDashboardURL("https://two.example")
@@ -5253,8 +5253,8 @@ final class AppStateChatResumeTests: XCTestCase {
             ticket: "saved-ticket"
         )
         let originalClient = HermesClient(connection: savedConnection, profile: "default")
-        harness.coordinator.rememberSessionID(defaultSession.id, for: "default")
-        harness.coordinator.rememberSessionID(workSession.id, for: "work")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: defaultSession.id), for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "work", sessionID: workSession.id), for: "work")
         harness.appState.connection = savedConnection
         harness.appState.client = originalClient
         harness.appState.isConnected = true
@@ -5527,7 +5527,7 @@ final class AppStateChatResumeTests: XCTestCase {
                 loadSlashCommands: {}
             )
         )
-        harness.coordinator.rememberSessionID(savedOlder.id, for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: savedOlder.id), for: "default")
         let savedConnection = HermesConnection(
             baseUrl: "https://127.0.0.1:1",
             ticket: "saved-ticket"
@@ -5600,7 +5600,7 @@ final class AppStateChatResumeTests: XCTestCase {
                 refreshContext: { _, _ in }
             )
         )
-        harness.coordinator.rememberSessionID(savedOlder.id, for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: savedOlder.id), for: "default")
         installComposerClient(in: harness)
         harness.appState.sessions = [savedOlder, visible]
         harness.appState.activeSessionId = visible.id
@@ -5758,7 +5758,7 @@ final class AppStateChatResumeTests: XCTestCase {
                 loadSlashCommands: {}
             )
         )
-        harness.coordinator.rememberSessionID(automaticReturnTarget.id, for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: automaticReturnTarget.id), for: "default")
         let savedConnection = HermesConnection(
             baseUrl: "https://127.0.0.1:1",
             ticket: "saved-ticket"

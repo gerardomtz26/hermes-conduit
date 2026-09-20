@@ -225,8 +225,8 @@ final class CrossProfilePresentationCacheTests: XCTestCase {
             park: park
         )
         let connection = HermesConnection(baseUrl: "https://127.0.0.1:1", ticket: "saved-ticket")
-        harness.coordinator.rememberSessionID(defaultSession.id, for: "default")
-        harness.coordinator.rememberSessionID(fixtures.session.id, for: "work")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: defaultSession.id), for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "work", sessionID: fixtures.session.id), for: "work")
         seedOutgoingTranscript(in: harness.appState, connection: connection, sessionID: defaultSession.id)
         harness.appState.installChatViewportSnapshotProvider(id: UUID()) {
             ChatRenderedViewportSnapshot(
@@ -351,7 +351,7 @@ final class CrossProfilePresentationCacheTests: XCTestCase {
             park: park
         )
         let connection = HermesConnection(baseUrl: "https://127.0.0.1:1", ticket: "saved-ticket")
-        harness.coordinator.rememberSessionID(fixtures.session.id, for: "work")
+        harness.coordinator.rememberSession(.dashboard(profile: "work", sessionID: fixtures.session.id), for: "work")
         seedOutgoingTranscript(in: harness.appState, connection: connection, sessionID: "session-a")
 
         harness.appState.handleStreamEvent(.cwdUpdate(sessionId: "session-a", cwd: "/tmp/a"))
@@ -410,8 +410,8 @@ final class CrossProfilePresentationCacheTests: XCTestCase {
             park: park
         )
         let connection = HermesConnection(baseUrl: "https://127.0.0.1:1", ticket: "saved-ticket")
-        harness.coordinator.rememberSessionID("session-a", for: "default")
-        harness.coordinator.rememberSessionID(fixtures.session.id, for: "work")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: "session-a"), for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "work", sessionID: fixtures.session.id), for: "work")
         seedOutgoingTranscript(in: harness.appState, connection: connection, sessionID: "session-a")
         harness.appState.installChatViewportSnapshotProvider(id: UUID()) {
             ChatRenderedViewportSnapshot(
@@ -470,8 +470,8 @@ final class CrossProfilePresentationCacheTests: XCTestCase {
             park: park
         )
         let connection = HermesConnection(baseUrl: "https://127.0.0.1:1", ticket: "saved-ticket")
-        harness.coordinator.rememberSessionID(defaultSession.id, for: "default")
-        harness.coordinator.rememberSessionID(fixtures.session.id, for: "work")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: defaultSession.id), for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "work", sessionID: fixtures.session.id), for: "work")
         seedOutgoingTranscript(in: harness.appState, connection: connection, sessionID: defaultSession.id)
         harness.appState.installChatViewportSnapshotProvider(id: UUID()) {
             ChatRenderedViewportSnapshot(

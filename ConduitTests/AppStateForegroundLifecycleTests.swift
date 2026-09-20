@@ -7914,7 +7914,7 @@ final class AppStateForegroundLifecycleTests: XCTestCase {
         let box = await installConnectedClient(into: harness)
         harness.appState.sessions = [savedOlder]
         harness.appState.activeSessionId = nil
-        harness.coordinator.rememberSessionID(savedOlder.id, for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: savedOlder.id), for: "default")
 
         harness.appState.handleScenePhase(.background)
         let activation = harness.appState.handleScenePhase(.active)
@@ -8009,7 +8009,7 @@ final class AppStateForegroundLifecycleTests: XCTestCase {
         let seeded = await harness.appState.openSession(visible.id)
         XCTAssertTrue(seeded, file: file, line: line)
         openedSessionIDs.removeAll()
-        harness.coordinator.rememberSessionID(savedOlder.id, for: "default")
+        harness.coordinator.rememberSession(.dashboard(profile: "default", sessionID: savedOlder.id), for: "default")
 
         harness.appState.handleScenePhase(.background)
         let activation = harness.appState.handleScenePhase(.active)
