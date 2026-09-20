@@ -61,6 +61,13 @@ final class AppStateChatResumeTests: XCTestCase {
 
     func testColdRelaunchResumesDurableSavedSessionWhenCatalogTemporarilyOmitsIt() async {
         var initialRequests: [String] = []
+        // The escape hatch this pins requires VERIFIED bot evidence: a selection
+        // recorded while Bot Mode could not be probed is deliberately unverified
+        // (it could be a bot chat this workspace cannot identify), so this fixture
+        // models a connected client whose empty roster the server confirmed.
+        let emptyRoster: @MainActor (HermesClient) async throws -> BotRosterSnapshot = { _ in
+            BotRosterSnapshot(bots: [], supportsBotProtocol: false)
+        }
         let harness = makeHarness(lifecycleOperations: ChatResumeLifecycleOperations(
             loadCatalog: { _, _ in [] },
             openSession: { _, sessionID, _ in
@@ -72,12 +79,16 @@ final class AppStateChatResumeTests: XCTestCase {
                     snapshot: SessionRuntimeSnapshot(object: ["running": .bool(true)])
                 )
             },
-            refreshContext: { _, _ in }
+            refreshContext: { _, _ in },
+            botRoster: emptyRoster
         ))
         harness.appState.client = HermesClient(
             connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
             profile: "default"
         )
+        harness.appState.isConnected = true
+        await harness.appState.refreshBotRoster()
+        XCTAssertEqual(harness.appState.botModePhase, .available)
         // This is the pre-persistence state after session.create: only the
         // runtime ID is known locally. The next admitted resume establishes
         // Hermes's durable stored ID.
@@ -106,7 +117,8 @@ final class AppStateChatResumeTests: XCTestCase {
                         snapshot: SessionRuntimeSnapshot(object: ["running": .bool(true)])
                     )
                 },
-                refreshContext: { _, _ in }
+                refreshContext: { _, _ in },
+                botRoster: emptyRoster
             ),
             sessionPresentationCache: SessionPresentationCache(defaults: harness.defaults)
         )
@@ -114,6 +126,8 @@ final class AppStateChatResumeTests: XCTestCase {
             connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
             profile: "default"
         )
+        restoredState.isConnected = true
+        await restoredState.refreshBotRoster()
 
         XCTAssertEqual(restoredState.activeSessionId, "stored-a")
         await restoredState.syncSession(

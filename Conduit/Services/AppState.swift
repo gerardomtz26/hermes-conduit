@@ -2025,7 +2025,18 @@ final class AppState: ObservableObject {
                 sessionID: persistedID
             )
         }
-        return .dashboard(profile: activeProfile, sessionID: persistedID)
+        // A `.dashboard` write made while bot evidence is UNREADABLE is not a
+        // verified ordinary conversation: a bot chat can be sitting in the
+        // workspace store during a failed/pending probe, and recording it as
+        // typed would let the next launch trust that classification for good.
+        // It is recorded as unverified instead, so the authority gates apply to
+        // it exactly as they do to a migrated id — and `referenceIfBot` heals it
+        // in the one direction that matters once evidence returns.
+        return .dashboard(
+            profile: activeProfile,
+            sessionID: persistedID,
+            isLegacyIDOnly: !botEvidenceIsAvailable
+        )
     }
 
     /// Every identity that can be positively linked to a stored reference
@@ -15062,7 +15073,6 @@ final class AppState: ObservableObject {
             )
         )
     }
-
 
     private func titleGenerationSettings(for profile: String) async -> TitleGenerationSettings? {
         guard let dashboardTicketBridge else { return nil }

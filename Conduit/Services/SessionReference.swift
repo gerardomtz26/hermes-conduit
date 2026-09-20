@@ -134,27 +134,24 @@ struct SessionBotOwnership {
         rosterCanonicalIDs.union(registryProfiles.keys)
     }
 
-    var isEmpty: Bool {
-        rosterCanonicalIDs.isEmpty && registryProfiles.isEmpty
-    }
-
     /// The bot profile this name matches, and whether the match was spelled
     /// exactly. Refusal folds case (see `ownsProfile`), so the caller can tell
     /// "this IS that bot's profile" from "this only matches with different
     /// casing" — the second case may be an unrelated workspace.
     func botProfileMatch(for profile: String) -> (name: String, isExact: Bool)? {
         guard let normalized = SessionBotOwnership.normalized(profile) else { return nil }
-        if let rosterName = roster.first(where: {
-            $0.name.caseInsensitiveCompare(normalized) == .orderedSame
-        })?.name {
-            return (rosterName, rosterName == normalized)
+        let names = roster.map { $0.name } + Array(registryProfiles.values)
+        // An EXACT spelling from either source outranks any case-insensitive hit:
+        // the caller distinguishes "this is that bot's profile" from "this only
+        // matches with different casing", and a roster holding a differently
+        // cased duplicate must not misreport which one it matched.
+        if let exact = names.first(where: { $0 == normalized }) {
+            return (exact, true)
         }
-        if let registryName = registryProfiles.values.first(where: {
+        guard let folded = names.first(where: {
             $0.caseInsensitiveCompare(normalized) == .orderedSame
-        }) {
-            return (registryName, registryName == normalized)
-        }
-        return nil
+        }) else { return nil }
+        return (folded, false)
     }
 
     /// Whether this profile is a bot's own profile — not a workspace the
@@ -172,13 +169,6 @@ struct SessionBotOwnership {
         return registryProfiles.values.contains {
             $0.caseInsensitiveCompare(normalized) == .orderedSame
         }
-    }
-
-
-    /// The roster entry owning this conversation, when the roster names it.
-    func bot(owning sessionID: String?) -> BotProfile? {
-        guard let sessionID = SessionBotOwnership.normalized(sessionID) else { return nil }
-        return bot(owningAny: [sessionID])
     }
 
     /// The roster entry owning the conversation when ANY of its identities is
