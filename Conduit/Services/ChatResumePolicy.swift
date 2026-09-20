@@ -27,18 +27,37 @@ enum ChatResumeSessionResolver {
     /// identity directly before considering a different conversation: a
     /// partial cold-start catalog is discovery data, not authority to replace
     /// the conversation the user last selected.
+    ///
+    /// `botOwnedSessionIDs` are conversations the client can positively
+    /// attribute to Bot Mode. They are excluded here for the same reason the
+    /// Sessions surface excludes them: a Bot Chat is not this workspace's
+    /// conversation, so an id that only positive bot evidence can resolve must
+    /// not become the workspace's selected conversation. A bot-typed
+    /// reference is restored through the Bot Mode path instead.
     static func missingSavedSessionID(
         in catalog: [SessionSummary],
         behavior: ChatResumeBehavior,
         purpose: ChatResumeSyncPurpose,
         savedSessionID: String?,
-        activeProfile: String? = nil
+        activeProfile: String? = nil,
+        botOwnedSessionIDs: Set<String> = [],
+        savedSessionAliases: Set<String> = []
     ) -> String? {
         guard purpose == .automaticReturn,
               behavior == .continueWhereLeftOff,
               let savedSessionID = ChatScrollIdentityNormalization.sessionID(savedSessionID) else {
             return nil
         }
+        // Bot ownership is tested across the conversation's whole identity set:
+        // its durable row, the runtime id a rebind minted, a lineage tip, and
+        // the aliases the scroll identity confirms. An alias-only match is
+        // still the same conversation.
+        let conversationIDs = savedSessionAliases.reduce(into: Set([savedSessionID])) {
+            if let normalized = ChatScrollIdentityNormalization.sessionID($1) {
+                $0.insert(normalized)
+            }
+        }
+        guard conversationIDs.isDisjoint(with: botOwnedSessionIDs) else { return nil }
 
         let scoped = activeProfile.map { profile in
             catalog.filter { entry in
@@ -62,7 +81,8 @@ enum ChatResumeSessionResolver {
         purpose: ChatResumeSyncPurpose,
         savedSessionID: String?,
         currentSessionID: String?,
-        activeProfile: String? = nil
+        activeProfile: String? = nil,
+        botOwnedSessionIDs: Set<String> = []
     ) -> SessionSummary? {
         // Filter to the active profile when available so sessions from
         // other profiles don't interfere with ID matching or fallback.
@@ -81,7 +101,14 @@ enum ChatResumeSessionResolver {
            let matched = scoped.first(where: {
                 $0.id == requestedID || $0.alternateIds.contains(requestedID)
            }) {
-            return matched
+            // The saved/current id positively resolves to a row. A row the
+            // client knows to be a Bot Chat is NOT this workspace's
+            // conversation: the reference's kind (restored through the Bot
+            // Mode path) owns it, so ordinary selection declines rather than
+            // adopting it here.
+            if !BotChatHygiene.isBotOwnedRow(matched, botOwnedSessionIDs: botOwnedSessionIDs) {
+                return matched
+            }
         }
         if purpose == .preserveCurrent {
             // Catalog absence of an ESTABLISHED current identity is not
@@ -94,7 +121,44 @@ enum ChatResumeSessionResolver {
                 return nil
             }
         }
-        return scoped.first(where: { $0.source == .chat })
+        // One definition of "this row is a bot's forever chat" for both the
+        // sessions surface and this selection: a second copy here could drift
+        // and let the two disagree.
+        return latestChat(
+            in: scoped.filter {
+                !BotChatHygiene.isBotOwnedRow($0, botOwnedSessionIDs: botOwnedSessionIDs)
+            }
+        )
+    }
+
+    /// The workspace's newest conversation, from the authoritative activity
+    /// instant when the rows carry one. List position is NOT authoritative:
+    /// the sync path prepends a retained active-turn row and merges cached
+    /// rows behind live ones, so "first row" can name a conversation the
+    /// server did not order first. Rows without a machine-readable timestamp
+    /// rank behind every timestamped one (and, when NO candidate carries one,
+    /// the historical first-row behavior stands — the server's own ordering is
+    /// then the only evidence there is).
+    ///
+    /// Locally-created rows (a new conversation, a branch) are stamped with
+    /// their creation instant, so a conversation whose first turn is in flight
+    /// still outranks older dated rows. Equal instants keep the earliest
+    /// catalog row (strict `>`), which is deterministic and pinned by test.
+    static func latestChat(in rows: [SessionSummary]) -> SessionSummary? {
+        let chats = rows.filter { $0.source == .chat }
+        guard !chats.isEmpty else { return nil }
+        var best: (row: SessionSummary, at: TimeInterval)?
+        for row in chats {
+            guard let at = row.lastActivityAt else { continue }
+            guard let current = best else {
+                best = (row, at)
+                continue
+            }
+            if at > current.at {
+                best = (row, at)
+            }
+        }
+        return best?.row ?? chats.first
     }
 }
 

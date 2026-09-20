@@ -472,7 +472,14 @@ final class BotModeTests: XCTestCase {
         XCTAssertNotNil(harness.appState.errorMessage)
     }
 
-    func testBotOpenDoesNotSeedTheColdRestoreResumeStore() async {
+    /// A bot open records the conversation the user is now viewing — with its
+    /// KIND. The reference is what a relaunch restores from, so recording it as
+    /// an ordinary conversation of the dashboard profile (the pre-type
+    /// behavior) would reopen a bot's forever chat from the Sessions surface;
+    /// recording nothing would lose the conversation the user was in. The
+    /// workspace's ORDINARY selection is protected by the reference's kind, not
+    /// by refusing to remember it.
+    func testBotOpenRecordsTypedReferenceWithoutClaimingTheOrdinarySurface() async {
         let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
             openSession: { _, id, _ in
                 SessionResumeResult(
@@ -491,14 +498,22 @@ final class BotModeTests: XCTestCase {
             connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
             profile: "default"
         )
-        harness.store.setLastSessionID("ordinary-previous", for: "default")
 
         _ = await harness.appState.openBotChat(for: makeBot(name: "atlas"))
 
-        XCTAssertEqual(
-            harness.store.lastSessionID(for: "default"),
-            "ordinary-previous",
-            "a bot chat is not the dashboard workspace's selected conversation"
+        let stored = harness.store.lastSession(for: "default")
+        XCTAssertEqual(stored?.kind, SessionReference.Kind.bot, "the Bot Chat is remembered as a Bot Chat")
+        XCTAssertEqual(stored?.scopeProfile, "atlas")
+        XCTAssertNil(
+            harness.appState.sessions.first(where: { $0.id == "stored-1" }),
+            "the Sessions surface still carries no bot row"
+        )
+        let persisted = lastHarnessDefaults?.dictionary(
+            forKey: "conduit.activeSessionTitlesByProfile.v1"
+        ) as? [String: String]
+        XCTAssertFalse(
+            persisted?.values.contains(BotMode.canonicalChatTitle) ?? false,
+            "the bot chat never writes the workspace's ordinary title cache: \(persisted ?? [:])"
         )
     }
 
@@ -1368,9 +1383,10 @@ final class BotModeTests: XCTestCase {
         let reopenedOrdinary = await harness.appState.openSession("runtime-1")
         XCTAssertTrue(reopenedOrdinary, "a registry-known bot chat still opens through the ordinary path")
         XCTAssertEqual(harness.appState.activeSessionId, "runtime-1")
-        XCTAssertNil(
-            harness.store.lastSessionID(for: "default"),
-            "an ordinary-path open of a bot conversation never claims the cold-restore selection"
+        XCTAssertEqual(
+            harness.store.lastSession(for: "default")?.kind,
+            SessionReference.Kind.bot,
+            "the conversation is remembered with its KIND, whatever path opened it"
         )
         XCTAssertEqual(
             harness.appState.activeSessionTitle,
@@ -1462,6 +1478,960 @@ final class BotModeTests: XCTestCase {
         )
     }
 
+    // MARK: - session kind across restoration
+
+    /// A bot chat's open CAN legitimately rotate the runtime id (a documented
+    /// `session.resume` behavior). Recording the conversation's KIND must
+    /// therefore not depend on the resumed runtime id being the id the open
+    /// requested: the stored reference must name a Bot Chat however the resume
+    /// answered, so a relaunch restores it against the bot's profile instead of
+    /// treating it as an ordinary conversation of the workspace that happened
+    /// to be active.
+    func testBotOpenRecordsTypedReferenceThroughRotatedRuntime() async {
+        var resumedProfiles: [String?] = []
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            openSessionWithProfile: { _, _, _, profile in
+                resumedProfiles.append(profile)
+                return SessionResumeResult(
+                    sessionId: "runtime-rotated",
+                    storedSessionId: "stored-1",
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            findBotChat: { _, _ in
+                [BotChatLookupRow(id: "stored-1", resolvedID: "runtime-1", title: "Bot Chat")]
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+
+        let opened = await harness.appState.openBotChat(for: makeBot(name: "atlas"))
+
+        XCTAssertTrue(opened)
+        XCTAssertEqual(resumedProfiles, ["atlas"], "the bot chat resumes its own profile")
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-rotated")
+        let stored = harness.store.lastSession(for: "default")
+        XCTAssertEqual(
+            stored?.kind,
+            SessionReference.Kind.bot,
+            "the rotated runtime is still the known Bot Chat"
+        )
+        XCTAssertEqual(stored?.scopeProfile, "atlas")
+        XCTAssertEqual(
+            stored?.resumeProfileScope,
+            "atlas",
+            "a restored Bot Chat addresses the BOT's store, never the workspace's"
+        )
+        XCTAssertEqual(
+            harness.appState.botConversationProfileForTesting("runtime-rotated"),
+            "atlas",
+            "every identity of the adopted conversation resolves to its bot profile"
+        )
+    }
+
+    /// The durable selection is state written by earlier builds: a bare session
+    /// id with no kind. When positive bot evidence (the roster loaded at
+    /// connect) attributes that id to a Bot Chat, restoring it as an ordinary
+    /// conversation of the workspace — which is what the pre-type code did, and
+    /// what reopens a bot session from a workspace with no Bots surface in
+    /// sight — must not happen; the conversation restores AS a Bot Chat, scoped
+    /// to the bot's profile and labelled with the bot's name.
+    func testLegacyStoredSelectionNamingBotChatRestoresAsBotSession() async {
+        var resumedIDs: [String] = []
+        var resumedProfiles: [String?] = []
+        let harness = makeBotHarness(
+            configureDefaults: { defaults in
+                ChatResumeStore(defaults: defaults).setLastSessionID("stored-1", for: "default")
+            },
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in
+                    [self.makeSessionSummary(id: "ordinary-new", title: "Design review")]
+                },
+                openSessionWithProfile: { _, id, _, profile in
+                    resumedIDs.append(id)
+                    resumedProfiles.append(profile)
+                    return SessionResumeResult(
+                        sessionId: id == "stored-1" ? "runtime-1" : id,
+                        storedSessionId: id,
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in },
+                botRoster: { _ in
+                    BotRosterSnapshot(
+                        bots: [self.makeBot(name: "atlas", canonicalID: "stored-1")],
+                        supportsBotProtocol: false
+                    )
+                }
+            )
+        )
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        // The connect sequence's roster load, which is what supplies the
+        // evidence that the stored id is a bot's canonical chat.
+        await harness.appState.refreshBotRoster()
+        harness.appState.activeSessionId = nil
+
+        await harness.appState.syncSession(
+            purpose: .automaticReturn,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(resumedIDs, ["stored-1"], "the stored conversation is still preferred")
+        XCTAssertEqual(
+            resumedProfiles,
+            ["atlas"],
+            "and it resumes against the BOT's profile — the workspace profile cannot see it"
+        )
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-1")
+        XCTAssertEqual(
+            harness.store.lastSession(for: "default")?.kind,
+            SessionReference.Kind.bot,
+            "the legacy id-only selection is upgraded to a typed reference"
+        )
+    }
+
+    /// Both surfaces exist at once, and the BOT chat is the newer conversation.
+    /// The workspace still restores its own newest conversation: a bot chat is
+    /// not part of the Sessions surface, so "continue where I left off" must
+    /// not open one. The reserved canonical title alone is enough here (the
+    /// cold-launch case, with no roster loaded).
+    func testAutomaticReturnPrefersNewestOrdinarySessionOverNewerBotChat() async {
+        var resumedIDs: [String] = []
+        var resumedProfiles: [String?] = []
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in
+                [
+                    self.makeSessionSummary(
+                        id: "runtime-bot",
+                        title: BotMode.canonicalChatTitle,
+                        storedID: "stored-bot",
+                        lastActivityAt: 300
+                    ),
+                    self.makeSessionSummary(id: "ordinary-new", title: "Design review", lastActivityAt: 200)
+                ]
+            },
+            openSessionWithProfile: { _, id, _, profile in
+                resumedIDs.append(id)
+                resumedProfiles.append(profile)
+                return SessionResumeResult(
+                    sessionId: id,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        XCTAssertTrue(harness.appState.botRoster.isEmpty, "a cold launch carries no roster")
+
+        await harness.appState.syncSession(
+            purpose: .automaticReturn,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(resumedIDs, ["ordinary-new"], "the newest BOT chat is never the workspace's conversation")
+        XCTAssertEqual(harness.appState.activeSessionId, "ordinary-new")
+        XCTAssertEqual(harness.store.lastSession(for: "default")?.kind, SessionReference.Kind.dashboard)
+    }
+
+    /// Same shape, opposite ordering: the ordinary conversation is older than
+    /// the bot chat, and the bot chat's own title no longer reads "Bot Chat"
+    /// (a compaction moved the conversation to a lineage tip). The roster's
+    /// canonical registry is what excludes the row, so the workspace still
+    /// restores its own newest conversation.
+    func testOwnershipEvidenceExcludesUntitledBotChatFromOrdinarySelection() async {
+        var resumedIDs: [String] = []
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in
+                [
+                    self.makeSessionSummary(id: "runtime-tip", title: "Weekly digest", lastActivityAt: 400),
+                    self.makeSessionSummary(id: "ordinary-old", title: "Design review", lastActivityAt: 100)
+                ]
+            },
+            openSessionWithProfile: { _, id, _, _ in
+                resumedIDs.append(id)
+                return SessionResumeResult(
+                    sessionId: id,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            botRoster: { _ in
+                BotRosterSnapshot(
+                    bots: [self.makeBot(name: "atlas", canonicalID: "stored-1", resolvedID: "runtime-tip")],
+                    supportsBotProtocol: false
+                )
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        await harness.appState.refreshBotRoster()
+
+        await harness.appState.syncSession(
+            purpose: .automaticReturn,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(
+            resumedIDs,
+            ["ordinary-old"],
+            "a canonical chat's lineage tip is excluded by registry identity, not only by title"
+        )
+        XCTAssertEqual(harness.appState.activeSessionId, "ordinary-old")
+    }
+
+    /// Foregrounding while a normal conversation is on screen: the conversation
+    /// stays, and nothing about Bot Mode leaks into the selection even though a
+    /// newer bot chat sits in the same catalog.
+    func testForegroundPreservesActiveNormalSession() async {
+        var resumedIDs: [String] = []
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in
+                [
+                    self.makeSessionSummary(
+                        id: "runtime-bot",
+                        title: BotMode.canonicalChatTitle,
+                        storedID: "stored-bot",
+                        lastActivityAt: 900
+                    ),
+                    self.makeSessionSummary(id: "ordinary-visible", title: "Design review", lastActivityAt: 100)
+                ]
+            },
+            openSessionWithProfile: { _, id, _, _ in
+                resumedIDs.append(id)
+                return SessionResumeResult(
+                    sessionId: id,
+                    storedSessionId: id,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        harness.appState.sessions = [makeSessionSummary(id: "ordinary-visible", title: "Design review")]
+        harness.appState.activeSessionId = "ordinary-visible"
+
+        await harness.appState.syncSession(
+            purpose: .preserveCurrent,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(resumedIDs, ["ordinary-visible"], "the visible conversation is repaired, not replaced")
+        XCTAssertEqual(harness.appState.activeSessionId, "ordinary-visible")
+        XCTAssertEqual(harness.store.lastSession(for: "default")?.kind, SessionReference.Kind.dashboard)
+        XCTAssertNil(harness.appState.botConversationProfileForTesting("ordinary-visible"))
+    }
+
+    /// Foregrounding while a Bot Chat is on screen: the exact conversation
+    /// survives, still as a Bot Chat — resumed against the bot's profile, still
+    /// labelled with the bot's name, and still recorded as a `.bot` reference.
+    func testForegroundPreservesActiveBotSessionAsBotSession() async {
+        var resumedIDs: [String] = []
+        var resumedProfiles: [String?] = []
+        let harness = makeBotHarness(
+            configureDefaults: { defaults in
+                ChatResumeStore(defaults: defaults).setLastSession(
+                    .bot(botName: "atlas", label: "Scout", sessionID: "runtime-1"),
+                    for: "default"
+                )
+            },
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in [self.makeSessionSummary(id: "ordinary-1", title: "Design review")] },
+                openSessionWithProfile: { _, id, _, profile in
+                    resumedIDs.append(id)
+                    resumedProfiles.append(profile)
+                    return SessionResumeResult(
+                        sessionId: id,
+                        storedSessionId: "stored-1",
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in }
+            )
+        )
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        // A cold launch restored the Bot Chat's reference: identity, type, and
+        // label all survive the relaunch.
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-1")
+        XCTAssertEqual(harness.appState.activeSessionTitle, "Scout")
+        XCTAssertEqual(harness.appState.botConversationProfileForTesting("runtime-1"), "atlas")
+
+        await harness.appState.syncSession(
+            purpose: .preserveCurrent,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(resumedIDs, ["runtime-1"])
+        XCTAssertEqual(resumedProfiles, ["atlas"], "the foreground refresh addresses the bot's profile")
+        XCTAssertEqual(harness.appState.activeSessionId, "runtime-1")
+        XCTAssertEqual(harness.appState.activeSessionTitle, "Scout")
+        XCTAssertEqual(harness.store.lastSession(for: "default")?.kind, SessionReference.Kind.bot)
+    }
+
+    /// "Continue where I left off" prefers the stored conversation even when it
+    /// is NOT the globally newest one — the stored selection is the user's last
+    /// position, not a ranking.
+    func testAutomaticReturnPrefersStoredSessionOverNewestCatalogRow() async {
+        var resumedIDs: [String] = []
+        let harness = makeBotHarness(
+            configureDefaults: { defaults in
+                ChatResumeStore(defaults: defaults).setLastSessionID("ordinary-stored", for: "default")
+            },
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in
+                    [
+                        self.makeSessionSummary(id: "ordinary-newest", title: "Newest", lastActivityAt: 900),
+                        self.makeSessionSummary(id: "ordinary-stored", title: "Where I left off", lastActivityAt: 100)
+                    ]
+                },
+                openSessionWithProfile: { _, id, _, _ in
+                    resumedIDs.append(id)
+                    return SessionResumeResult(
+                        sessionId: id,
+                        storedSessionId: id,
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in }
+            )
+        )
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        harness.appState.activeSessionId = nil
+
+        await harness.appState.syncSession(
+            purpose: .automaticReturn,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(resumedIDs, ["ordinary-stored"])
+        XCTAssertEqual(harness.appState.activeSessionId, "ordinary-stored")
+    }
+
+    /// The stored conversation was deleted while the app was away: the 4007
+    /// answer drops it and the replacement is chosen by the AUTHORITATIVE
+    /// activity instant — not by list position, which merges cached rows behind
+    /// live ones and can carry a stale row first.
+    func testDeletedStoredSessionFallsBackToNewestByTimestampNotListOrder() async {
+        var resumedIDs: [String] = []
+        let harness = makeBotHarness(
+            configureDefaults: { defaults in
+                ChatResumeStore(defaults: defaults).setLastSessionID("ordinary-deleted", for: "default")
+            },
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in
+                    // List order deliberately puts the older row first.
+                    [
+                        self.makeSessionSummary(id: "ordinary-older", title: "Older", lastActivityAt: 100),
+                        self.makeSessionSummary(id: "ordinary-newer", title: "Newest", lastActivityAt: 500)
+                    ]
+                },
+                openSessionWithProfile: { _, id, _, _ in
+                    resumedIDs.append(id)
+                    if id == "ordinary-deleted" {
+                        throw RpcError(code: 4007, message: "session not found")
+                    }
+                    return SessionResumeResult(
+                        sessionId: id,
+                        storedSessionId: id,
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in }
+            )
+        )
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        harness.appState.activeSessionId = nil
+
+        await harness.appState.syncSession(
+            purpose: .automaticReturn,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(
+            resumedIDs,
+            ["ordinary-deleted", "ordinary-newer"],
+            "the deleted conversation is dropped once, then the newest conversation is chosen"
+        )
+        XCTAssertEqual(harness.appState.activeSessionId, "ordinary-newer")
+        XCTAssertEqual(harness.store.lastSessionID(for: "default"), "ordinary-newer")
+    }
+
+    /// A workspace switch restores THAT workspace's conversation, with its own
+    /// kind: a Bot Chat recorded under a workspace comes back as a Bot Chat
+    /// scoped to its bot, and an ordinary conversation of another workspace
+    /// never inherits a bot scope.
+    func testWorkspaceRestorationKeepsEachContextsSessionKind() async {
+        let harness = makeBotHarness(
+            configureDefaults: { defaults in
+                let store = ChatResumeStore(defaults: defaults)
+                store.setLastSession(
+                    .bot(botName: "atlas", label: "Scout", sessionID: "stored-1"),
+                    for: "default"
+                )
+                store.setLastSessionID("work-session", for: "work")
+            },
+            lifecycleOperations: ChatResumeLifecycleOperations(refreshContext: { _, _ in })
+        )
+
+        // What `switchProfile` and cold launch both call.
+        harness.appState.restoreActiveSessionState(for: "work")
+        XCTAssertEqual(harness.appState.activeSessionId, "work-session")
+        XCTAssertNil(
+            harness.appState.botConversationProfileForTesting("work-session"),
+            "an ordinary conversation never inherits a bot profile scope"
+        )
+
+        harness.appState.restoreActiveSessionState(for: "default")
+        XCTAssertEqual(harness.appState.activeSessionId, "stored-1")
+        XCTAssertEqual(
+            harness.appState.botConversationProfileForTesting("stored-1"),
+            "atlas",
+            "the workspace's Bot Chat keeps its bot scope across a workspace switch"
+        )
+        XCTAssertEqual(harness.appState.activeSessionTitle, "Scout")
+    }
+
+    /// The `activeProfileSessions` projection (what the Sessions list renders
+    /// and what a workspace considers its own) never carries a bot conversation
+    /// — by reserved title or by registry identity — so a restored Bot Chat
+    /// cannot reappear as an ordinary row after a workspace switch.
+    func testSessionsSurfaceProjectionExcludesBotConversations() async {
+        let harness = makeBotHarness(
+            configureDefaults: { defaults in
+                ChatResumeStore(defaults: defaults).setLastSession(
+                    .bot(botName: "atlas", label: "Scout", sessionID: "stored-1"),
+                    for: "default"
+                )
+            },
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                refreshContext: { _, _ in },
+                botRoster: { _ in
+                    BotRosterSnapshot(
+                        bots: [self.makeBot(name: "atlas", canonicalID: "stored-1", resolvedID: "runtime-tip")],
+                        supportsBotProtocol: false
+                    )
+                }
+            )
+        )
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        await harness.appState.refreshBotRoster()
+
+        harness.appState.sessions = [
+            makeSessionSummary(id: "runtime-tip", title: "Weekly digest"),
+            makeSessionSummary(id: "ordinary-1", title: "Design review")
+        ]
+
+        XCTAssertEqual(
+            harness.appState.activeProfileSessions.map(\.id),
+            ["ordinary-1"],
+            "the workspace surface keeps only its own conversations"
+        )
+    }
+
+    /// The mirror of the newer-bot-chat case: with the ORDINARY conversation
+    /// newest, both surfaces still keep to themselves — the workspace restores
+    /// its own conversation and never reports a bot conversation as active.
+    func testAutomaticReturnPicksTheNewestOrdinaryWhenItIsAlsoNewestOverall() async {
+        var resumedIDs: [String] = []
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in
+                [
+                    self.makeSessionSummary(id: "ordinary-newest", title: "Newest", lastActivityAt: 900),
+                    self.makeSessionSummary(
+                        id: "runtime-bot",
+                        title: BotMode.canonicalChatTitle,
+                        storedID: "stored-bot",
+                        lastActivityAt: 100
+                    )
+                ]
+            },
+            openSessionWithProfile: { _, id, _, _ in
+                resumedIDs.append(id)
+                return SessionResumeResult(
+                    sessionId: id,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+
+        await harness.appState.syncSession(
+            purpose: .automaticReturn,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(resumedIDs, ["ordinary-newest"])
+        XCTAssertEqual(harness.appState.activeSessionId, "ordinary-newest")
+        XCTAssertNil(harness.appState.botConversationProfileForTesting("ordinary-newest"))
+        XCTAssertEqual(harness.store.lastSession(for: "default")?.kind, SessionReference.Kind.dashboard)
+    }
+
+    /// A relaunch: a second AppState over the same defaults must restore the
+    /// Bot Chat with its TYPE intact — the id, the bot's profile scope, and the
+    /// bot's label — instead of an anonymous conversation of the dashboard
+    /// profile.
+    func testRelaunchRestoresPersistedBotSessionWithItsType() async {
+        let suite = "BotModeTests.Relaunch.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
+        let operations = ChatResumeLifecycleOperations(
+            openSessionWithProfile: { _, _, _, _ in
+                SessionResumeResult(
+                    sessionId: "runtime-1",
+                    storedSessionId: "stored-1",
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            findBotChat: { _, _ in
+                [BotChatLookupRow(id: "stored-1", resolvedID: "runtime-1", title: "Bot Chat")]
+            }
+        )
+        let bot = BotProfile(
+            name: "atlas",
+            botTitle: "Scout",
+            displayName: "Atlas",
+            profileDescription: "",
+            model: nil,
+            provider: nil,
+            hasAvatar: false,
+            isPinned: false,
+            isHiddenByMeta: false,
+            appearanceColor: nil,
+            canonicalSession: nil,
+            lastActive: nil,
+            lastPreview: nil
+        )
+
+        // First launch: the user opens the bot's chat.
+        let first = makeBotHarness(reusing: defaults, lifecycleOperations: operations)
+        first.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        let opened = await first.appState.openBotChat(for: bot)
+        XCTAssertTrue(opened)
+        XCTAssertEqual(first.store.lastSession(for: "default")?.kind, SessionReference.Kind.bot)
+
+        // Relaunch: a new process reading the same defaults.
+        var resumedProfiles: [String?] = []
+        let relaunchedOperations = ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.makeSessionSummary(id: "ordinary-1", title: "Design review")] },
+            openSessionWithProfile: { _, id, _, profile in
+                resumedProfiles.append(profile)
+                return SessionResumeResult(
+                    sessionId: id,
+                    storedSessionId: id,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in }
+        )
+        let second = makeBotHarness(reusing: defaults, lifecycleOperations: relaunchedOperations)
+        second.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+
+        // The DURABLE identity is what a relaunch addresses (the runtime id of
+        // the previous process is gone), and it is still the bot's chat.
+        XCTAssertEqual(second.appState.activeSessionId, "stored-1")
+        XCTAssertEqual(second.appState.activeSessionTitle, "Scout")
+        XCTAssertEqual(
+            second.appState.botConversationProfileForTesting("stored-1"),
+            "atlas",
+            "the relaunch restored the conversation's BOT scope, not the dashboard profile's"
+        )
+
+        // And the restored conversation still resumes through the bot's profile.
+        await second.appState.syncSession(
+            purpose: .preserveCurrent,
+            using: nil,
+            automaticWorkToken: nil
+        )
+        XCTAssertEqual(resumedProfiles, ["atlas"])
+    }
+
+    // MARK: - review-gate hardening
+
+    /// The resume scope must not depend on this PROCESS having opened the
+    /// conversation: a restored Bot Chat's scope also comes from the roster's
+    /// canonical registries and from the durable reference itself. With both
+    /// the registry and the roster silent, the reference is the last
+    /// authority — and without it the resume would address the dashboard
+    /// profile store and lose the session.
+    func testBotResumeScopeSurvivesRegistryAndRosterLoss() async {
+        var resumedProfiles: [String?] = []
+        let harness = makeBotHarness(
+            configureDefaults: { defaults in
+                ChatResumeStore(defaults: defaults).setLastSession(
+                    .bot(botName: "atlas", label: "Scout", sessionID: "stored-1"),
+                    for: "default"
+                )
+            },
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in [self.makeSessionSummary(id: "ordinary-1", title: "Design review")] },
+                openSessionWithProfile: { _, id, _, profile in
+                    resumedProfiles.append(profile)
+                    return SessionResumeResult(
+                        sessionId: id,
+                        storedSessionId: id,
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in }
+            )
+        )
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        // The relaunch restored the reference (label and scope included), then
+        // the process lost its in-memory registrations: the roster was never
+        // loaded for this connection and the registry was cleared.
+        XCTAssertEqual(harness.appState.activeSessionId, "stored-1")
+        harness.appState.clearBotChatRegistryForTesting()
+
+        await harness.appState.syncSession(
+            purpose: .preserveCurrent,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(
+            resumedProfiles,
+            ["atlas"],
+            "the durable reference still names the bot profile its RPCs must ride"
+        )
+    }
+
+    /// Bot evidence can live on an ALIAS of the stored id (a compaction tip, a
+    /// runtime the rebind minted, a lineage root). Healing and the
+    /// missing-saved-session gate are therefore evaluated across the
+    /// conversation's whole identity set, not just the stored value.
+    func testStoredSelectionHealsThroughAliasAndLineageRootEvidence() async {
+        var resumedProfiles: [String?] = []
+        let tipRow = SessionSummary(
+            id: "runtime-tip",
+            storedSessionId: "stored-1",
+            alternateIds: [],
+            title: "Weekly digest",
+            model: "Hermes",
+            updatedLabel: "now",
+            lastActivityAt: 500,
+            profile: "default",
+            source: .chat,
+            isActive: false,
+            isArchived: false,
+            lineageRootId: "canonical-root"
+        )
+        let harness = makeBotHarness(
+            configureDefaults: { defaults in
+                ChatResumeStore(defaults: defaults).setLastSessionID("stored-1", for: "default")
+            },
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in
+                    [tipRow, self.makeSessionSummary(id: "ordinary-1", title: "Design review", lastActivityAt: 100)]
+                },
+                openSessionWithProfile: { _, id, _, profile in
+                    resumedProfiles.append(profile)
+                    return SessionResumeResult(
+                        sessionId: id,
+                        storedSessionId: id,
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in },
+                botRoster: { _ in
+                    // The canonical registry names ONLY the lineage root: the
+                    // row reaches it through `lineageRootId` alone.
+                    BotRosterSnapshot(
+                        bots: [self.makeBot(name: "atlas", canonicalID: "canonical-root")],
+                        supportsBotProtocol: false
+                    )
+                }
+            )
+        )
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        await harness.appState.refreshBotRoster()
+        harness.appState.activeSessionId = nil
+
+        await harness.appState.syncSession(
+            purpose: .automaticReturn,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(
+            resumedProfiles,
+            ["atlas"],
+            "the alias/lineage evidence is what heals the stored selection"
+        )
+        XCTAssertEqual(
+            harness.store.lastSession(for: "default")?.kind,
+            SessionReference.Kind.bot
+        )
+    }
+
+    /// A row linked to a bot only through its LINEAGE ROOT is still a bot
+    /// conversation: it must not be adopted as the workspace's own, and it must
+    /// not be visible on the Sessions surface.
+    func testLineageRootLinkageExcludesRowFromSessionsSurfaceAndSelection() async {
+        var resumedIDs: [String] = []
+        let tipRow = SessionSummary(
+            id: "runtime-tip",
+            storedSessionId: nil,
+            alternateIds: [],
+            title: "Weekly digest",
+            model: "Hermes",
+            updatedLabel: "now",
+            lastActivityAt: 900,
+            profile: "default",
+            source: .chat,
+            isActive: false,
+            isArchived: false,
+            lineageRootId: "canonical-root"
+        )
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in
+                [tipRow, self.makeSessionSummary(id: "ordinary-1", title: "Design review", lastActivityAt: 100)]
+            },
+            openSessionWithProfile: { _, id, _, _ in
+                resumedIDs.append(id)
+                return SessionResumeResult(
+                    sessionId: id,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            botRoster: { _ in
+                BotRosterSnapshot(
+                    bots: [self.makeBot(name: "atlas", canonicalID: "canonical-root")],
+                    supportsBotProtocol: false
+                )
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        await harness.appState.refreshBotRoster()
+        harness.appState.sessions = [tipRow, makeSessionSummary(id: "ordinary-1", title: "Design review")]
+
+        XCTAssertEqual(harness.appState.activeProfileSessions.map(\.id), ["ordinary-1"])
+
+        await harness.appState.syncSession(
+            purpose: .automaticReturn,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(
+            resumedIDs,
+            ["ordinary-1"],
+            "the newest BOT lineage tip is never the workspace's conversation"
+        )
+    }
+
+    /// The rule itself recognizes the lineage-root identity (the Sessions
+    /// projection and the resume selection share this one definition).
+    func testOwnershipRuleRecognizesLineageRootIdentity() {
+        let tipRow = SessionSummary(
+            id: "runtime-tip",
+            alternateIds: [],
+            title: "Weekly digest",
+            model: "Hermes",
+            updatedLabel: "now",
+            profile: "default",
+            source: .chat,
+            isActive: false,
+            isArchived: false,
+            lineageRootId: "canonical-root"
+        )
+
+        XCTAssertTrue(
+            BotChatHygiene.isBotOwnedRow(tipRow, botOwnedSessionIDs: ["canonical-root"])
+        )
+        XCTAssertFalse(
+            BotChatHygiene.isBotOwnedRow(tipRow, botOwnedSessionIDs: ["something-else"]),
+            "unrelated evidence must not reserve an ordinary row"
+        )
+    }
+
+    /// A locally-created conversation's activity is NOW: without a timestamp
+    /// its row would rank behind every dated row in the "latest activity"
+    /// fallback, abandoning a conversation whose first turn is still running.
+    func testLocallyCreatedConversationOutranksOlderDatedRows() {
+        let created = makeSessionSummary(
+            id: "local-new",
+            title: "New conversation",
+            lastActivityAt: Date().timeIntervalSince1970
+        )
+        let olderDated = makeSessionSummary(id: "older", title: "Older", lastActivityAt: 100)
+
+        XCTAssertEqual(
+            ChatResumeSessionResolver.latestChat(in: [created, olderDated])?.id,
+            "local-new"
+        )
+    }
+
+    /// Equal instants keep the earliest catalog row — deterministic, and the
+    /// behavior a `>=` refactor would silently flip.
+    func testLatestChatKeepsEarliestRowOnEqualInstants() {
+        let first = makeSessionSummary(id: "first", title: "First", lastActivityAt: 500)
+        let second = makeSessionSummary(id: "second", title: "Second", lastActivityAt: 500)
+
+        XCTAssertEqual(ChatResumeSessionResolver.latestChat(in: [first, second])?.id, "first")
+        XCTAssertEqual(ChatResumeSessionResolver.latestChat(in: [second, first])?.id, "second")
+    }
+
+    // MARK: - connect ordering + push routing (review-gate hardening)
+
+    /// Bot evidence must exist BEFORE the sync that decides which conversation
+    /// the workspace was in: the reserved-title rule covers a cold launch, but
+    /// the registry rule (and reference healing) needs the roster, so the
+    /// roster load leads the connect sequence.
+    func testConnectLoadsBotRosterBeforeTheResumeDecision() async {
+        var events: [String] = []
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            connectClient: { _ in },
+            loadCatalog: { _, _ in
+                events.append("catalog")
+                return [self.makeSessionSummary(id: "ordinary-1", title: "Design review")]
+            },
+            mintTicket: { _ in "refreshed-ticket" },
+            openSessionWithProfile: { _, id, _, _ in
+                events.append("resume:\(id)")
+                return SessionResumeResult(
+                    sessionId: id,
+                    storedSessionId: id,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            loadProfiles: {},
+            loadBusyInputMode: { _ in },
+            loadProfileDisplayPreferences: {},
+            loadSlashCommands: {},
+            loadBotRoster: {
+                events.append("roster")
+            }
+        ))
+
+        await harness.appState.connect(
+            with: HermesConnection(baseUrl: "https://one.example", ticket: "ticket")
+        )
+
+        XCTAssertEqual(events.first, "roster", "the roster load leads the sequence: \(events)")
+        XCTAssertLessThan(
+            events.firstIndex(of: "roster") ?? .max,
+            events.firstIndex(of: "catalog") ?? .max,
+            "bot evidence is in hand before the resume decision: \(events)"
+        )
+    }
+
+    /// A decision pushed from a Bot Chat names the BOT's profile. Adopting it
+    /// as this dashboard's workspace would turn a bot conversation into the
+    /// workspace's own context, so routing fails closed instead of switching.
+    func testNotificationForBotProfileFailsClosedInsteadOfSwitchingWorkspace() async {
+        var resumedIDs: [String] = []
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.makeSessionSummary(id: "ordinary-1", title: "Design review")] },
+            openSessionWithProfile: { _, id, _, _ in
+                resumedIDs.append(id)
+                return SessionResumeResult(
+                    sessionId: id,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            botRoster: { _ in
+                BotRosterSnapshot(
+                    bots: [self.makeBot(name: "atlas", canonicalID: "stored-1")],
+                    supportsBotProtocol: false
+                )
+            }
+        ))
+        let connection = HermesConnection(baseUrl: "https://one.example", ticket: "ticket")
+        harness.appState.client = HermesClient(connection: connection, profile: "default")
+        harness.appState.connection = connection
+        // The roster the guard reads; the connect sequence loads the same one
+        // before any resume decision runs.
+        await harness.appState.refreshBotRoster()
+
+        let routed = await harness.appState.openNotificationTarget(
+            ConduitNotificationTarget(
+                profile: "atlas",
+                sessionId: "stored-1",
+                type: "approval"
+            )
+        )
+
+        XCTAssertFalse(routed, "a bot-profile decision is not routed as a workspace conversation")
+        XCTAssertEqual(harness.appState.activeProfile, "default", "the workspace profile is untouched")
+        XCTAssertTrue(resumedIDs.isEmpty)
+        XCTAssertEqual(
+            harness.appState.errorMessage,
+            "This decision belongs to a Bot Chat. Open Bots to answer it."
+        )
+    }
+
     // MARK: - harness
 
     /// The UserDefaults suite of the most recent harness, so tests can pin
@@ -1469,17 +2439,28 @@ final class BotModeTests: XCTestCase {
     /// visible string.
     private var lastHarnessDefaults: UserDefaults?
 
+    /// Builds an AppState over a private defaults suite. `reusing` supplies an
+    /// EXISTING suite so a test can simulate a relaunch (a second process
+    /// reading the same persisted state); the caller owns that suite's
+    /// teardown in that case.
     private func makeBotHarness(
         configureDefaults: (UserDefaults) -> Void = { _ in },
         sessionCatalogLoader: ((Bool) async throws -> [SessionSummary])? = nil,
+        reusing reusedDefaults: UserDefaults? = nil,
         lifecycleOperations: ChatResumeLifecycleOperations
     ) -> (appState: AppState, store: ChatResumeStore) {
-        let suite = "BotModeTests.\(UUID().uuidString)"
-        guard let defaults = UserDefaults(suiteName: suite) else {
-            fatalError("Failed to create test UserDefaults suite")
-        }
-        addTeardownBlock {
-            defaults.removePersistentDomain(forName: suite)
+        let defaults: UserDefaults
+        if let reusedDefaults {
+            defaults = reusedDefaults
+        } else {
+            let suite = "BotModeTests.\(UUID().uuidString)"
+            guard let created = UserDefaults(suiteName: suite) else {
+                fatalError("Failed to create test UserDefaults suite")
+            }
+            addTeardownBlock {
+                created.removePersistentDomain(forName: suite)
+            }
+            defaults = created
         }
         lastHarnessDefaults = defaults
         configureDefaults(defaults)
@@ -1506,13 +2487,14 @@ final class BotModeTests: XCTestCase {
         canonicalID: String? = nil,
         resolvedID: String? = nil,
         canonicalLastActive: Double? = nil,
-        lastActive: Double? = nil
+        lastActive: Double? = nil,
+        botTitle: String? = nil
     ) -> BotProfile {
         let resolvedCanonicalID = canonicalID
             ?? (canonicalLastActive != nil ? "stored-\(name)" : nil)
         return BotProfile(
             name: name,
-            botTitle: nil,
+            botTitle: botTitle,
             displayName: name,
             profileDescription: "",
             model: nil,
@@ -1538,7 +2520,8 @@ final class BotModeTests: XCTestCase {
         id: String,
         title: String,
         storedID: String? = nil,
-        profile: String? = "default"
+        profile: String? = "default",
+        lastActivityAt: TimeInterval? = nil
     ) -> SessionSummary {
         SessionSummary(
             id: id,
@@ -1547,6 +2530,7 @@ final class BotModeTests: XCTestCase {
             title: title,
             model: "Hermes",
             updatedLabel: "now",
+            lastActivityAt: lastActivityAt,
             profile: profile,
             source: .chat,
             isActive: false,

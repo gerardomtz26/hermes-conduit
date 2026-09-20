@@ -531,6 +531,12 @@ struct SessionSummary: Identifiable, Equatable {
     var title: String
     var model: String
     var updatedLabel: String
+    /// The row's activity instant in epoch seconds, when the listing carried a
+    /// machine-readable one (`updatedLabel` is a FORMATTED string and cannot
+    /// order anything). Restoration's "latest" fallback reads this instead of
+    /// list position, which merges cached rows behind live ones and prepends a
+    /// retained active-turn row.
+    var lastActivityAt: TimeInterval? = nil
     var profile: String?
     var source: SessionSource
     var isActive: Bool

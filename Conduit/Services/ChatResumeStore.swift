@@ -2,8 +2,16 @@ import Foundation
 
 @MainActor
 final class ChatResumeStore {
+    /// The storage key keeps its `v1` name deliberately: it is the key a
+    /// previous build wrote, and the payload's own `version` field is what
+    /// migrates. Bumping the KEY instead would silently strand every existing
+    /// install's resume state.
     static let defaultStorageKey = "conduit.chatResume.v1"
-    static let schemaVersion = 1
+    /// v2 adds the conversation KIND (and its profile scope) to the
+    /// per-workspace selection, so restoration can tell a Bot Chat from an
+    /// ordinary conversation. v1 payloads migrate their bare session ids to
+    /// `.dashboard` references.
+    static let schemaVersion = 2
     static let maximumSnapshots = 100
 
     private struct StoredSnapshot: Codable, Equatable {
@@ -12,10 +20,22 @@ final class ChatResumeStore {
         let updatedAt: Date
     }
 
-    private struct Payload: Codable, Equatable {
+    /// The v1 payload shape, kept only to migrate it.
+    private struct LegacyPayload: Codable, Equatable {
         let version: Int
         var behavior: ChatResumeBehavior
         var lastSessionIDsByProfile: [String: String]
+        var snapshots: [StoredSnapshot]
+    }
+
+    private struct Payload: Codable, Equatable {
+        let version: Int
+        var behavior: ChatResumeBehavior
+        /// The conversation the user was in, per dashboard workspace profile:
+        /// id AND kind. A bot chat is recorded under the workspace that was
+        /// active when it was opened — the workspace selection answers "what
+        /// was I looking at here", never "which profile owns the session".
+        var lastSessionByProfile: [String: SessionReference]
         var snapshots: [StoredSnapshot]
     }
 
@@ -35,8 +55,8 @@ final class ChatResumeStore {
             payload = Payload(
                 version: Self.schemaVersion,
                 behavior: .continueWhereLeftOff,
-                lastSessionIDsByProfile: Self.normalizedLastSessionIDs(
-                    defaults.dictionary(forKey: legacyActiveSessionsKey) as? [String: String] ?? [:]
+                lastSessionByProfile: Self.migratedReferences(
+                    from: defaults.dictionary(forKey: legacyActiveSessionsKey) as? [String: String] ?? [:]
                 ),
                 snapshots: []
             )
@@ -44,18 +64,41 @@ final class ChatResumeStore {
             return
         }
 
-        guard let data = defaults.data(forKey: storageKey),
-              let storedPayload = try? JSONDecoder().decode(Payload.self, from: data),
-              storedPayload.version == Self.schemaVersion else {
+        guard let data = defaults.data(forKey: storageKey) else {
             payload = Self.emptyPayload
             persist()
             return
         }
 
-        payload = Self.normalized(storedPayload)
-        if payload != storedPayload {
-            persist()
+        if let storedPayload = try? JSONDecoder().decode(Payload.self, from: data),
+           storedPayload.version == Self.schemaVersion {
+            payload = Self.normalized(storedPayload)
+            if payload != storedPayload {
+                persist()
+            }
+            return
         }
+
+        // A v1 (or unreadable) payload: migrate the bare session ids into
+        // typed references. An unreadable payload keeps the historical
+        // behavior — start clean — since a corrupt blob carries no identity
+        // worth trusting.
+        if let legacy = try? JSONDecoder().decode(LegacyPayload.self, from: data),
+           legacy.version == 1 {
+            payload = Self.normalized(Payload(
+                version: Self.schemaVersion,
+                behavior: legacy.behavior,
+                lastSessionByProfile: Self.migratedReferences(
+                    from: legacy.lastSessionIDsByProfile
+                ),
+                snapshots: legacy.snapshots
+            ))
+            persist()
+            return
+        }
+
+        payload = Self.emptyPayload
+        persist()
     }
 
     var behavior: ChatResumeBehavior {
@@ -67,22 +110,48 @@ final class ChatResumeStore {
         persist()
     }
 
-    func lastSessionID(for profile: String) -> String? {
+    /// The conversation the user was in for this workspace profile, with its
+    /// kind intact.
+    func lastSession(for profile: String) -> SessionReference? {
         guard let normalizedProfile = Self.normalizedProfile(profile) else { return nil }
-        return payload.lastSessionIDsByProfile[normalizedProfile]
+        return payload.lastSessionByProfile[normalizedProfile]
     }
 
-    func setLastSessionID(_ sessionID: String?, for profile: String) {
+    /// The persisted session id alone. Needed by identity comparisons (does
+    /// the stored selection still name THIS conversation?), which is a
+    /// different question from how it must be restored.
+    func lastSessionID(for profile: String) -> String? {
+        lastSession(for: profile)?.sessionID
+    }
+
+    func setLastSession(_ reference: SessionReference?, for profile: String) {
         guard let normalizedProfile = Self.normalizedProfile(profile) else { return }
-        guard let sessionID else {
-            payload.lastSessionIDsByProfile.removeValue(forKey: normalizedProfile)
+        guard let reference else {
+            payload.lastSessionByProfile.removeValue(forKey: normalizedProfile)
             persist()
             return
         }
-        let key = ChatScrollSessionKey(profile: normalizedProfile, sessionID: sessionID)
-        guard key.isValid else { return }
-        payload.lastSessionIDsByProfile[key.profile] = key.sessionID
+        let key = ChatScrollSessionKey(
+            profile: normalizedProfile,
+            sessionID: reference.sessionID
+        )
+        guard key.isValid, let normalized = Self.normalized(reference) else { return }
+        payload.lastSessionByProfile[key.profile] = normalized
         persist()
+    }
+
+    /// Records a conversation of this workspace's Sessions surface. Kept as
+    /// the id-shaped entry point for existing callers and fixtures; a Bot
+    /// Mode conversation must be recorded through `setLastSession(_:for:)`
+    /// with its kind, or it would be indistinguishable from an ordinary
+    /// conversation after a relaunch.
+    func setLastSessionID(_ sessionID: String?, for profile: String) {
+        guard let sessionID else {
+            setLastSession(nil, for: profile)
+            return
+        }
+        guard let normalizedProfile = Self.normalizedProfile(profile) else { return }
+        setLastSession(.dashboard(profile: normalizedProfile, sessionID: sessionID), for: profile)
     }
 
     func snapshot(for key: ChatScrollSessionKey) -> ChatScrollSnapshot? {
@@ -115,8 +184,15 @@ final class ChatResumeStore {
 
         let migratedSnapshot = migrateSnapshotInPayload(from: oldKey, to: newKey)
         let migratedLastSession: Bool
-        if payload.lastSessionIDsByProfile[oldKey.profile] == oldKey.sessionID {
-            payload.lastSessionIDsByProfile[oldKey.profile] = newKey.sessionID
+        if let existing = payload.lastSessionByProfile[oldKey.profile],
+           existing.sessionID == oldKey.sessionID {
+            payload.lastSessionByProfile[oldKey.profile] = SessionReference(
+                kind: existing.kind,
+                scopeProfile: existing.scopeProfile,
+                botName: existing.botName,
+                botLabel: existing.botLabel,
+                sessionID: newKey.sessionID
+            )
             migratedLastSession = true
         } else {
             migratedLastSession = false
@@ -128,7 +204,7 @@ final class ChatResumeStore {
     }
 
     func clearResumeState() {
-        payload.lastSessionIDsByProfile = [:]
+        payload.lastSessionByProfile = [:]
         payload.snapshots = []
         persist()
     }
@@ -148,9 +224,9 @@ final class ChatResumeStore {
             $0.key.profile == normalizedProfile && ids.contains($0.key.sessionID)
         }
         changed = changed || payload.snapshots.count != before
-        if let last = payload.lastSessionIDsByProfile[normalizedProfile],
-           ids.contains(last) {
-            payload.lastSessionIDsByProfile.removeValue(forKey: normalizedProfile)
+        if let last = payload.lastSessionByProfile[normalizedProfile],
+           ids.contains(last.sessionID) {
+            payload.lastSessionByProfile.removeValue(forKey: normalizedProfile)
             changed = true
         }
         if changed {
@@ -166,7 +242,7 @@ final class ChatResumeStore {
         Payload(
             version: schemaVersion,
             behavior: .continueWhereLeftOff,
-            lastSessionIDsByProfile: [:],
+            lastSessionByProfile: [:],
             snapshots: []
         )
     }
@@ -194,23 +270,91 @@ final class ChatResumeStore {
         Payload(
             version: schemaVersion,
             behavior: payload.behavior,
-            lastSessionIDsByProfile: normalizedLastSessionIDs(payload.lastSessionIDsByProfile),
+            lastSessionByProfile: normalizedLastSessions(payload.lastSessionByProfile),
             snapshots: pruned(payload.snapshots)
         )
     }
 
-    private static func normalizedLastSessionIDs(_ values: [String: String]) -> [String: String] {
-        let normalized = values.compactMap { entry -> ChatScrollSessionKey? in
+    /// A stored reference is trusted only as far as its own validity goes: its
+    /// session id is normalized the way every comparison normalizes it (an
+    /// untrimmed id would survive here and then fail the delete/not-found
+    /// equality fences, leaving restorable state for a deleted conversation),
+    /// and a `.bot` reference is repaired to name its own scope — nil when no
+    /// scope survives, in which case the entry is dropped rather than kept
+    /// half-addressed.
+    private static func normalized(_ reference: SessionReference) -> SessionReference? {
+        guard let sessionID = ChatScrollIdentityNormalization.sessionID(reference.sessionID) else {
+            return nil
+        }
+        guard reference.kind == .bot else {
+            return SessionReference(
+                kind: .dashboard,
+                scopeProfile: reference.scopeProfile,
+                botName: nil,
+                botLabel: nil,
+                sessionID: sessionID
+            )
+        }
+        guard let scope = ChatScrollIdentityNormalization.profile(
+            reference.botName ?? reference.scopeProfile
+        ) else { return nil }
+        return SessionReference(
+            kind: .bot,
+            scopeProfile: scope,
+            botName: scope,
+            botLabel: reference.botLabel,
+            sessionID: sessionID
+        )
+    }
+
+    private static func normalizedLastSessions(
+        _ values: [String: SessionReference]
+    ) -> [String: SessionReference] {
+        let normalized = values.compactMap { entry -> (String, SessionReference)? in
+            let key = ChatScrollSessionKey(
+                profile: entry.key,
+                sessionID: entry.value.sessionID
+            )
+            guard key.isValid, let reference = normalized(entry.value) else { return nil }
+            return (key.profile, reference)
+        }.sorted { lhs, rhs in
+            if lhs.0 != rhs.0 { return lhs.0 < rhs.0 }
+            return lhs.1.sessionID < rhs.1.sessionID
+        }
+        return normalized.reduce(into: [:]) { result, entry in
+            if result[entry.0] == nil {
+                result[entry.0] = entry.1
+            }
+        }
+    }
+
+    /// v1 → v2: a bare session id carries no kind, so it migrates as an
+    /// ordinary conversation of its workspace. A reference that actually
+    /// named a Bot Chat is reclassified by the restore path the first time
+    /// positive bot evidence is available
+    /// (`SessionBotOwnership.referenceIfBot`).
+    ///
+    /// Colliding profile spellings collapse deterministically (lexicographic
+    /// profile, then session id) — the same rule the id-only store used, so a
+    /// degraded cache cannot resolve differently between launches during
+    /// dictionary iteration order.
+    private static func migratedReferences(
+        from ids: [String: String]
+    ) -> [String: SessionReference] {
+        let candidates: [(profile: String, sessionID: String)] = ids.compactMap { entry in
             let key = ChatScrollSessionKey(profile: entry.key, sessionID: entry.value)
-            return key.isValid ? key : nil
+            guard key.isValid else { return nil }
+            return (key.profile, key.sessionID)
         }.sorted { lhs, rhs in
             if lhs.profile != rhs.profile { return lhs.profile < rhs.profile }
             return lhs.sessionID < rhs.sessionID
         }
-        return normalized.reduce(into: [:]) { result, key in
-            if result[key.profile] == nil {
-                result[key.profile] = key.sessionID
-            }
+        return candidates.reduce(into: [:]) { result, candidate in
+            guard result[candidate.profile] == nil else { return }
+            result[candidate.profile] = .dashboard(
+                profile: candidate.profile,
+                sessionID: candidate.sessionID
+            )
         }
     }
 

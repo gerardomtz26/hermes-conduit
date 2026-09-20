@@ -15051,6 +15051,16 @@
         }
       }
     },
+    "This decision belongs to a Bot Chat. Open Bots to answer it." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此决定属于某个 Bot Chat。请打开 Bots 进行回答。"
+          }
+        }
+      }
+    },
     "Could not load bots." : {
       "localizations" : {
         "zh-Hans" : {

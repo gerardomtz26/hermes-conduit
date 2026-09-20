@@ -1917,6 +1917,7 @@ enum MessageNormalizer {
                 title: obj["title"]?.stringValue ?? obj["preview"]?.stringValue ?? AppLocalization.string("Untitled conversation"),
                 model: obj["model"]?.stringValue ?? "Hermes",
                 updatedLabel: sessionUpdatedLabel(in: obj),
+                lastActivityAt: sessionActivityTimestamp(in: obj),
                 profile: explicitProfile ?? profile,
                 source: classifySource(obj),
                 isActive: false,
@@ -1927,12 +1928,42 @@ enum MessageNormalizer {
         }
     }
 
+    /// The same instant `sessionUpdatedLabel` formats, kept machine-readable so
+    /// restoration can order conversations by ACTUAL activity instead of list
+    /// position. Values in milliseconds (and numeric strings) normalize to
+    /// epoch seconds; a non-numeric date string has no ordering meaning here.
+    static func sessionActivityTimestamp(in object: [String: AnyCodable]) -> TimeInterval? {
+        for key in sessionActivityKeys {
+            guard let value = object[key], value != .null else { continue }
+            switch value {
+            case .number(let timestamp):
+                return normalizedSessionTimestamp(timestamp)
+            case .string(let text):
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let timestamp = Double(trimmed) else { continue }
+                return normalizedSessionTimestamp(timestamp)
+            default:
+                continue
+            }
+        }
+        return nil
+    }
+
+    private static func normalizedSessionTimestamp(_ timestamp: Double) -> TimeInterval? {
+        let seconds = timestamp > 10_000_000_000 ? timestamp / 1_000 : timestamp
+        // A non-finite value would rank "newest" forever.
+        guard seconds > 0, seconds.isFinite else { return nil }
+        return seconds
+    }
+
+    private static let sessionActivityKeys = [
+        "last_active", "lastActive", "updated_at", "updatedAt", "updated",
+        "last_message_at", "lastMessageAt", "latest_message_at", "latestMessageAt",
+        "modified_at", "modifiedAt", "created_at", "createdAt", "timestamp", "time"
+    ]
+
     private static func sessionUpdatedLabel(in object: [String: AnyCodable]) -> String {
-        let keys = [
-            "last_active", "lastActive", "updated_at", "updatedAt", "updated",
-            "last_message_at", "lastMessageAt", "latest_message_at", "latestMessageAt",
-            "modified_at", "modifiedAt", "created_at", "createdAt", "timestamp", "time"
-        ]
+        let keys = sessionActivityKeys
 
         for key in keys {
             guard let value = object[key], value != .null else { continue }

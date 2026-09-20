@@ -245,6 +245,156 @@ final class ChatResumeStoreTests: XCTestCase {
         )
     }
 
+    // MARK: - session kind (v1 → v2)
+
+    func testBotSessionReferenceRoundTripsWithItsKindAndScope() throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = ChatResumeStore(defaults: defaults)
+        store.setLastSession(
+            .bot(botName: "atlas", label: "Scout", sessionID: "stored-bot"),
+            for: "default"
+        )
+
+        let restored = ChatResumeStore(defaults: defaults)
+        XCTAssertEqual(
+            restored.lastSession(for: "default"),
+            SessionReference(
+                kind: .bot,
+                scopeProfile: "atlas",
+                botName: "atlas",
+                botLabel: "Scout",
+                sessionID: "stored-bot"
+            )
+        )
+        XCTAssertEqual(
+            restored.lastSession(for: "default")?.resumeProfileScope,
+            "atlas",
+            "a Bot Chat's resume addresses the BOT's profile, not the workspace's"
+        )
+    }
+
+    func testLegacyPayloadMigratesSessionIDsToDashboardReferences() throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        // Exactly what a build before the session-kind change wrote.
+        defaults.set(try JSONSerialization.data(withJSONObject: [
+            "version": 1,
+            "behavior": "latestActivity",
+            "lastSessionIDsByProfile": ["default": "stored-a", "work": "stored-b"],
+            "snapshots": []
+        ]), forKey: ChatResumeStore.defaultStorageKey)
+
+        let store = ChatResumeStore(defaults: defaults)
+
+        XCTAssertEqual(store.behavior, .latestActivity, "the migrated payload keeps the user's preference")
+        XCTAssertEqual(
+            store.lastSession(for: "default"),
+            .dashboard(profile: "default", sessionID: "stored-a"),
+            "a bare v1 id carries no kind: it migrates as an ordinary conversation of its workspace"
+        )
+        XCTAssertEqual(store.lastSessionID(for: "work"), "stored-b")
+        // The upgrade is persisted, so the next launch decodes v2 directly.
+        let rewritten = try XCTUnwrap(
+            defaults.data(forKey: ChatResumeStore.defaultStorageKey)
+        )
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: rewritten) as? [String: Any]
+        )
+        XCTAssertEqual(object["version"] as? Int, 2)
+        XCTAssertNotNil(object["lastSessionByProfile"])
+    }
+
+    // MARK: - session kind durability (review-gate hardening)
+
+    /// A runtime → durable rebind must carry the conversation's KIND: the
+    /// reference is re-keyed, not rewritten, so a Bot Chat stays a Bot Chat and
+    /// keeps the scope its RPCs ride.
+    func testSessionIdentityMigrationPreservesBotKindAndScope() throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = ChatResumeStore(defaults: defaults)
+        let runtime = ChatScrollSessionKey(profile: "default", sessionID: "runtime-1")
+        let durable = ChatScrollSessionKey(profile: "default", sessionID: "stored-1")
+        store.setLastSession(
+            .bot(botName: "atlas", label: "Scout", sessionID: runtime.sessionID),
+            for: "default"
+        )
+
+        store.migrateSessionIdentity(from: runtime, to: durable)
+
+        let restored = ChatResumeStore(defaults: defaults).lastSession(for: "default")
+        XCTAssertEqual(restored?.sessionID, durable.sessionID)
+        XCTAssertEqual(restored?.kind, SessionReference.Kind.bot)
+        XCTAssertEqual(restored?.scopeProfile, "atlas")
+        XCTAssertEqual(restored?.botLabel, "Scout")
+    }
+
+    /// Every comparison in the app normalizes a session id, so the stored value
+    /// must be normalized too: an untrimmed id would survive here and then fail
+    /// the delete / not-found equality fences, leaving restorable state behind
+    /// for a conversation that no longer exists.
+    func testStoredSelectionNormalizesItsSessionID() throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = ChatResumeStore(defaults: defaults)
+
+        store.setLastSession(.dashboard(profile: "default", sessionID: "  stored-a  "), for: "default")
+
+        XCTAssertEqual(store.lastSession(for: "default")?.sessionID, "stored-a")
+        store.removeSessions(profile: "default", sessionIDs: ["stored-a"])
+        XCTAssertNil(
+            store.lastSession(for: "default"),
+            "the deletion fence matches the value the store actually kept"
+        )
+    }
+
+    /// A `.bot` reference is meaningless without the profile its RPCs ride, so
+    /// a reference whose scope does not survive normalization is dropped rather
+    /// than stored half-addressed.
+    func testBotReferenceWithoutUsableScopeIsDropped() throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = ChatResumeStore(defaults: defaults)
+
+        store.setLastSession(
+            SessionReference(
+                kind: .bot,
+                scopeProfile: "   ",
+                botName: "  ",
+                botLabel: "Scout",
+                sessionID: "stored-bot"
+            ),
+            for: "default"
+        )
+
+        XCTAssertNil(store.lastSession(for: "default"))
+    }
+
+    /// The bot's label survives the store round-trip (it is what a restored Bot
+    /// Chat shows before the roster has loaded).
+    func testBotLabelSurvivesStoreRoundTripAndDropsForOrdinaryKinds() throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = ChatResumeStore(defaults: defaults)
+
+        store.setLastSession(
+            SessionReference(
+                kind: .dashboard,
+                scopeProfile: "default",
+                botName: "atlas",
+                botLabel: "Scout",
+                sessionID: "stored-a"
+            ),
+            for: "default"
+        )
+
+        let restored = ChatResumeStore(defaults: defaults).lastSession(for: "default")
+        XCTAssertEqual(restored?.kind, SessionReference.Kind.dashboard)
+        XCTAssertNil(restored?.botName, "an ordinary reference carries no bot binding")
+        XCTAssertNil(restored?.botLabel)
+    }
+
     private func payloadData(snapshots: [[String: Any]]) throws -> Data {
         try JSONSerialization.data(withJSONObject: [
             "version": 1,
