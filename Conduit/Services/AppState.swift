@@ -895,8 +895,15 @@ final class AppState: ObservableObject {
     private func botScopeProfile(forSessionIDs sessionIDs: Set<String>) -> String? {
         let identityIDs = Set(sessionIDs.compactMap { ChatScrollIdentityNormalization.sessionID($0) })
         guard !identityIDs.isEmpty else { return nil }
-        if let observedScope = botOwnership.botProfileName(owningAny: identityIDs) {
-            return observedScope
+        // Registry first, as a plain dictionary lookup: this runs on the
+        // presentation path (every stream event resolves a namespace), and
+        // building the ownership value there would re-scan the roster for
+        // each event. The roster is consulted only on a miss.
+        for id in identityIDs.sorted() {
+            if let scope = botChatSessionProfiles[id] { return scope }
+        }
+        if let rosterScope = botOwnership.botProfileName(owningAny: identityIDs) {
+            return rosterScope
         }
         guard let reference = chatResumeCoordinator.lastSession(for: activeProfile),
               reference.kind == .bot,

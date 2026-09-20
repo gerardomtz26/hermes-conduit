@@ -1931,7 +1931,16 @@ enum MessageNormalizer {
     /// The same instant `sessionUpdatedLabel` formats, kept machine-readable so
     /// restoration can order conversations by ACTUAL activity instead of list
     /// position. Values in milliseconds (and numeric strings) normalize to
-    /// epoch seconds; a non-numeric date string has no ordering meaning here.
+    /// epoch seconds.
+    ///
+    /// The FIRST field the gateway reports is authoritative activity: when it
+    /// is present but carries no machine-readable instant (a localized date
+    /// string, a placeholder, a non-scalar), the row has NO ordering evidence
+    /// and this returns nil. Scanning weaker fields would substitute a
+    /// DIFFERENT instant for the one the gateway chose — a wrong-but-plausible
+    /// value ranks a row it does not describe, which is worse than ranking it
+    /// behind every dated row. Only a MISSING or null field falls through to
+    /// the next key.
     static func sessionActivityTimestamp(in object: [String: AnyCodable]) -> TimeInterval? {
         for key in sessionActivityKeys {
             guard let value = object[key], value != .null else { continue }
@@ -1940,10 +1949,10 @@ enum MessageNormalizer {
                 return normalizedSessionTimestamp(timestamp)
             case .string(let text):
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard let timestamp = Double(trimmed) else { continue }
+                guard let timestamp = Double(trimmed) else { return nil }
                 return normalizedSessionTimestamp(timestamp)
             default:
-                continue
+                return nil
             }
         }
         return nil
