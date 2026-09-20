@@ -310,7 +310,10 @@ final class ChatResumeStore {
     private static func normalizedLastSessions(
         _ values: [String: SessionReference]
     ) -> [String: SessionReference] {
-        let normalized = values.compactMap { entry -> (String, SessionReference)? in
+        // `sortedEntries`, NOT `normalized`: a local named `normalized` shadows
+        // the static repair function this closure calls, which some Swift
+        // versions reject as "cannot call value of non-function type".
+        let sortedEntries = values.compactMap { entry -> (String, SessionReference)? in
             let key = ChatScrollSessionKey(
                 profile: entry.key,
                 sessionID: entry.value.sessionID
@@ -321,7 +324,7 @@ final class ChatResumeStore {
             if lhs.0 != rhs.0 { return lhs.0 < rhs.0 }
             return lhs.1.sessionID < rhs.1.sessionID
         }
-        return normalized.reduce(into: [:]) { result, entry in
+        return sortedEntries.reduce(into: [:]) { result, entry in
             if result[entry.0] == nil {
                 result[entry.0] = entry.1
             }
