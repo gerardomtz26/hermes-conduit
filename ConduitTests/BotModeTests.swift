@@ -3411,6 +3411,54 @@ final class BotModeTests: XCTestCase {
         )
     }
 
+    /// Roster evidence belongs to the CONNECTION that produced it: a populated
+    /// roster carried across a reconnect is not a fresh answer, and both the
+    /// resume-path authority gates and the routing verdict read absence from it.
+    func testRosterEvidenceIsVerifiedPerConnection() async {
+        let harness = makeBotHarness(lifecycleOperations: ChatResumeLifecycleOperations(
+            loadCatalog: { _, _ in [self.makeSessionSummary(id: "ordinary-1", title: "Design review")] },
+            openSessionWithProfile: { _, id, _, _ in
+                SessionResumeResult(
+                    sessionId: id,
+                    storedSessionId: id,
+                    messages: [],
+                    snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                )
+            },
+            refreshContext: { _, _ in },
+            botRoster: { _ in
+                BotRosterSnapshot(
+                    bots: [self.makeBot(name: "atlas", canonicalID: "stored-atlas")],
+                    supportsBotProtocol: false
+                )
+            }
+        ))
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        await harness.appState.refreshBotRoster()
+        XCTAssertEqual(harness.appState.botModePhase, .available)
+        XCTAssertEqual(
+            harness.appState.profileOwnershipVerdictForTesting("analyst"),
+            .ordinary,
+            "a roster the server confirmed on this connection makes absence meaningful"
+        )
+
+        // A new connection must re-verify it: the roster stays on screen, but it
+        // is no longer evidence about what the server knows now.
+        harness.appState.unverifyBotRosterForCurrentConnectionForTesting()
+        XCTAssertFalse(
+            harness.appState.botRoster.isEmpty,
+            "the roster is retained across the boundary…"
+        )
+        XCTAssertEqual(
+            harness.appState.profileOwnershipVerdictForTesting("analyst"),
+            .unverifiable,
+            "…but it is not absence evidence until the server confirms it again"
+        )
+    }
+
     // MARK: - harness
 
     /// The UserDefaults suite of the most recent harness, so tests can pin

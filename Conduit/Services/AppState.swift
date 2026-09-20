@@ -927,13 +927,15 @@ final class AppState: ObservableObject {
         botOwnership.botOwnedIDs
     }
 
-    /// Whether bot evidence can be READ right now: a verified-current roster,
-    /// or a gateway that cannot host bots at all. A failed or pending probe
-    /// leaves evidence unavailable, which is what makes an untyped reference
+    /// Whether bot evidence can be READ right now: a roster the SERVER confirmed
+    /// on the CURRENT connection, or a gateway that cannot host bots at all. A
+    /// failed, pending, or inherited-from-a-previous-connection roster leaves
+    /// evidence unavailable, which is what makes an unverified reference
     /// non-authoritative (see `profileOwnershipVerdict`, which draws the same
     /// line for cross-profile routing).
     private var botEvidenceIsAvailable: Bool {
-        botModePhase == .available || botModePhase == .gatewayUnsupported
+        botModePhase == .gatewayUnsupported
+            || (botModePhase == .available && botRosterVerifiedForCurrentConnection)
     }
 
     /// What the client can PROVE about a profile a decision wants to switch the
@@ -957,14 +959,13 @@ final class AppState: ObservableObject {
         // while adopting a bot's profile as the dashboard workspace is the
         // failure this path exists to prevent. Audit both directions before
         // changing this to an exact match.
-        // Otherwise absence only means something from a VERIFIED CURRENT
-        // answer: `.available` is a roster the server just confirmed, while a
-        // roster retained across a failed refresh is stale in the one
-        // direction that matters here — a bot registered since the last
-        // success would be missing from it and would read as an ordinary
-        // workspace. `.idle`/`.loading`/`.failed` are therefore unverifiable
-        // even when a stale roster is still on screen.
-        return botModePhase == .available ? .ordinary : .unverifiable
+        // Absence means something only when evidence was VERIFIED for this
+        // connection: a roster retained across a failed refresh, a reconnect,
+        // or a pending probe is stale in the one direction that matters here —
+        // a bot registered since the last successful answer would be missing
+        // from it and would read as an ordinary workspace. Same predicate as the
+        // resume path (`botEvidenceIsAvailable`), so the two cannot drift.
+        return botEvidenceIsAvailable ? .ordinary : .unverifiable
     }
 
     /// The bot profile a conversation's RPCs must ride, from every source of
@@ -2753,6 +2754,7 @@ final class AppState: ObservableObject {
     /// mutate state against the outgoing server.
     private func invalidateBotModeState() {
         botRosterEpoch += 1
+        botRosterVerifiedForCurrentConnection = false
         botChatOpenFlights.values.forEach { $0.task?.cancel() }
         botChatSessionProfiles.removeAll()
         botChatSessionLabels.removeAll()
@@ -9253,6 +9255,13 @@ final class AppState: ObservableObject {
     /// conversation's KIND — not just its id — survived restoration.
     func storedSessionReferenceForTesting(_ profile: String) -> SessionReference? {
         chatResumeCoordinator.lastSession(for: profile)
+    }
+
+    /// Simulates the next connection boundary for evidence freshness: the roster
+    /// on hand becomes unverified (as it does at every connect/reconnect)
+    /// without clearing it, so a test can pin that absence stops being evidence.
+    func unverifyBotRosterForCurrentConnectionForTesting() {
+        botRosterVerifiedForCurrentConnection = false
     }
 
     /// Drops the in-memory bot-chat registry AND its captured labels — the

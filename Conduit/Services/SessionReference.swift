@@ -173,7 +173,13 @@ struct SessionBotOwnership {
     func ownsProfile(_ profile: String) -> Bool {
         let normalized = SessionBotOwnership.normalized(profile)
         guard let normalized else { return false }
-        if roster.contains(where: { $0.name.caseInsensitiveCompare(normalized) == .orderedSame }) {
+        // Roster names are compared TRIMMED, matching `botProfileMatch` and the
+        // registry's values: incidental whitespace must not make a bot's own
+        // profile read as an ordinary workspace.
+        if roster.contains(where: {
+            $0.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                .caseInsensitiveCompare(normalized) == .orderedSame
+        }) {
             return true
         }
         return registryProfiles.values.contains {
@@ -257,13 +263,20 @@ extension SessionReference {
     /// means: unverified.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try container.decode(Kind.self, forKey: .kind)
+        // A `.bot` reference names its kind outright, so it is VERIFIED whatever
+        // the payload says: the flag only governs an unknown kind, and the store
+        // normalizes the same way.
+        let isUnverified = kind == .bot
+            ? false
+            : (try container.decodeIfPresent(Bool.self, forKey: .isUnverified) ?? true)
         self.init(
-            kind: try container.decode(Kind.self, forKey: .kind),
+            kind: kind,
             scopeProfile: try container.decode(String.self, forKey: .scopeProfile),
             botName: try container.decodeIfPresent(String.self, forKey: .botName),
             botLabel: try container.decodeIfPresent(String.self, forKey: .botLabel),
             sessionID: try container.decode(String.self, forKey: .sessionID),
-            isUnverified: try container.decodeIfPresent(Bool.self, forKey: .isUnverified) ?? true
+            isUnverified: isUnverified
         )
     }
 }
