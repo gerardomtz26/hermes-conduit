@@ -41,15 +41,29 @@ struct SessionReference: Codable, Equatable {
     /// The session identity to resume. For a `.bot` conversation this is the
     /// canonical chat's registry row (or a lineage tip of it).
     let sessionID: String
+    /// True when this reference was MIGRATED from the v1 payload, which stored
+    /// a bare session id: the kind is unknown, and a bot chat written there by
+    /// an earlier build is indistinguishable from an ordinary conversation
+    /// until bot evidence confirms it. Callers treat an untyped reference as
+    /// non-authoritative when that evidence is unavailable — our own v2 writes
+    /// are positively identified by the kind they carry.
+    /// Defaulted so the implicit memberwise initializer keeps its five-field
+    /// call shape: only the migration writes an untyped reference.
+    var isLegacyIDOnly: Bool = false
 
     /// A conversation of the dashboard workspace's Sessions surface.
-    static func dashboard(profile: String, sessionID: String) -> SessionReference {
+    static func dashboard(
+        profile: String,
+        sessionID: String,
+        isLegacyIDOnly: Bool = false
+    ) -> SessionReference {
         SessionReference(
             kind: .dashboard,
             scopeProfile: profile,
             botName: nil,
             botLabel: nil,
-            sessionID: sessionID
+            sessionID: sessionID,
+            isLegacyIDOnly: isLegacyIDOnly
         )
     }
 
@@ -64,7 +78,8 @@ struct SessionReference: Codable, Equatable {
             scopeProfile: botName,
             botName: botName,
             botLabel: label,
-            sessionID: sessionID
+            sessionID: sessionID,
+            isLegacyIDOnly: false
         )
     }
 

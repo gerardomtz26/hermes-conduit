@@ -2986,6 +2986,161 @@ final class BotModeTests: XCTestCase {
         )
     }
 
+    /// An UNTYPED (pre-v2) reference cannot authorise the catalog-absent escape
+    /// hatch while bot evidence is unreadable: the id might name a bot chat a
+    /// build without kinds wrote there, and resuming it as this workspace's
+    /// conversation is the fail-open this PR closes. Our own typed writes keep
+    /// the escape hatch.
+    func testUntypedReferenceDeclinesTheCatalogAbsentEscapeHatchWithoutEvidence() async {
+        var resumedIDs: [String] = []
+        let harness = makeBotHarness(
+            configureDefaults: { defaults in
+                // A v1 payload: a bare id, migrated as an untyped reference.
+                defaults.set(try? JSONSerialization.data(withJSONObject: [
+                    "version": 1,
+                    "behavior": "continueWhereLeftOff",
+                    "lastSessionIDsByProfile": ["default": "stored-ambiguous"],
+                    "snapshots": []
+                ]), forKey: ChatResumeStore.defaultStorageKey)
+            },
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in [self.makeSessionSummary(id: "ordinary-1", title: "Design review")] },
+                openSessionWithProfile: { _, id, _, _ in
+                    resumedIDs.append(id)
+                    return SessionResumeResult(
+                        sessionId: id,
+                        storedSessionId: id,
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in },
+                botRoster: { _ in
+                    throw RpcError(code: 5000, message: "state.db is locked")
+                }
+            )
+        )
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        XCTAssertTrue(harness.store.lastSession(for: "default")?.isLegacyIDOnly ?? false)
+
+        // Bot evidence is unreadable (the probe failed), so the ambiguous id is
+        // not resumed; the workspace falls back to its newest conversation.
+        await harness.appState.refreshBotRoster()
+        guard case .failed = harness.appState.botModePhase else {
+            return XCTFail("expected a failed probe, got \(harness.appState.botModePhase)")
+        }
+        harness.appState.activeSessionId = nil
+
+        await harness.appState.syncSession(
+            purpose: .automaticReturn,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertFalse(
+            resumedIDs.contains("stored-ambiguous"),
+            "an untyped id is not authority while bot evidence is unavailable: \(resumedIDs)"
+        )
+        XCTAssertEqual(harness.appState.activeSessionId, "ordinary-1")
+    }
+
+    /// The same untyped reference IS resumed once bot evidence is readable and
+    /// the id is not a bot's — the escape hatch exists for a conversation the
+    /// catalog has not indexed yet.
+    func testUntypedReferenceKeepsTheEscapeHatchWithUsableEvidence() async {
+        var resumedIDs: [String] = []
+        let harness = makeBotHarness(
+            configureDefaults: { defaults in
+                defaults.set(try? JSONSerialization.data(withJSONObject: [
+                    "version": 1,
+                    "behavior": "continueWhereLeftOff",
+                    "lastSessionIDsByProfile": ["default": "stored-just-created"],
+                    "snapshots": []
+                ]), forKey: ChatResumeStore.defaultStorageKey)
+            },
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in [self.makeSessionSummary(id: "ordinary-1", title: "Design review")] },
+                openSessionWithProfile: { _, id, _, _ in
+                    resumedIDs.append(id)
+                    return SessionResumeResult(
+                        sessionId: id,
+                        storedSessionId: id,
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in },
+                botRoster: { _ in
+                    BotRosterSnapshot(
+                        bots: [self.makeBot(name: "atlas", canonicalID: "stored-other")],
+                        supportsBotProtocol: false
+                    )
+                }
+            )
+        )
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        await harness.appState.refreshBotRoster()
+        XCTAssertEqual(harness.appState.botModePhase, .available)
+        harness.appState.activeSessionId = nil
+
+        await harness.appState.syncSession(
+            purpose: .automaticReturn,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(resumedIDs, ["stored-just-created"])
+        XCTAssertEqual(harness.appState.activeSessionId, "stored-just-created")
+    }
+
+    /// A typed (v2) reference is authoritative on its own: it carries the kind
+    /// the app recorded, so an unreadable roster does not demote it.
+    func testTypedReferenceKeepsTheEscapeHatchWithoutEvidence() async {
+        var resumedIDs: [String] = []
+        let harness = makeBotHarness(
+            configureDefaults: { defaults in
+                ChatResumeStore(defaults: defaults).setLastSessionID("stored-typed", for: "default")
+            },
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in [self.makeSessionSummary(id: "ordinary-1", title: "Design review")] },
+                openSessionWithProfile: { _, id, _, _ in
+                    resumedIDs.append(id)
+                    return SessionResumeResult(
+                        sessionId: id,
+                        storedSessionId: id,
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in },
+                botRoster: { _ in
+                    throw RpcError(code: 5000, message: "state.db is locked")
+                }
+            )
+        )
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        XCTAssertFalse(harness.store.lastSession(for: "default")?.isLegacyIDOnly ?? true)
+        await harness.appState.refreshBotRoster()
+        harness.appState.activeSessionId = nil
+
+        await harness.appState.syncSession(
+            purpose: .automaticReturn,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(resumedIDs, ["stored-typed"])
+    }
+
     // MARK: - harness
 
     /// The UserDefaults suite of the most recent harness, so tests can pin

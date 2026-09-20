@@ -923,6 +923,15 @@ final class AppState: ObservableObject {
     /// dashboard to. A profile name alone proves nothing: bots are ordinary
     /// Hermes profiles, so only bot evidence (or its verified absence)
     /// distinguishes a workspace from a bot.
+    /// Whether bot evidence can be READ right now: a verified-current roster,
+    /// or a gateway that cannot host bots at all. A failed or pending probe
+    /// leaves evidence unavailable, which is what makes an untyped reference
+    /// non-authoritative (see `profileOwnershipVerdict`, which draws the same
+    /// line for cross-profile routing).
+    private var botEvidenceIsAvailable: Bool {
+        botModePhase == .available || botModePhase == .gatewayUnsupported
+    }
+
     private func profileOwnershipVerdict(for profile: String) -> ProfileOwnershipVerdict {
         // Positive evidence first, whatever the capability phase says.
         if botOwnership.ownsProfile(profile) { return .botOwned }
@@ -1996,7 +2005,9 @@ final class AppState: ObservableObject {
                     result.removeAll { $0 == id }
                     result.insert(id, at: 0)
                 }
-            let captured = orderedCandidates.compactMap { botChatSessionLabels[$0] }.first?
+            let captured = orderedCandidates
+                .compactMap { ChatScrollIdentityNormalization.sessionID($0) }
+                .compactMap { botChatSessionLabels[$0] }.first?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let rosterLabel = ownership.bot(owningAny: candidates)?.displayLabel
             return .bot(
@@ -3288,19 +3299,9 @@ final class AppState: ObservableObject {
             async let profilesLoad: Void = loadChatResumeProfiles()
             async let rosterLoad: Void = loadChatResumeBotRoster()
             _ = await (profilesLoad, rosterLoad)
-            guard let rosterContinuation = transportContinuation(
-                    purpose: continuationPurpose,
-                    automaticWorkToken: continuationAutomaticWorkToken,
-                    automaticReconnectOperationID: transportOperationID
-                  ),
-                  let rosterClient = self.client, rosterClient === client else { return }
-            continuationPurpose = rosterContinuation.purpose
-            continuationAutomaticWorkToken = rosterContinuation.automaticWorkToken
-            handedOffAutomaticIntent = handedOffAutomaticIntent
-                || rosterContinuation.handedOffAutomaticIntent
-            // (the roster load above is the only one: it already ran, and a
-            // second call would be a guarded no-op in production and a
-            // duplicate seam invocation in tests)
+            // One continuation guard covers both loads: it re-reads the
+            // continuation AFTER the suspension, so a superseded transport is
+            // caught here without a second, identical evaluation.
             guard let continuation = transportContinuation(
                 purpose: continuationPurpose,
                 automaticWorkToken: continuationAutomaticWorkToken,
@@ -4370,14 +4371,25 @@ final class AppState: ObservableObject {
             // positively attributes to Bot Mode — under ANY of its identities
             // — is exempt: it is restored through the Bot Mode path above,
             // never as an ordinary conversation of this workspace.
+            // An UNTYPED (v1-migrated) reference is not authority to resume a
+            // catalog-absent conversation while bot evidence is unavailable:
+            // it carries no kind, and a bot chat written there by a build that
+            // could not record one would be resumed as an ordinary
+            // conversation of this workspace. Our own v2 writes carry the kind,
+            // so they keep the escape hatch unconditionally — and a gateway
+            // that cannot host Bot Mode cannot hold a bot chat either.
+            let savedReferenceIsAuthoritative = !(storedReference?.isLegacyIDOnly ?? false)
+                || botEvidenceIsAvailable
             let missingSavedSessionID = botSavedReference?.sessionID
-                ?? chatResumeCoordinator.missingSavedSessionID(
-                    in: allSessions,
-                    profile: profile,
-                    purpose: purpose,
-                    botOwnedSessionIDs: ownership.botOwnedIDs,
-                    savedSessionAliases: storedReferenceAliases
-                )
+                ?? (savedReferenceIsAuthoritative
+                    ? chatResumeCoordinator.missingSavedSessionID(
+                        in: allSessions,
+                        profile: profile,
+                        purpose: purpose,
+                        botOwnedSessionIDs: ownership.botOwnedIDs,
+                        savedSessionAliases: storedReferenceAliases
+                      )
+                    : nil)
             if let missingSavedSessionID {
                 chatResumeRestorationRequest = nil
                 chatResumeCoordinator.prepareDirectTarget(
@@ -9202,11 +9214,15 @@ final class AppState: ObservableObject {
         chatResumeCoordinator.lastSession(for: profile)
     }
 
-    /// Drops the in-memory bot-chat registry the way a server-identity
-    /// boundary does, WITHOUT clearing the durable reference — so a test can
-    /// pin that the reference alone still resolves the conversation's scope.
+    /// Drops the in-memory bot-chat registry AND its captured labels — the
+    /// two pieces `invalidateBotModeState` clears — while leaving the durable
+    /// reference in place, so a test can pin that the reference alone still
+    /// resolves the conversation's scope. The roster is deliberately left
+    /// alone: tests that need the server-identity boundary drive
+    /// `prepareChatResumeForConnection`, which also clears the resume store.
     func clearBotChatRegistryForTesting() {
         botChatSessionProfiles.removeAll()
+        botChatSessionLabels.removeAll()
         invalidateBotOwnershipCache()
     }
     #endif
@@ -12106,15 +12122,17 @@ final class AppState: ObservableObject {
             // Bot Chat as a Bot Chat, and the rotated runtime id is only
             // registered here.
             if let recoveryProfile {
+                // Labels are keyed by normalized ids, like the registry.
+                let normalizedSessionID = ChatScrollIdentityNormalization.sessionID(sessionID)
                 noteBotChatSession(
                     recoveredSessionID,
                     profile: recoveryProfile,
-                    label: botChatSessionLabels[sessionID]
+                    label: normalizedSessionID.flatMap { botChatSessionLabels[$0] }
                 )
                 noteBotChatSession(
                     storedSessionID,
                     profile: recoveryProfile,
-                    label: botChatSessionLabels[sessionID]
+                    label: normalizedSessionID.flatMap { botChatSessionLabels[$0] }
                 )
             }
             // Rebind through the canonical state helper: updates

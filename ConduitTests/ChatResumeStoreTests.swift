@@ -288,12 +288,21 @@ final class ChatResumeStoreTests: XCTestCase {
         let store = ChatResumeStore(defaults: defaults)
 
         XCTAssertEqual(store.behavior, .latestActivity, "the migrated payload keeps the user's preference")
+        let migrated = store.lastSession(for: "default")
         XCTAssertEqual(
-            store.lastSession(for: "default"),
-            .dashboard(profile: "default", sessionID: "stored-a"),
-            "a bare v1 id carries no kind: it migrates as an ordinary conversation of its workspace"
+            migrated,
+            .dashboard(profile: "default", sessionID: "stored-a", isLegacyIDOnly: true),
+            "a bare v1 id carries no kind: it migrates as an UNTYPED reference — the kind is unknown until bot evidence says otherwise"
+        )
+        XCTAssertTrue(
+            migrated?.isLegacyIDOnly ?? false,
+            "callers must be able to tell a migrated id from one this build recorded"
         )
         XCTAssertEqual(store.lastSessionID(for: "work"), "stored-b")
+        XCTAssertTrue(
+            store.lastSession(for: "work")?.isLegacyIDOnly ?? false,
+            "every entry recovered from a v1 payload is untyped, whichever workspace it belongs to"
+        )
         // The upgrade is persisted, so the next launch decodes v2 directly.
         let rewritten = try XCTUnwrap(
             defaults.data(forKey: ChatResumeStore.defaultStorageKey)
@@ -334,6 +343,21 @@ final class ChatResumeStoreTests: XCTestCase {
     /// must be normalized too: an untrimmed id would survive here and then fail
     /// the delete / not-found equality fences, leaving restorable state behind
     /// for a conversation that no longer exists.
+    /// Records written by THIS build carry a known kind, so they are never
+    /// marked untyped — the flag is what makes the catalog-absent escape hatch
+    /// conditional on bot evidence.
+    func testNativelyWrittenSelectionIsNotMarkedUntyped() throws {
+        let (defaults, suite) = try defaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = ChatResumeStore(defaults: defaults)
+
+        store.setLastSessionID("stored-a", for: "default")
+        store.setLastSession(.bot(botName: "Atlas", label: "Scout", sessionID: "stored-b"), for: "work")
+
+        XCTAssertFalse(store.lastSession(for: "default")?.isLegacyIDOnly ?? true)
+        XCTAssertFalse(store.lastSession(for: "work")?.isLegacyIDOnly ?? true)
+    }
+
     func testStoredSelectionNormalizesItsSessionID() throws {
         let (defaults, suite) = try defaults()
         defer { defaults.removePersistentDomain(forName: suite) }
