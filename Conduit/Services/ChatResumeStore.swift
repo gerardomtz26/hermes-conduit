@@ -142,12 +142,12 @@ final class ChatResumeStore {
 
     /// Records a conversation of this workspace's Sessions surface.
     ///
-    /// FIXTURE- AND MIGRATION-ONLY: production records through
-    /// `setLastSession(_:for:)`, which carries the kind. A bare id cannot
-    /// express one, so reaching for this in production would record a Bot
-    /// Chat as an ordinary conversation — the defect this store's v2 payload
-    /// exists to prevent. Test fixtures keep it because they predate the kind
-    /// and describe ordinary conversations.
+    /// FIXTURE-ONLY, and structural rather than documentary: a bare id cannot
+    /// express a kind, so reaching for this in production would record a Bot
+    /// Chat as an (untyped) ordinary conversation — the defect the v2 payload
+    /// exists to prevent. Debug-only so the constraint cannot be relaxed by
+    /// accident; tests reach it through `@testable import`.
+    #if DEBUG
     func setLastSessionID(_ sessionID: String?, for profile: String) {
         guard let sessionID else {
             setLastSession(nil, for: profile)
@@ -156,6 +156,7 @@ final class ChatResumeStore {
         guard let normalizedProfile = Self.normalizedProfile(profile) else { return }
         setLastSession(.dashboard(profile: normalizedProfile, sessionID: sessionID), for: profile)
     }
+    #endif
 
     func snapshot(for key: ChatScrollSessionKey) -> ChatScrollSnapshot? {
         guard key.isValid else { return nil }

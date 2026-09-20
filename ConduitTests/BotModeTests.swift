@@ -3196,6 +3196,140 @@ final class BotModeTests: XCTestCase {
         XCTAssertEqual(harness.appState.activeProfile, "default")
     }
 
+    /// An UNTYPED (v1) selection whose bot evidence is unreadable must not adopt
+    /// a CATALOG row either: the row may be a bot chat this workspace cannot
+    /// identify (a canonical chat whose title moved on wears no reserved title),
+    /// so the selection falls through to the ordinary candidates instead.
+    func testUntypedSelectionDoesNotAdoptACatalogRowWithoutEvidence() async {
+        var resumedIDs: [String] = []
+        // A lineage tip of a canonical chat: the stored value names its durable
+        // row, and nothing in the title says "Bot Chat".
+        let tipRow = SessionSummary(
+            // The listing carries the canonical chat under the DURABLE id the
+            // store persists, with the live runtime as an alias — so without the
+            // authority gate the saved-id match resolves and adopts this row.
+            id: "stored-of-the-tip",
+            storedSessionId: nil,
+            alternateIds: ["runtime-tip"],
+            title: "Weekly digest",
+            model: "Hermes",
+            updatedLabel: "now",
+            lastActivityAt: 100,
+            profile: "default",
+            source: .chat,
+            isActive: false,
+            isArchived: false,
+            lineageRootId: "canonical-root"
+        )
+        let ordinaryRow = makeSessionSummary(id: "ordinary-1", title: "Design review", lastActivityAt: 900)
+        let harness = makeBotHarness(
+            configureDefaults: { defaults in
+                defaults.set(try? JSONSerialization.data(withJSONObject: [
+                    "version": 1,
+                    "behavior": "continueWhereLeftOff",
+                    "lastSessionIDsByProfile": ["default": "stored-of-the-tip"],
+                    "snapshots": []
+                ]), forKey: ChatResumeStore.defaultStorageKey)
+            },
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in
+                    [tipRow, ordinaryRow]
+                },
+                openSessionWithProfile: { _, id, _, _ in
+                    resumedIDs.append(id)
+                    return SessionResumeResult(
+                        sessionId: id,
+                        storedSessionId: id,
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in },
+                botRoster: { _ in
+                    throw RpcError(code: 5000, message: "state.db is locked")
+                }
+            )
+        )
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        // The untyped pointer names the tip's durable id, and the catalog lists
+        // that row: without the authority gate the saved-id match would adopt it.
+        harness.appState.sessions = [tipRow, ordinaryRow]
+        await harness.appState.refreshBotRoster()
+        guard case .failed = harness.appState.botModePhase else {
+            return XCTFail("expected a failed probe, got \(harness.appState.botModePhase)")
+        }
+        harness.appState.activeSessionId = nil
+
+        await harness.appState.syncSession(
+            purpose: .automaticReturn,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(
+            resumedIDs,
+            ["ordinary-1"],
+            "an untyped id does not adopt a catalog row it cannot identify: \(resumedIDs)"
+        )
+    }
+
+    /// The mirror: with usable evidence the same untyped pointer DOES select its
+    /// catalog row (the row is not bot-owned, and the user asked to continue
+    /// where they left off).
+    func testUntypedSelectionAdoptsItsCatalogRowWithEvidence() async {
+        var resumedIDs: [String] = []
+        let storedRow = makeSessionSummary(id: "stored-plain", title: "Where I left off", lastActivityAt: 100)
+        let ordinaryRow = makeSessionSummary(id: "ordinary-1", title: "Design review", lastActivityAt: 900)
+        let harness = makeBotHarness(
+            configureDefaults: { defaults in
+                defaults.set(try? JSONSerialization.data(withJSONObject: [
+                    "version": 1,
+                    "behavior": "continueWhereLeftOff",
+                    "lastSessionIDsByProfile": ["default": "stored-plain"],
+                    "snapshots": []
+                ]), forKey: ChatResumeStore.defaultStorageKey)
+            },
+            lifecycleOperations: ChatResumeLifecycleOperations(
+                loadCatalog: { _, _ in [storedRow, ordinaryRow] },
+                openSessionWithProfile: { _, id, _, _ in
+                    resumedIDs.append(id)
+                    return SessionResumeResult(
+                        sessionId: id,
+                        storedSessionId: id,
+                        messages: [],
+                        snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+                    )
+                },
+                refreshContext: { _, _ in },
+                botRoster: { _ in
+                    BotRosterSnapshot(
+                        bots: [self.makeBot(name: "atlas", canonicalID: "stored-other")],
+                        supportsBotProtocol: false
+                    )
+                }
+            )
+        )
+        harness.appState.client = HermesClient(
+            connection: HermesConnection(baseUrl: "https://one.example", ticket: "ticket"),
+            profile: "default"
+        )
+        await harness.appState.refreshBotRoster()
+        XCTAssertEqual(harness.appState.botModePhase, .available)
+        harness.appState.activeSessionId = nil
+
+        await harness.appState.syncSession(
+            purpose: .automaticReturn,
+            using: nil,
+            automaticWorkToken: nil
+        )
+
+        XCTAssertEqual(resumedIDs, ["stored-plain"])
+        XCTAssertEqual(harness.appState.activeSessionId, "stored-plain")
+    }
+
     // MARK: - harness
 
     /// The UserDefaults suite of the most recent harness, so tests can pin

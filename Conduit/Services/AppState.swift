@@ -870,7 +870,10 @@ final class AppState: ObservableObject {
     /// none exists today, so correctness wins over the small dictionary.
     private var botChatSessionProfiles: [String: String] = [:]
     /// The bot's display label per canonical-chat session id — the title a
-    /// restored Bot Chat presents. Runtime-only like the registry above, and
+    /// restored Bot Chat presents. Runtime-only like the registry above (same
+    /// lifetime: entries are kept until the server-identity boundary, with no
+    /// per-session eviction, because a late lifecycle event can still arrive
+    /// addressed to an id that is no longer live), and
     /// persisted into a `SessionReference`'s `botLabel` when the conversation
     /// becomes the workspace's last-selected one, so a cold launch can show
     /// the bot's name before the roster has loaded.
@@ -4745,6 +4748,12 @@ final class AppState: ObservableObject {
         if purpose == .automaticReturn {
             chatResumeRestorationRequest = nil
         }
+        // The stored selection is authoritative only when its kind is known or
+        // bot evidence could be read: a v1-migrated id cannot be told from a
+        // bot chat, and adopting a catalog row by it is the fail-open the
+        // typed payload exists to close.
+        let savedReferenceIsAuthoritative = !(chatResumeCoordinator.lastSession(for: profile)?.isLegacyIDOnly ?? false)
+            || botEvidenceIsAvailable
         return chatResumeCoordinator.selectTarget(
             in: catalog,
             profile: profile,
@@ -4754,7 +4763,8 @@ final class AppState: ObservableObject {
             // the registry and roster both change across a session, and a
             // conversation must never be adopted by the workspace because the
             // evidence arrived a moment after the decision.
-            botOwnedSessionIDs: botOwnedSessionIDs
+            botOwnedSessionIDs: botOwnedSessionIDs,
+            savedSelectionIsAuthoritative: savedReferenceIsAuthoritative
         )
     }
 

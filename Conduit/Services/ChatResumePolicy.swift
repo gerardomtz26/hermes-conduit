@@ -82,7 +82,8 @@ enum ChatResumeSessionResolver {
         savedSessionID: String?,
         currentSessionID: String?,
         activeProfile: String? = nil,
-        botOwnedSessionIDs: Set<String> = []
+        botOwnedSessionIDs: Set<String> = [],
+        savedSelectionIsAuthoritative: Bool = true
     ) -> SessionSummary? {
         // Filter to the active profile when available so sessions from
         // other profiles don't interfere with ID matching or fallback.
@@ -95,7 +96,14 @@ enum ChatResumeSessionResolver {
             }
         } ?? catalog
 
-        let requestedID = purpose == .preserveCurrent ? currentSessionID : savedSessionID
+        // An UNTYPED stored selection whose bot evidence is unreadable is not
+        // authority to adopt a catalog row: the row may be a bot chat this
+        // workspace cannot identify (a lineage tip wears no reserved title),
+        // so the selection falls through to the ordinary candidates instead.
+        // `.preserveCurrent` is unaffected — it addresses what is on screen.
+        let requestedID: String? = purpose == .preserveCurrent
+            ? currentSessionID
+            : (savedSelectionIsAuthoritative ? savedSessionID : nil)
         if purpose == .preserveCurrent || behavior == .continueWhereLeftOff,
            let requestedID,
            let matched = scoped.first(where: {
