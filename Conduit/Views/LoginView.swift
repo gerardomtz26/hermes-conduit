@@ -287,6 +287,11 @@ struct LoginView: View {
                     .padding(.vertical, 10)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .conduitGlassSurface(cornerRadius: 14, tint: .conduitAura.opacity(0.06))
+                    // The card is the target, not just its text: the padding
+                    // and the chevron column are part of the hit region by
+                    // declaration rather than by how the label's content
+                    // shape happens to be derived.
+                    .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("login.connection-setup")

@@ -150,6 +150,17 @@ private struct ProfilePickerRow: View {
         }
         .padding(12)
         .conduitGlassSurface(cornerRadius: 20, tint: isCurrent ? .conduitAccent.opacity(0.12) : .clear)
+        // The card itself selects the profile. The select button above only
+        // covers its text column, so the card's padding, the trailing
+        // accessory column, and the space beside the name all looked
+        // tappable while doing nothing. Taps on the nested controls (avatar,
+        // photo removal, reorder arrows) are consumed by those controls and
+        // never reach this gesture, so their own actions are unaffected.
+        .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .onTapGesture {
+            guard !isCurrent, !isReordering, !appState.isProfileSwitching else { return }
+            select()
+        }
         .overlay(alignment: .bottomLeading) {
             if let saveError { Text(saveError).font(.caption2).foregroundStyle(.red).padding(.horizontal, 12).padding(.bottom, 4) }
         }

@@ -543,6 +543,9 @@ struct ConnectionSetupView: View {
                         .font(.caption.weight(.semibold))
                 }
                 .foregroundStyle(.primary)
+                // A disclosure row is a full-width target too: the help
+                // toggle must not require hitting the label text.
+                .contentShape(Rectangle())
             }
             .accessibilityIdentifier("setup.method-notsure")
 
@@ -745,6 +748,11 @@ struct ConnectionSetupView: View {
             .padding(.vertical, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .conduitGlassSurface(cornerRadius: 14, tint: .conduitAura.opacity(0.06))
+            // The whole card is the answer target: the declaration, not the
+            // incidental result of how the label's content shape is derived.
+            // Card padding, the checkmark column, and the gap beside a short
+            // label all select the answer.
+            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier(identifier)
@@ -783,6 +791,10 @@ struct ConnectionSetupView: View {
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
             .conduitGlassSurface(cornerRadius: 16, tint: .conduitAura.opacity(0.06))
+            // Same card-wide target as the answer rows: the title's Spacer,
+            // the padding, and the empty space beside the supporting text all
+            // select the method.
+            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier(identifier)
