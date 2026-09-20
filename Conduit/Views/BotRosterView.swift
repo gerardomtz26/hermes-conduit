@@ -288,6 +288,5 @@ private struct BotModeNoticeRow: View {
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
-        .padding(.vertical, 2)
     }
 }

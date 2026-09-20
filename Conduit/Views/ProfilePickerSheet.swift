@@ -71,6 +71,14 @@ struct ProfilePickerSheet: View {
     }
 }
 
+/// One profile card. Selection covers the whole card — see the gesture on the
+/// body for why, and for the accessibility split between the card and its
+/// nested controls.
+///
+/// Unlike the setup cards, this row has no automated coverage: the picker is
+/// only reachable with a connected dashboard AND more than one discovered
+/// profile, and the UI-test seams (`-CONDUIT_UI_TEST_CONNECTED_DASHBOARD`)
+/// supply neither, so the card's hit region cannot be probed from a test.
 private struct ProfilePickerRow: View {
     @ObservedObject var appLanguage = AppLanguageStore.shared
     @EnvironmentObject private var appState: AppState
@@ -164,6 +172,13 @@ private struct ProfilePickerRow: View {
         // tappable while doing nothing. Taps on the nested controls (avatar,
         // photo removal, reorder arrows) are consumed by those controls and
         // never reach this gesture, so their own actions are unaffected.
+        //
+        // Accessibility deliberately stays on the inner button: VoiceOver gets
+        // the profile name as a button with the disabled state this row's
+        // `canSelect` gives it. The Kanban card's `.accessibilityElement(
+        // children: .combine)` treatment is wrong here — this row carries two
+        // further controls (choose photo, remove photo) that combining would
+        // fold into the card and hide.
         .contentShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .onTapGesture {
             guard canSelect else { return }

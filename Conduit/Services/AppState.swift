@@ -1039,10 +1039,13 @@ final class AppState: ObservableObject {
 
     func setCarPlayVoiceSurfaceActive(_ active: Bool) {
         isCarPlayVoiceSurfaceActive = active
-        // CarPlay is the other app-foreground surface: with the phone locked
-        // it keeps the app-foreground gate open, and its disappearance while
-        // the phone scene is inactive closes it.
-        voiceConversationController.setApplicationForegroundActive(hasForegroundApplicationSurface)
+        // CarPlay feeds BOTH gates (`hasActiveVoiceSurface` and
+        // `hasForegroundApplicationSurface`), so this publishes both rather
+        // than only the app-foreground one: the adjacent
+        // `handleCarPlayVoiceSurfaceActivated/Removed` handlers then re-state
+        // the same capture value as they own the suspension side-effect, and
+        // no reader can observe a CarPlay edge half-applied.
+        publishVoiceRuntimeGates()
     }
 
     /// Whether at least one legitimate Voice presentation surface is
@@ -6741,6 +6744,14 @@ final class AppState: ObservableObject {
             // dip. Voice suspension happens only on the actual .background
             // transition — a descriptor-less suspension here would tear the
             // runtime down with no restoration path.
+            //
+            // The Voice gates are deliberately NOT republished here, leaving
+            // the app-foreground gate at its last value: this branch runs while
+            // iOS is presenting the microphone/Speech permission alert that
+            // `setVoiceTranscriptionMode` awaited, and closing the gate
+            // mid-request would refuse that same request's follow-up work (the
+            // second permission, the provider test that follows). Only
+            // `.active` and `.background` state the fact.
             return nil
 
         @unknown default:
