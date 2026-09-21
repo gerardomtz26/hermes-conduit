@@ -1453,6 +1453,12 @@ struct AssistantBubble: View {
     @Environment(\.chatTextSize) private var chatTextSize
 
     var body: some View {
+        // Mirrors MessageBubble's settled-bubble counter so the dormancy
+        // fixtures can prove a re-created row's body chain actually ran
+        // (and therefore that the Equatable gate below was consulted)
+        // instead of the update being pruned above the gate. Release
+        // builds compile the note out.
+        let _ = TranscriptPerf.note(.settledBubbleBody)
         VStack(alignment: .leading, spacing: 6) {
             SettledAssistantMessageContent(
                 message: message,

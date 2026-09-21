@@ -6,10 +6,10 @@ import SwiftUI
 /// live state must not re-evaluate settled Markdown presentation. These use
 /// the deterministic TranscriptPerf counters, not wall-clock timing.
 ///
-/// The streaming-tick simulation re-assigns the hosting root view with an
-/// equal-value row — exactly what ChatView's ForEach does to every mounted
-/// row on each AppState publish — and asserts the Equatable gate skipped
-/// the expensive settled subtree.
+/// The streaming-tick simulation publishes unrelated live state so the row's
+/// body chain re-runs — exactly what ChatView's ForEach does to every mounted
+/// row on each AppState publish — and asserts the Equatable gate skipped the
+/// expensive settled subtree.
 @MainActor
 final class SettledMessageIsolationTests: XCTestCase {
 
@@ -94,12 +94,64 @@ final class SettledMessageIsolationTests: XCTestCase {
         return host
     }
 
+    /// Concrete-root hosting for the dormancy/gate tests. A stable concrete
+    /// type (instead of an erased AnyView) gives UIHostingController direct
+    /// value diffing and mirrors the production shape, where a streaming
+    /// publish re-creates every mounted row as a concrete value through
+    /// MessageBubble's switch inside an established hierarchy.
+    private func makeHarnessRow(
+        message: ChatMessage,
+        appState: AppState,
+        resolver: GatewayMediaDataURLResolver?,
+        sizeCategory: ContentSizeCategory = .large
+    ) -> SettledGateHarnessRow {
+        SettledGateHarnessRow(
+            message: message,
+            readAloudController: appState.messageReadAloudController,
+            gatewayResolver: resolver,
+            appState: appState,
+            sizeCategory: sizeCategory
+        )
+    }
+
+    /// Hosts a concrete harness row in a retained, live window (see
+    /// `makeHarnessRow` for why the root must stay concrete).
+    private func mountConcreteRow(
+        message: ChatMessage,
+        appState: AppState,
+        resolver: GatewayMediaDataURLResolver?,
+        sizeCategory: ContentSizeCategory = .large
+    ) -> UIHostingController<SettledGateHarnessRow> {
+        let host = UIHostingController(
+            rootView: makeHarnessRow(
+                message: message,
+                appState: appState,
+                resolver: resolver,
+                sizeCategory: sizeCategory
+            )
+        )
+        testWindow = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        testWindow?.rootViewController = host
+        testWindow?.isHidden = false
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+        RunLoop.current.run(until: Date())
+        return host
+    }
+
     func testIdenticalRowRecreationSkipsSettledMarkdownPresentation() throws {
         let appState = try makeAppState()
         let resolver = GatewayMediaDataURLResolver(appState: appState, profile: "default")
         let message = markdownMessage()
 
-        let host = mountRow(message: message, appState: appState, resolver: resolver)
+        // Mount through the concrete harness root (see makeHarnessRow for
+        // why the root stays concrete, and the tick simulation below for
+        // why the tick itself is a publish rather than a root re-assignment).
+        let host = mountConcreteRow(
+            message: message,
+            appState: appState,
+            resolver: resolver
+        )
 
         // Baseline: the initial mount performed the expensive work — and let
         // its full commit (including trait-sync follow-up transactions) land
@@ -145,31 +197,53 @@ final class SettledMessageIsolationTests: XCTestCase {
         let initialSTVUpdates = TranscriptPerf.selectableTextViewUpdateCalls
         XCTAssertGreaterThan(TranscriptPerf.settledMarkdownTextBodyEvaluations, 0, "initial mount must render the markdown")
 
-        // Simulate a streaming tick: the parent re-creates the row with
-        // IDENTICAL inputs (equal message value, same resolver identity,
-        // same pinned Dynamic Type environment).
+        // Simulate a streaming tick the way production delivers it: an
+        // unrelated AppState publish (@Published streamingText — the same
+        // vector the transcript fixtures drive) invalidates the row's
+        // @EnvironmentObject and re-runs its body chain, re-creating the
+        // SettledAssistantMessageContent value with IDENTICAL inputs (equal
+        // message value, same resolver identity, same pinned Dynamic Type
+        // environment). Root re-assignment is deliberately NOT used: an
+        // erased AnyView root replacement is a hosting shape no production
+        // path exercises, and its erased diff remounts the identical row
+        // under a loaded scheduler — the hosted artifact this suite chased
+        // — while an identical CONCRETE root is pruned wholesale by value
+        // diffing before the gate is ever consulted, which would make the
+        // stay-at-zero assertion vacuous.
         TranscriptPerf.reset()
-        host.rootView = AnyView(AssistantBubble(
-            message: message,
-            readAloudController: appState.messageReadAloudController,
-            gatewayResolver: resolver
-        )
-        .environmentObject(appState)
-        .environment(\.sizeCategory, .large))
-        host.view.setNeedsLayout()
-        host.view.layoutIfNeeded()
+        let bubbleBodiesBeforeRecreation = TranscriptPerf.settledMessageBubbleBodyEvaluations
+        for tick in 1...3 {
+            appState.streamingText = "unrelated live-state tick \(tick)"
+            host.view.setNeedsLayout()
+            host.view.layoutIfNeeded()
+            RunLoop.current.run(until: Date())
+        }
 
         // Give any (incorrect) re-evaluation time to surface before
         // asserting; draining past the re-creation commit makes the
         // stay-at-zero assertion meaningful instead of vacuously passing.
         drainUntil(1.0) { TranscriptPerf.settledMarkdownTextBodyEvaluations > 0 }
 
+        // Anti-vacuity guard: the publish must have actually re-run the
+        // row's body chain (AssistantBubble notes its body, mirroring
+        // MessageBubble). If SwiftUI ever prunes an identical row update
+        // before reaching the gate, this fails and the stay-at-zero
+        // assertion below would be measuring nothing.
+        XCTAssertGreaterThan(
+            TranscriptPerf.settledMessageBubbleBodyEvaluations,
+            bubbleBodiesBeforeRecreation,
+            "recreation must reach the row's body chain; a fully-pruned update makes the dormancy assertion vacuous"
+        )
+
         let recreations = TranscriptPerf.settledMarkdownTextBodyEvaluations
+        let spanSuffix = TranscriptPerf.windowEvaluationSpans.isEmpty
+            ? ""
+            : " (evaluations: \(recreations); spans:\n"
+                + TranscriptPerf.windowEvaluationSpans.joined(separator: "\n") + ")"
         XCTAssertEqual(
             recreations, 0,
             "a streaming publish re-creating an identical settled row must not re-evaluate its Markdown"
-                + " (evaluations: \(recreations); spans:\n"
-                + TranscriptPerf.windowEvaluationSpans.joined(separator: "\n") + ")"
+                + spanSuffix
         )
         XCTAssertEqual(
             TranscriptPerf.selectableTextViewUpdateCalls, 0,
@@ -314,28 +388,23 @@ final class SettledMessageIsolationTests: XCTestCase {
         let resolver = GatewayMediaDataURLResolver(appState: appState, profile: "default")
         let message = markdownMessage()
 
-        func harness(_ category: ContentSizeCategory) -> SettledGateHarnessRow {
-            SettledGateHarnessRow(
-                message: message,
-                readAloudController: appState.messageReadAloudController,
-                gatewayResolver: resolver,
-                appState: appState,
-                sizeCategory: category
-            )
-        }
-
-        let host = UIHostingController(rootView: harness(.large))
-        testWindow = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
-        testWindow?.rootViewController = host
-        testWindow?.isHidden = false
-        host.view.setNeedsLayout()
-        host.view.layoutIfNeeded()
+        let host = mountConcreteRow(
+            message: message,
+            appState: appState,
+            resolver: resolver,
+            sizeCategory: .large
+        )
         // Let the initial mount fully settle — including trait-sync follow-up
         // transactions — before arming the measurement window.
         drainUntil(2.0) { TranscriptPerf.settledMarkdownTextBodyEvaluations > 0 }
 
         TranscriptPerf.reset()
-        host.rootView = harness(.extraExtraLarge)
+        host.rootView = makeHarnessRow(
+            message: message,
+            appState: appState,
+            resolver: resolver,
+            sizeCategory: .extraExtraLarge
+        )
         host.view.setNeedsLayout()
         host.view.layoutIfNeeded()
         drainUntil(2.0) { TranscriptPerf.settledMarkdownTextBodyEvaluations > 0 }
@@ -361,10 +430,17 @@ final class SettledMessageIsolationTests: XCTestCase {
     }
 }
 
-/// Concrete hosted root for the Dynamic Type gate test. A stable concrete
-/// type (instead of an erased AnyView) gives UIHostingController direct value
-/// diffing: changing `sizeCategory` is a first-class rootView value change,
-/// and the environment write happens inside `body` exactly once per value.
+/// Concrete hosted root for the gate tests. A stable concrete type (instead
+/// of an erased AnyView) gives UIHostingController direct value diffing:
+/// changing `sizeCategory` is a first-class rootView value change, and the
+/// environment write happens inside `body` exactly once per value.
+///
+/// MUST stay non-Equatable: the dormancy fixture relies on the root's body
+/// re-running (and re-diffing `AssistantBubble`) on every re-assignment so
+/// the inner `SettledAssistantMessageContent.equatable()` gate is what
+/// actually holds the row at rest. An Equatable root could let SwiftUI prune
+/// the update above the gate and make the stay-at-zero assertion vacuous —
+/// the fixture guards this with its bubble-body anti-vacuity check.
 private struct SettledGateHarnessRow: View {
     let message: ChatMessage
     let readAloudController: MessageReadAloudController

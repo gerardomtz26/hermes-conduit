@@ -88,11 +88,12 @@ enum TranscriptPerf {
 
     /// Bounded record of every settled-Markdown evaluation inside the
     /// current measurement window: seconds since the window opened, the
-    /// source, and the enclosing call stack.DEBUG-only diagnostics so a
-    /// failed stay-at-zero assertion can name WHAT drove the evaluation
-    /// (hosting trait sync, a parent publish, a fresh mount) instead of
-    /// only reporting the count. Surfaced through `windowEvaluationSpans`
-    /// into fixture failure messages; never logged unconditionally.
+    /// source, and condensed enclosing stack frames. DEBUG-only diagnostics
+    /// so a failed stay-at-zero assertion can name WHAT drove the
+    /// evaluation (hosting trait sync, a parent publish, a fresh mount)
+    /// instead of only reporting the count. Surfaced through
+    /// `windowEvaluationSpans` into fixture failure messages; never logged
+    /// unconditionally.
     #if DEBUG
     private static func recordWindowSpan(context: String) {
         guard storage.windowEvaluationSpans.count < 8 else { return }
@@ -105,12 +106,7 @@ enum TranscriptPerf {
         let stack = Thread.callStackSymbols
             .dropFirst(2)
             .prefix(10)
-            .map { frame in
-                // Keep the symbol name only; addresses are noise in a
-                // failure message.
-                frame.split(separator: " ", maxSplits: 3).last
-                    .map(String.init) ?? frame
-            }
+            .map { $0.trimmingCharacters(in: .whitespaces) }
             .joined(separator: " <- ")
         storage.windowEvaluationSpans
             .append("t=\(offset)s src=\(context.prefix(24)) [\(stack)]")
@@ -332,6 +328,7 @@ enum TranscriptPerf {
     static func resetRenderLedgerForTesting() {
         #if DEBUG
         storage = Storage()
+        storage.windowOpenedAt = Date()
         #endif
     }
 

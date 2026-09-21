@@ -229,12 +229,15 @@ final class TranscriptPerformanceFixtureTests: XCTestCase {
             sources: TranscriptPerf.recentPreWindowRepeatSources,
             transcript: Self.markdownTranscript()
         )
+        let markdownSpanSuffix = TranscriptPerf.windowEvaluationSpans.isEmpty
+            ? ""
+            : " — spans:\n\(TranscriptPerf.windowEvaluationSpans.joined(separator: "\n"))"
         XCTAssertTrue(
             interiorRerenders.isEmpty,
             "streaming re-rendered \(interiorRerenders.count) interior settled Markdown rows "
                 + "(of \(atRestRerenders) at-rest re-renders; edge remounts are tolerated): "
                 + "\(interiorRerenders.map { String($0.prefix(32)) })"
-                + " — spans:\n\(TranscriptPerf.windowEvaluationSpans.joined(separator: "\n"))"
+                + markdownSpanSuffix
         )
         // The live streaming row legitimately updates, rebuilds, and measures
         // its own few block text views each tick (~3 SelectableTextViews,
@@ -281,12 +284,15 @@ final class TranscriptPerformanceFixtureTests: XCTestCase {
             sources: TranscriptPerf.recentPreWindowRepeatSources,
             transcript: Self.plainTextTranscript()
         )
+        let plainSpanSuffix = TranscriptPerf.windowEvaluationSpans.isEmpty
+            ? ""
+            : " — spans:\n\(TranscriptPerf.windowEvaluationSpans.joined(separator: "\n"))"
         XCTAssertTrue(
             plainInteriorRerenders.isEmpty,
             "plain-text transcript: streaming re-rendered \(plainInteriorRerenders.count) interior rows "
                 + "(of \(plainAtRestRerenders) at-rest re-renders; edge remounts are tolerated): "
                 + "\(plainInteriorRerenders.map { String($0.prefix(32)) })"
-                + " — spans:\n\(TranscriptPerf.windowEvaluationSpans.joined(separator: "\n"))"
+                + plainSpanSuffix
         )
         // Same remount-footprint allowance as the markdown variant: the
         // strict bound holds whenever no edge churn occurred.
