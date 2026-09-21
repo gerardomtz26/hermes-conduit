@@ -164,9 +164,12 @@ final class SettledMessageIsolationTests: XCTestCase {
         // stay-at-zero assertion meaningful instead of vacuously passing.
         drainUntil(1.0) { TranscriptPerf.settledMarkdownTextBodyEvaluations > 0 }
 
+        let recreations = TranscriptPerf.settledMarkdownTextBodyEvaluations
         XCTAssertEqual(
-            TranscriptPerf.settledMarkdownTextBodyEvaluations, 0,
+            recreations, 0,
             "a streaming publish re-creating an identical settled row must not re-evaluate its Markdown"
+                + " (evaluations: \(recreations); spans:\n"
+                + TranscriptPerf.windowEvaluationSpans.joined(separator: "\n") + ")"
         )
         XCTAssertEqual(
             TranscriptPerf.selectableTextViewUpdateCalls, 0,

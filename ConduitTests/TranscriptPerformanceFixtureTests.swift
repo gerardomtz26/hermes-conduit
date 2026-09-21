@@ -234,6 +234,7 @@ final class TranscriptPerformanceFixtureTests: XCTestCase {
             "streaming re-rendered \(interiorRerenders.count) interior settled Markdown rows "
                 + "(of \(atRestRerenders) at-rest re-renders; edge remounts are tolerated): "
                 + "\(interiorRerenders.map { String($0.prefix(32)) })"
+                + " — spans:\n\(TranscriptPerf.windowEvaluationSpans.joined(separator: "\n"))"
         )
         // The live streaming row legitimately updates, rebuilds, and measures
         // its own few block text views each tick (~3 SelectableTextViews,
@@ -285,6 +286,7 @@ final class TranscriptPerformanceFixtureTests: XCTestCase {
             "plain-text transcript: streaming re-rendered \(plainInteriorRerenders.count) interior rows "
                 + "(of \(plainAtRestRerenders) at-rest re-renders; edge remounts are tolerated): "
                 + "\(plainInteriorRerenders.map { String($0.prefix(32)) })"
+                + " — spans:\n\(TranscriptPerf.windowEvaluationSpans.joined(separator: "\n"))"
         )
         // Same remount-footprint allowance as the markdown variant: the
         // strict bound holds whenever no edge churn occurred.
