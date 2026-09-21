@@ -65,6 +65,17 @@ enum TranscriptPerf {
         #if DEBUG
         note(event)
         if event == .settledMarkdownBody {
+            // Process-lifetime mount classification: a source never seen
+            // before ANY window is a fresh mount; a re-evaluation of an
+            // already-seen source is a re-render of an existing row. The
+            // ledger survives resets so cross-test mount history stays
+            // classifiable (bounded to keep diagnostics memory flat).
+            if !storage.everSeenMarkdownSources.contains(context) {
+                storage.settledMarkdownFreshMountBody += 1
+                if storage.everSeenMarkdownSources.count < 4096 {
+                    storage.everSeenMarkdownSources.insert(context)
+                }
+            }
             if storage.settledMarkdownKnownSources.contains(context) {
                 storage.settledMarkdownPreWindowRepeatBody += 1
                 if storage.recentPreWindowRepeatSources.count < 128 {
@@ -105,13 +116,44 @@ enum TranscriptPerf {
         }
         let stack = Thread.callStackSymbols
             .dropFirst(2)
-            .prefix(10)
+            .prefix(14)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .joined(separator: " <- ")
         storage.windowEvaluationSpans
             .append("t=\(offset)s src=\(context.prefix(24)) [\(stack)]")
     }
     #endif
+
+    /// Record which Equatable field opened a settled-content gate (DEBUG
+    /// diagnostics, bounded). A dormancy violation WITH a gate-reopen
+    /// report naming `sizeCategory`/`chatTextSize` is hosting trait churn
+    /// reopening the gate; one WITHOUT any report is a true gate bypass
+    /// (body chain re-evaluated with the gate never consulted). This is
+    /// the diagnostic #200 lacked — release-head CI failed with no way to
+    /// tell these apart.
+    #if DEBUG
+    static func noteGateReopen(component: String, fields: [String]) {
+        guard storage.recentGateReopenReports.count < 32 else { return }
+        let offset: String
+        if let openedAt = storage.windowOpenedAt {
+            offset = String(format: "%.3f", Date().timeIntervalSince(openedAt))
+        } else {
+            offset = "?"
+        }
+        storage.recentGateReopenReports.append(
+            "t=\(offset)s \(component) opened by: \(fields.joined(separator: ", "))"
+        )
+    }
+    #endif
+
+    /// Most recent gate-reopen reports (bounded ring, DEBUG diagnostics).
+    static var recentGateReopenReports: [String] {
+        #if DEBUG
+        return storage.recentGateReopenReports
+        #else
+        return []
+        #endif
+    }
 
     enum Event {
         case settledBubbleBody
@@ -293,6 +335,19 @@ enum TranscriptPerf {
         #endif
     }
 
+    /// Process-lifetime fresh-mount count of settled Markdown sources
+    /// (DEBUG diagnostics): increments the first time any given source
+    /// string is ever evaluated in the process, regardless of window.
+    /// A re-render report whose sources are all first-seen inside the
+    /// current window is a LAZY MOUNT story, not an at-rest cascade.
+    static var settledMarkdownFreshMountEvaluations: Int {
+        #if DEBUG
+        return storage.settledMarkdownFreshMountBody
+        #else
+        return 0
+        #endif
+    }
+
     /// Diagnostics: bounded (time-since-window-open, source, call stack)
     /// records of the settled-Markdown evaluations inside the current
     /// measurement window. Fixture failure messages embed these so a
@@ -316,6 +371,9 @@ enum TranscriptPerf {
         var fresh = Storage()
         fresh.settledMarkdownKnownSources =
             storage.settledMarkdownKnownSources.union(storage.settledMarkdownWindowSources)
+        // Process-lifetime mount ledger survives windows by design.
+        fresh.everSeenMarkdownSources = storage.everSeenMarkdownSources
+        fresh.settledMarkdownFreshMountBody = storage.settledMarkdownFreshMountBody
         fresh.windowOpenedAt = Date()
         storage = fresh
         #endif
@@ -325,6 +383,12 @@ enum TranscriptPerf {
     /// this in setUp so one test's rendered sources never leak into the
     /// next test's repeat counting; plain `reset()` (per measurement
     /// window) always preserves the at-rest ledger.
+    ///
+    /// The ever-seen mount ledger is ALSO cleared here so each test starts
+    /// with a clean mount classification — cross-test contamination of the
+    /// fresh-mount counter would misclassify late remounts. The counter
+    /// itself is process-lifetime within one test, which is the scope the
+    /// dormancy fixtures measure.
     static func resetRenderLedgerForTesting() {
         #if DEBUG
         storage = Storage()
@@ -368,6 +432,12 @@ enum TranscriptPerf {
         var settledMarkdownBody = 0
         var settledMarkdownPreWindowRepeatBody = 0
         var settledMarkdownWindowDuplicateBody = 0
+        /// First-ever evaluations of a source string, process lifetime
+        /// (DEBUG diagnostics; survives `reset()` by design).
+        var settledMarkdownFreshMountBody = 0
+        /// Every settled Markdown source ever evaluated in this process,
+        /// bounded (see `settledMarkdownFreshMountEvaluations`).
+        var everSeenMarkdownSources = Set<String>()
         /// Markdown sources already evaluated at least once (DEBUG-only
         /// diagnostics memory, bounded by the same order as the render
         /// cache, which also holds one entry per distinct source).
@@ -382,6 +452,9 @@ enum TranscriptPerf {
         /// Bounded evaluation spans inside the current window (DEBUG
         /// diagnostics, see `windowEvaluationSpans`).
         var windowEvaluationSpans: [String] = []
+        /// Bounded ring of gate-reopen reports (DEBUG diagnostics, see
+        /// `recentGateReopenReports`).
+        var recentGateReopenReports: [String] = []
         var selectableTextViewUpdate = 0
         var selectableTextViewTextRebuild = 0
         var textKitMeasurement = 0

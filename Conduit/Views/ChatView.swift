@@ -1043,10 +1043,29 @@ struct UserMessageContent: View, Equatable {
     let chatTextSize: ChatTextSize
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.message == rhs.message
+        // Same DEBUG-only gate-reopen observation as
+        // SettledAssistantMessageContent: names the field that opened the
+        // gate so failures distinguish input-change from bypass.
+        #if DEBUG
+        let equal = lhs.message == rhs.message
             && lhs.gatewayResolver === rhs.gatewayResolver
             && lhs.sizeCategory == rhs.sizeCategory
             && lhs.chatTextSize == rhs.chatTextSize
+        if !equal {
+            var fields: [String] = []
+            if lhs.message != rhs.message { fields.append("message") }
+            if lhs.gatewayResolver !== rhs.gatewayResolver { fields.append("gatewayResolver") }
+            if lhs.sizeCategory != rhs.sizeCategory { fields.append("sizeCategory") }
+            if lhs.chatTextSize != rhs.chatTextSize { fields.append("chatTextSize") }
+            TranscriptPerf.noteGateReopen(component: "UserMessageContent", fields: fields)
+        }
+        return equal
+        #else
+        return lhs.message == rhs.message
+            && lhs.gatewayResolver === rhs.gatewayResolver
+            && lhs.sizeCategory == rhs.sizeCategory
+            && lhs.chatTextSize == rhs.chatTextSize
+        #endif
     }
 
     var body: some View {
@@ -1303,12 +1322,38 @@ struct SettledAssistantMessageContent: View, Equatable {
     let chatTextSize: ChatTextSize
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.message == rhs.message
+        // DEBUG-only observation: when the gate opens, record WHICH field
+        // opened it so a dormancy failure distinguishes "legitimately
+        // changed input" from "gate bypassed entirely" (no report + body
+        // ran). The comparison result is identical in all configurations;
+        // Release compiles the recording out and keeps short-circuit
+        // semantics.
+        #if DEBUG
+        let equal = lhs.message == rhs.message
             && lhs.displayName == rhs.displayName
             && lhs.avatarURL == rhs.avatarURL
             && lhs.gatewayResolver === rhs.gatewayResolver
             && lhs.sizeCategory == rhs.sizeCategory
             && lhs.chatTextSize == rhs.chatTextSize
+        if !equal {
+            var fields: [String] = []
+            if lhs.message != rhs.message { fields.append("message") }
+            if lhs.displayName != rhs.displayName { fields.append("displayName") }
+            if lhs.avatarURL != rhs.avatarURL { fields.append("avatarURL") }
+            if lhs.gatewayResolver !== rhs.gatewayResolver { fields.append("gatewayResolver") }
+            if lhs.sizeCategory != rhs.sizeCategory { fields.append("sizeCategory") }
+            if lhs.chatTextSize != rhs.chatTextSize { fields.append("chatTextSize") }
+            TranscriptPerf.noteGateReopen(component: "SettledAssistantMessageContent", fields: fields)
+        }
+        return equal
+        #else
+        return lhs.message == rhs.message
+            && lhs.displayName == rhs.displayName
+            && lhs.avatarURL == rhs.avatarURL
+            && lhs.gatewayResolver === rhs.gatewayResolver
+            && lhs.sizeCategory == rhs.sizeCategory
+            && lhs.chatTextSize == rhs.chatTextSize
+        #endif
     }
 
     var body: some View {

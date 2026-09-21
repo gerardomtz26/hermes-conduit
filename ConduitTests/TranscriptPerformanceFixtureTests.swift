@@ -148,13 +148,26 @@ final class TranscriptPerformanceFixtureTests: XCTestCase {
     // MARK: - Harness
 
     /// Hosts the full ChatView in a retained, live window.
+    ///
+    /// The Dynamic Type and chat text-size environments are PINNED — same
+    /// discipline as SettledMessageIsolationTests.mountRow: on a freshly
+    /// booted CI simulator the hosting window's trait resolution lands
+    /// asynchronously, and a late trait-sync transaction inside the
+    /// measurement window re-opens every mounted row's Equatable gate
+    //  (one burst of spurious settled re-evaluations). Production ChatView
+    /// injects chatTextSize at its root, so pinning it here mirrors the
+    /// production environment shape rather than weakening the fixture.
     private func mountChat(
         appState: AppState,
         streaming: String
     ) -> UIHostingController<AnyView> {
         appState.streamingText = streaming
         let host = UIHostingController(
-            rootView: AnyView(ChatView().environmentObject(appState))
+            rootView: AnyView(
+                DormancyHarnessEnvironment.applying(
+                    ChatView().environmentObject(appState)
+                )
+            )
         )
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         window.rootViewController = host

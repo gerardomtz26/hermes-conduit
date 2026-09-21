@@ -76,13 +76,16 @@ final class SettledMessageIsolationTests: XCTestCase {
         appState: AppState,
         resolver: GatewayMediaDataURLResolver?
     ) -> UIHostingController<AnyView> {
-        let row = AnyView(AssistantBubble(
-            message: message,
-            readAloudController: appState.messageReadAloudController,
-            gatewayResolver: resolver
+        let row = AnyView(
+            DormancyHarnessEnvironment.applying(
+                AssistantBubble(
+                    message: message,
+                    readAloudController: appState.messageReadAloudController,
+                    gatewayResolver: resolver
+                )
+                .environmentObject(appState)
+            )
         )
-        .environmentObject(appState)
-        .environment(\.sizeCategory, .large))
         let host = UIHostingController(rootView: row)
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         window.rootViewController = host
@@ -428,6 +431,138 @@ final class SettledMessageIsolationTests: XCTestCase {
             RunLoop.current.run(until: Date().addingTimeInterval(0.02))
         }
     }
+
+    // MARK: - Window trait churn (the hosted determinism vector)
+
+    /// Records the ambient sizeCategory its body sees. Mounted OUTSIDE the
+    /// harness pin as a sibling, it proves a window trait churn actually
+    /// reached the hosted hierarchy — without it, a churn that no-op'd
+    /// would let the dormancy assertion below pass vacuously.
+    private final class AmbientObservationBox {
+        var observed: [ContentSizeCategory] = []
+    }
+
+    private struct AmbientSizeCategoryCanary: View {
+        @Environment(\.sizeCategory) private var ambient
+        let box: AmbientObservationBox
+
+        var body: some View {
+            let _ = box.observed.append(ambient)
+            Color.clear.frame(height: 0)
+        }
+    }
+
+    /// Deterministic regression for the build-147 hosted blocker (Sep 2026):
+    /// environment churn in the ancestry ABOVE the harness pin — the shape
+    /// hosting-level trait sync takes (freshly booted CI simulators re-push
+    /// window traits under the app root) — must NOT re-open the settled
+    /// gate, because the harness re-asserts the gate's environment inputs
+    /// BELOW the churn point.
+    ///
+    /// Delivery vehicle: rootView re-assignment mutating ONLY the ambient
+    /// environment above the pinned subtree (the pinned values are
+    /// re-applied unchanged). This is the same structural relationship as
+    /// window→root churn in production, delivered deterministically; the
+    /// row subtree itself is never re-created through an erased root, and
+    /// the vehicle matches testDynamicTypeChangeReOpensSettledContentGate's
+    /// precedent for first-class environment mutation.
+    ///
+    /// Mutation-sensitive: strip the DormancyHarnessEnvironment pinning and
+    /// the same churn flows into `AssistantBubble`'s `\.sizeCategory`
+    /// environment read, opens the SettledAssistantMessageContent gate
+    /// (field: sizeCategory — visible in the gate-reopen report), and
+    /// re-evaluates MarkdownText, failing the zero assertions.
+    func testWindowTraitChurnDoesNotReopenSettledGate() throws {
+        let appState = try makeAppState()
+        let resolver = GatewayMediaDataURLResolver(appState: appState, profile: "default")
+        let message = markdownMessage()
+        let canary = AmbientObservationBox()
+
+        // Ambient environment ABOVE the pin (stands in for the window's);
+        // the pin below it stays constant across the churn.
+        struct ChurnableRoot: View {
+            let ambient: ContentSizeCategory
+            let canary: AmbientObservationBox
+            let row: SettledGateHarnessRow
+
+            var body: some View {
+                VStack(spacing: 0) {
+                    AmbientSizeCategoryCanary(box: canary)
+                        .environment(\.sizeCategory, ambient)
+                    DormancyHarnessEnvironment.applying(row)
+                }
+            }
+        }
+
+        let row = makeHarnessRow(
+            message: message,
+            appState: appState,
+            resolver: resolver
+        )
+        let host = UIHostingController(
+            rootView: AnyView(ChurnableRoot(ambient: .large, canary: canary, row: row))
+        )
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
+        window.rootViewController = host
+        window.isHidden = false
+        testWindow = window
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+
+        // Initial mount performed the settled work; wait it out so the
+        // measurement window opens on a quiet hierarchy.
+        drainUntil(2.0) { TranscriptPerf.settledMarkdownTextBodyEvaluations > 0 }
+        let settled = PerformanceFixtureWait.settleUntilCountersQuiet(quietFor: 1.2)
+        guard settled else {
+            XCTFail("counters never reached a quiet state; the churn measurement would be meaningless")
+            return
+        }
+
+        TranscriptPerf.reset()
+
+        // The churn: ambient environment above the pin changes; the pin
+        // itself is re-applied unchanged below it.
+        host.rootView = AnyView(
+            ChurnableRoot(ambient: .extraExtraExtraLarge, canary: canary, row: row)
+        )
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+        // Give any (incorrect) re-evaluation time to surface before
+        // asserting, so the zero assertions measure reality.
+        drainUntil(1.0) { TranscriptPerf.settledMarkdownTextBodyEvaluations > 0 }
+
+        // Vacuity guard: the churn MUST have reached the hierarchy — the
+        // unpinned canary (above the pin) must have observed the churned
+        // category. Without this, a churn that no-op'd would make the zero
+        // assertions below pass without testing anything.
+        guard canary.observed.last == .extraExtraExtraLarge else {
+            XCTFail(
+                "ambient churn never reached the hosted hierarchy " +
+                "(canary saw \(canary.observed.last.map(String.init(describing:)) ?? "nothing")); " +
+                "test measures nothing"
+            )
+            return
+        }
+
+        // THE INVARIANT: pinned settled content stays dormant under the
+        // same churn that reached the unpinned canary.
+        let evaluations = TranscriptPerf.settledMarkdownTextBodyEvaluations
+        let reopenSuffix = TranscriptPerf.recentGateReopenReports.isEmpty
+            ? ""
+            : " (gate reopens: \(TranscriptPerf.recentGateReopenReports.joined(separator: "; ")))"
+        XCTAssertEqual(
+            evaluations, 0,
+            "ancestry environment churn must not re-evaluate pinned settled Markdown"
+                + " (evaluations: \(evaluations)\(reopenSuffix)"
+                + (TranscriptPerf.windowEvaluationSpans.isEmpty
+                    ? ")"
+                    : "; spans: \(TranscriptPerf.windowEvaluationSpans.joined(separator: " | "))")
+        )
+        XCTAssertEqual(
+            TranscriptPerf.selectableTextViewUpdateCalls, 0,
+            "ancestry environment churn must not touch SelectableTextView for settled content"
+        )
+    }
 }
 
 /// Concrete hosted root for the gate tests. A stable concrete type (instead
@@ -449,12 +584,20 @@ private struct SettledGateHarnessRow: View {
     let sizeCategory: ContentSizeCategory
 
     var body: some View {
-        AssistantBubble(
-            message: message,
-            readAloudController: readAloudController,
-            gatewayResolver: gatewayResolver
+        DormancyHarnessEnvironment.applying(
+            AssistantBubble(
+                message: message,
+                readAloudController: readAloudController,
+                gatewayResolver: gatewayResolver
+            )
+            .environmentObject(appState),
+            sizeCategory: sizeCategory
         )
-        .environmentObject(appState)
-        .environment(\.sizeCategory, sizeCategory)
+        // Note: DormancyHarnessEnvironment.applying pins BOTH gate
+        // environment inputs; the explicit sizeCategory parameter preserves
+        // the Dynamic Type mutation vector for
+        // testDynamicTypeChangeReOpensSettledContentGate. The pinning
+        // contract is held by
+        // testDormancyHarnessPinsGateEnvironmentInputs.
     }
 }
