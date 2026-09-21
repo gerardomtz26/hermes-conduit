@@ -641,23 +641,28 @@ run_lane() { # $1=kind $2=lane $3=target $4=classes $5=predicted $6=timeout
 }
 
 # Bounded Simulator preparation before a lane starts: shut the devices down,
-# ERASE the destination, boot it, and WAIT for a complete boot, using
+# erase the destination, boot it, and WAIT for a complete boot, using
 # ci-lib.sh's own recovery primitive rather than a new one.
 #
 # This is environment preparation, never a retry: nothing that ran is
 # re-executed, and a lane that then fails still fails. It exists because the
-# gate's runs on main kept losing their first unit batch to
+# gate's runs on main kept losing batches to
 #
 #   Simulator device failed to launch com.milim.relay ...
 #   Application failed preflight checks ... reason: Busy
 #
-# and an A/B probe on the same machine settled what clears it: with a
-# shutdown+boot only, the very next single-class lane failed with a launch
-# refusal; after `simctl erase` + boot, the same lane passed. The wedge is
-# leftover device state, not a scheduling race, so the erase is the default.
-# It costs ~40s per lane and it is what makes the run's evidence mean "this
-# commit on a known-clean device". --no-simulator-erase keeps the cheaper
-# shutdown+boot for operators who want the raw behavior.
+# What the evidence shows (four full runs plus an A/B probe on this machine):
+# with a shutdown+boot only, the next single-class lane was refused; after
+# `simctl erase` + boot it passed. So the refusal is leftover device state
+# rather than a startup race, and the erase is therefore the default. It is a
+# PARTIAL mitigation, not a cure: on a full run the refusal still returned a
+# batch or two into a lane, i.e. it accumulates over successive
+# installs/launches of the same bundle on one device. The gate's answer to a
+# refusal is its classification (infrastructure, never an assertion) plus the
+# continuation pass - the run refuses to certify rather than reporting a
+# product failure. See docs/CI.md for the follow-up that would clear it
+# in-band. --no-simulator-erase keeps the cheaper shutdown+boot for observing
+# the raw behavior.
 simulator_prep() { # $1 = label
   if [ "$SIM_PREP" -eq 0 ]; then
     echo "simulator preparation skipped (--no-simulator-prep)"

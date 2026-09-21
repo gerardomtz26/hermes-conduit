@@ -496,7 +496,35 @@ simulator/runtime recorded in the result is the one the tests actually ran on.
 | generate | `xcodegen generate` | The generated `.xcodeproj` is never committed |
 | static | `plan-tests.py validate`, `python3 -m unittest discover -s scripts/tests`, `check-l10n-coverage.py` | `--skip-static` exists for developer loops and marks the result **partial** |
 | build | `ci-build-for-testing.sh` once, into a gate-specific DerivedData | The same build-once contract as hosted CI, without the artifact round trip |
-| prepare | before each lane: ci-lib.sh's own bounded shutdown/boot/wait-for-boot | Environment preparation, never a retry — it re-runs nothing and a lane that fails afterwards still fails. Without it, xcodebuild boots a device and installs/launches the host app while CoreSimulator is still settling, which is what cost the gate its first two runs on `main` (`Simulator device failed to launch com.milim.relay … Application failed preflight checks … reason: Busy`). Disable with `--no-simulator-prep`. |
+| prepare | before each lane: ci-lib.sh's own bounded shutdown/**erase**/boot/wait-for-boot | Environment preparation, never a retry — it re-runs nothing and a lane that fails afterwards still fails. Without it, the host app's install/launch is refused (`Simulator device failed to launch com.milim.relay … Application failed preflight checks … reason: Busy`) and the batch is lost. An A/B probe on our Mac settled that the erase is the part that matters (shutdown+boot alone still refused the next lane; erase+boot passed it), but it is a **partial** mitigation: on a full run the refusal returned a batch or two into a lane, so it accumulates over successive launches of the same bundle on one device. Costs ~40 s per lane. `--no-simulator-erase` keeps the cheaper mode for observing the raw behavior; `--no-simulator-prep` skips preparation entirely. |
+
+### Known open issue: the launch-refusal wedge
+
+Four full runs against `main` all ended in FAIL for the same environment
+reason, and it is worth being precise about what the gate does and does not
+do about it:
+
+* the refusal is reported as **infrastructure**, never as an assertion
+  failure, with the affected batch named and the classes it hid listed as
+  `not executed`;
+* the **continuation pass** runs the batches the stopped lane never reached,
+  so a refusal costs coverage only for its own batch;
+* the UI shard and the repeat lanes ran to completion in those runs (29 UI
+  tests, 21 repeat executions, zero failures), so the wedge is specific to
+  long unit-lane batch sequences.
+
+What would clear it in-band, in increasing order of preference:
+
+1. a bounded, reported **recovery round** in the gate for a batch whose
+   failure evidence is synthetic-only (erase, re-run that batch once), mirroring
+   the lane runner's own `infra-error` policy;
+2. teaching `ci-test-lane.sh` itself that a batch whose only failing entries
+   are XCTest's synthetic ones is an infrastructure wedge — which is where the
+   classification belongs, but which changes hosted lanes too, so it is
+   deliberately not part of this change.
+
+Until then the gate refuses to certify such a run, which is the intended
+behavior for an exhaustive gate.
 | unit | the **complete** `ConduitTests` suite | One exhaustive lane: the planner is forced to `--min-lanes 1 --max-lanes 1` so it still owns the sequential batches and every per-batch watchdog |
 | ui | the **complete** `ConduitUITests` suite | One batched invocation over every UI class, with the planner's per-class watchdogs |
 | repeats | the repeat policy below | Runs even when the unit or UI lane failed, so one red lane cannot hide the rest; skipped when the build failed (no test products), and left failing when the plan could not be produced (there is nothing to project the repeat tasks from) |
