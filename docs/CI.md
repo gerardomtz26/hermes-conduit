@@ -5,6 +5,23 @@ This document describes the Conduit CI architecture that replaced the static
 still runs the complete XCTest suite on every PR; nothing is skipped,
 quarantined, or moved to a nightly gate.
 
+## Two gates, two jobs
+
+Conduit is tested by two independent gates, and they answer different
+questions:
+
+| Gate | Where | Scope | What a green result means |
+|---|---|---|---|
+| **GitHub-hosted CI** (this document) | GitHub runners, public/fork PRs included | The complete suite, sharded into dynamic lanes | The commit compiles and the suite passes on a clean machine |
+| **Local exhaustive gate** (`scripts/local-ci-gate.sh`) | Our own Mac, over SSH, outside GitHub's runner system | The complete suite, plus an explicit repeat policy, plus the cheap static checks | A **trusted** commit is correct: see [Local exhaustive gate](#local-exhaustive-gate-mac-outside-github) |
+
+**A local gate result is valid only for the exact commit SHA it reports.**
+Any other SHA — a branch name that moved, a later commit, "essentially the
+same" tree — invalidates the result. The gate is the authority that a release
+head is certified with; the hosted pipeline stays as it is today (its slim
+redesign is a separate, later change), and remains what guards arbitrary
+public and fork PRs.
+
 ## Architecture
 
 ```
@@ -410,6 +427,140 @@ wall clock. On failure it names the failing test, the lane, whether a
 simulator reset/erase occurred, whether the targeted retry passed, and any
 classes left `not_diagnosed` after a confirmed hang.
 
+## Local exhaustive gate (Mac, outside GitHub)
+
+`scripts/local-ci-gate.sh` is the exhaustive gate. It runs on our own Mac over
+SSH — never inside GitHub's self-hosted-runner system — and it always tests an
+**exact commit**, resolved to a full SHA, in a throwaway detached worktree.
+
+### Invocation
+
+From any machine with the `ios-mac` SSH alias (see the workspace `AGENTS.md`):
+
+```
+ssh ios-mac 'bash ~/projects/conduit-gate-tooling/scripts/local-ci-gate.sh --ref <sha-or-ref>'
+```
+
+`--ref` accepts any ref or SHA the Mac clone already has; add `--fetch` to
+fetch `origin` first, which makes the whole thing one command:
+
+```
+ssh ios-mac 'bash ~/projects/conduit-gate-tooling/scripts/local-ci-gate.sh --ref origin/main --fetch'
+```
+
+The gate prints the full SHA it tested and writes
+`gate-result.json` + `summary.md` under its run directory. Exit status is `0`
+only when the entire gate passed. Run `--help` for every flag.
+
+### Policy (non-negotiable)
+
+1. **Before approving a trusted PR for merge, or a release head for archive,
+   run the local Mac gate on the exact head SHA.**
+2. **A result for any other SHA is invalid.** The gate reports the commit it
+   tested; if that is not the head you are approving, the result does not
+   apply.
+3. **Never use a developer's active worktree as the tested tree.** The gate
+   creates its own detached worktree and never reads, writes, resets,
+   stashes, or checks out anything in the invoking checkout.
+4. **Rerun-until-green is not validation.** The gate invokes the lane runner
+   with `--iterations 1` (no Xcode-native flake retry), and it fails the run
+   outright if any work item recorded `test-failures` and then `passed`.
+5. **Genuine failures and infrastructure failures are reported separately.**
+   An infrastructure/simulator/AX failure still fails the gate, but it is
+   reported as infrastructure — never dressed up as an assertion failure, and
+   never as a pass.
+6. **Never execute arbitrary or unreviewed external PR code on the Mac.** Only
+   run heads we have explicitly decided are trusted enough for local
+   execution. Fork PRs are covered by hosted CI, not by this gate.
+
+### What it does
+
+| Phase | What runs | Notes |
+|---|---|---|
+| resolve + worktree | `git worktree add --detach <sha>` outside the invoking checkout | HEAD is verified to equal the requested SHA; the worktree is removed afterwards and all diagnostics live in the run directory |
+| generate | `xcodegen generate` | The generated `.xcodeproj` is never committed |
+| static | `plan-tests.py validate`, `python3 -m unittest discover -s scripts/tests`, `check-l10n-coverage.py` | `--skip-static` exists for developer loops and marks the result **partial** |
+| build | `ci-build-for-testing.sh` once, into a gate-specific DerivedData | The same build-once contract as hosted CI, without the artifact round trip |
+| unit | the **complete** `ConduitTests` suite | One exhaustive lane: the planner is forced to `--min-lanes 1 --max-lanes 1` so it still owns the sequential batches and every per-batch watchdog |
+| ui | the **complete** `ConduitUITests` suite | One batched invocation over every UI class, with the planner's per-class watchdogs |
+| repeats | the repeat policy below | Runs even if earlier phases failed, so one red lane cannot hide the rest |
+
+The lane runner, the planner and the timing extractor come from the **tested
+commit's own tree**, so the policy that decides the verdict is the policy of
+the revision being certified. Only the orchestrator and the result assembler
+come from the invoking checkout.
+
+### Repeat policy
+
+Classes whose failures have historically depended on scheduling are executed
+**K times unconditionally** (default `3`) and must pass **every** time. This
+is repetition as *evidence*, not retry as *recovery*: the lane runner is
+still called with `--iterations 1`, so nothing is retried until it agrees.
+Every iteration gets its own result directory, its own execution and failure
+counts, and its own watchdog — the planner's batch budget for that class,
+capped by `--repeat-timeout-cap` (default 900 s) so one hung iteration cannot
+burn an unbounded wall clock.
+
+The default set is the settled-Markdown/dormancy and transcript-performance
+families that have repeatedly failed in scheduling-dependent ways:
+`SettledMessageIsolationTests`, `TranscriptPerfLedgerContractTests`,
+`TranscriptPerformanceFixtureTests`, `MarkdownRichContentHostedTests`
+(override with `--repeat-classes`). A repeat class that is no longer in the
+suite **fails the gate**: a policy that quietly stopped covering what it
+promises is a gate defect, not a warning.
+
+### Failure classification
+
+The gate classifies on the lane runner's own attempt tokens (`passed`,
+`test-failures`, `infra-error`, `timeout`, `unclassified`, `incomplete`,
+`not_run`, `not_diagnosed`) rather than re-deriving a verdict from logs:
+
+* **genuine assertion failures** — the class ended on `test-failures`, or the
+  extraction recorded failing tests. Fails the gate.
+* **assertions retried until green** — a work item recorded `test-failures`
+  and later `passed`. Fails the gate in every mode, including
+  `--allow-recovered-infrastructure`: a flake is a flake, not a pass.
+* **infrastructure failures** — nonzero exit with a known zero failing-test
+  count, or a result that could not be classified. Fails the gate. A
+  *persistent* one (the environment never recovered) is always fatal; a
+  *recovered* one (a bounded retry rescued it) is fatal too, because the run
+  is not trustworthy evidence — the operator reruns the gate. The only way to
+  downgrade a recovered one is the explicit, record-it-wherever-you-cite-it
+  `--allow-recovered-infrastructure` flag.
+* **watchdog timeouts (hangs)** — classified as timeouts, with the hung class
+  or batch named by the runner.
+* **not executed / not diagnosed** — work that never ran. Fails the gate:
+  unexecuted tests may never masquerade as passed.
+
+### Result document
+
+`gate-result.json` is machine-readable and carries at least: `tested_sha`
+(plus `requested_ref`), `xcode_version`, `simulator` (`name`, `runtime`,
+`udid`), `unit` and `ui` blocks with `executions`, `failures`,
+`classes_expected`/`classes_observed`, `batch_count`, per-phase
+`assertion_failures`/`infrastructure_failures`/`timeouts`/`not_executed`,
+`focused_repeats` (per class and per iteration), an `infrastructure` roll-up
+(`persistent`, `recovered`, `retries`, `simulator_resets`/`erases`), a
+`partial` flag, `problems[]`, and the final `verdict` (`PASS`/`FAIL`). The
+human `summary.md` next to it carries the same numbers.
+
+Both artifacts, every lane log, every per-iteration log and every `.xcresult`
+bundle live under the run directory (default
+`<parent of the repo>/conduit-local-gate/runs/<sha12>-<UTC>`), which is
+**outside** the repository, so the gate never adds files to a working tree.
+The throwaway worktree itself is removed at the end of the run; reproduce the
+exact tested tree with the `git worktree add --detach` command the gate prints
+on failure.
+
+### Simulator safety
+
+The gate takes a single-gate-per-Mac lock (a `mkdir`-based lock under the gate
+root) and refuses to start while another gate is running: two concurrent
+`xcodebuild` chains on one Mac corrupt each other's Simulator state, and a
+result from such a run would be meaningless. `--no-lock` exists and is
+documented as unsafe. Stale locks (dead holder pid) are taken over with a
+warning.
+
 ## Adding a test
 
 Just add it. The planner discovers it on the next run, gives it the default
@@ -420,6 +571,12 @@ it into a lane. No lane-assignment files to maintain. To check locally:
 python3 scripts/plan-tests.py validate
 python3 -m unittest discover -s scripts/tests
 ```
+
+New test classes need no gate changes either: the local gate asks the same
+planner for the class inventory, so a new class joins the exhaustive unit or
+UI lane automatically. A class added to `--repeat-classes` (or to the
+default set) without existing in the suite fails the gate, so the repeat
+policy cannot silently decay.
 
 ## Local run directories
 
