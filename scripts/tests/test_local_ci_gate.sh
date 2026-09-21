@@ -46,28 +46,6 @@ skip_count=0
 ok()  { pass_count=$((pass_count + 1)); echo "  ok: $1"; }
 bad() { fail_count=$((fail_count + 1)); echo "  FAIL: $1"; }
 
-# The timing extractor shells out to `xcrun xcresulttool` with an argv list, so
-# it needs an executable `xcrun` on PATH. On Windows (MSYS/Cygwin) an
-# extension-less script is not executable from Python, so the extraction - and
-# with it every count, classification and verdict the gate derives from the
-# result bundle - cannot be exercised there. Those assertions are SKIPPED
-# loudly rather than quietly passed; the structural ones (refs, exit codes,
-# the caller's tree, the lock, cleanup) still run everywhere. CI runs this
-# suite on Linux/macOS, where nothing is skipped.
-EXTRACTION_SUPPORTED=1
-if ! python3 - "$STUBS" <<'PY'
-import os, subprocess, sys
-os.environ["PATH"] = sys.argv[1] + os.pathsep + os.environ.get("PATH", "")
-try:
-    subprocess.run(["xcrun", "xcresulttool"], capture_output=True, timeout=60)
-except (OSError, ValueError):
-    sys.exit(1)
-sys.exit(0)
-PY
-then
-  EXTRACTION_SUPPORTED=0
-fi
-
 skip() { # $1 = what would have been asserted
   skip_count=$((skip_count + 1))
   echo "  skip: $1 (xcrun is not executable from Python on this platform)"
@@ -312,6 +290,32 @@ new_run_dir() { printf '%s\n' "$WORK/run-$RANDOM-$RANDOM"; }
 echo "=== local-ci-gate integration suite ==="
 write_stubs
 make_fixture "$WORK/repo"
+
+# The timing extractor shells out to `xcrun xcresulttool` with an argv list, so
+# it needs an executable `xcrun` on PATH - which is why this probe runs AFTER
+# the stubs exist (an earlier probe placed before write_stubs reported
+# "unsupported" everywhere and silently skipped the assertions on Linux CI).
+# On Windows (MSYS/Cygwin) an extension-less script is not executable from
+# Python at all, so the extraction - and with it every count, classification
+# and verdict the gate derives from the result bundle - cannot be exercised
+# there: those assertions are SKIPPED loudly rather than quietly passed, while
+# the structural ones (refs, exit codes, the caller's tree, the lock, cleanup)
+# still run everywhere.
+EXTRACTION_SUPPORTED=1
+if ! python3 - "$STUBS" <<'PY'
+import os, subprocess, sys
+os.environ["PATH"] = sys.argv[1] + os.pathsep + os.environ.get("PATH", "")
+try:
+    proc = subprocess.run(["xcrun", "xcresulttool"], capture_output=True,
+                          timeout=60)
+except (OSError, ValueError):
+    sys.exit(1)
+sys.exit(0 if proc.returncode == 0 else 1)
+PY
+then
+  EXTRACTION_SUPPORTED=0
+fi
+echo "result-bundle extraction exercised here: $([ "$EXTRACTION_SUPPORTED" -eq 1 ] && echo yes || echo no)"
 
 FIXTURE_HEAD="$(git -C "$WORK/repo" rev-parse HEAD)"
 export FAKE_CANNED="$WORK/canned.json"
