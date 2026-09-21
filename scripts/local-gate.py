@@ -66,6 +66,13 @@ RETRY_MODES = ("batch-retry", "class-retry")
 # report "genuine XCTest assertion failures present" for a machine that never
 # managed to start the app.
 SYNTHETIC_FAILURE_CLASSES = ("System Failures",)
+# Belt and braces for the same condition: if a future Xcode renames or
+# localizes the pseudo-class, the entry NAME is still the runner/launch
+# failure the invocation reported.
+SYNTHETIC_FAILURE_TESTS = (
+    "encountered an error",
+    "failed to install or launch the test runner",
+)
 
 REPEAT_BATCH_TIMEOUT_CAP_DEFAULT = 900
 
@@ -77,10 +84,18 @@ PART_NAME = re.compile(r"^detail-(?P<key>.+?)-a\d+\.json$")
 
 def is_synthetic_failure(entry) -> bool:
     """True when a failure entry is XCTest reporting the RUN (not a test):
-    no real test method, reported under a pseudo-class."""
+    reported under its pseudo-class, or naming the runner/launch failure."""
     if not isinstance(entry, dict):
         return False
-    return str(entry.get("class") or "") in SYNTHETIC_FAILURE_CLASSES
+    if str(entry.get("class") or "") in SYNTHETIC_FAILURE_CLASSES:
+        return True
+    test = str(entry.get("test") or "")
+    for marker in SYNTHETIC_FAILURE_TESTS:
+        if marker in test:
+            # Only when it does NOT name a real test case: "testX()" style
+            # entries always come from the bundle's test tree.
+            return "." not in test and "()" not in test
+    return False
 
 
 def split_failures(failures):
@@ -260,15 +275,23 @@ def cmd_repeat_spec(args) -> int:
     classes = _split_classes(args.classes)
     tasks = []
     missing = []
+    duplicate = []
     for name in classes:
         found = None
+        hits = 0
         for batch in batches:
             if name in (batch.get("classes") or []):
-                found = batch
-                break
+                hits += 1
+                if found is None:
+                    found = batch
         if found is None:
             missing.append(name)
             continue
+        if hits > 1:
+            # The planner partitions each class into exactly one batch today;
+            # if that ever stops holding, the repeat budget would silently be
+            # the wrong batch's.
+            duplicate.append(name)
         budget = int(found.get("timeout_s") or 0)
         capped = min(budget, args.timeout_cap) if args.timeout_cap > 0 else budget
         tasks.append({
@@ -286,6 +309,9 @@ def cmd_repeat_spec(args) -> int:
         fail("repeat classes not present in the plan's unit lane: {0}".format(
             _csv(missing)))
         return 3
+    if duplicate:
+        warn("repeat classes appear in more than one planned batch (using the "
+             "first batch's budget): {0}".format(_csv(duplicate)))
 
     write_json(args.out, {
         "schema_version": SCHEMA_VERSION,
@@ -393,6 +419,10 @@ def cmd_meta(args) -> int:
         "static_checks_enabled": not args.skip_static,
         "repeat_policy_enabled": bool(_split_classes(args.repeat_classes)) and
                                  args.repeat_iterations > 0,
+        "run_flags": {
+            "lock_used": _flag_or_none(args.lock_used),
+            "simulator_prep": _flag_or_none(args.simulator_prep),
+        },
         "expected": {
             "unit_classes": args.unit_classes,
             "unit_batches": args.unit_batches,
@@ -446,6 +476,16 @@ def _int_or_zero(value) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _flag_or_none(value):
+    """Tri-state for an operating flag: True/False when the shell said so,
+    None when it did not (so a caveat is never asserted on a guess)."""
+    if value in ("1", "true", "True"):
+        return True
+    if value in ("0", "false", "False"):
+        return False
+    return None
 
 
 def cmd_simulator(args) -> int:
@@ -558,12 +598,24 @@ def _work_items(attempts, batches):
             key = ("batch", str(n))
             name = _csv(batch_classes.get(str(n)) or []) or "batch-{0}".format(n)
             # "batch-<n>" is the unit naming; a UI shard has one batch-level
-            # invocation whose part is named without the index.
-            touch(key, name=name, batch=n,
-                  part_keys=["batch-{0}".format(n), "batch"])["statuses"].append(status)
+            # invocation whose part is named without the index. A UI shard's
+            # targeted retry arrives as batch-retry with n=2 even though the
+            # shard has a single batch, so a retry whose own key does not exist
+            # reuses the only batch item there is - otherwise the "failed an
+            # assertion, then passed" pair would never be seen as one item.
+            keys = ["batch-{0}".format(n), "batch"]
+            if mode.endswith("-retry") and ("batch", str(n)) not in items:
+                existing = [k for k in items if k[0] == "batch"]
+                if len(existing) == 1:
+                    key = existing[0]
+                    keys = ["batch-{0}".format(key[1]), "batch"]
+            touch(key, name=name, batch=n, part_keys=keys)["statuses"].append(status)
         elif mode.startswith("class") or mode == "skipped":
+            # The runner writes UI diagnosis parts as detail-<Cls>-a<k>.json:
+            # the class name carries no "class-" infix (see ci-test-lane.sh's
+            # run_class_diagnosis), so both spellings are candidates.
             touch(("class", cls), name=cls,
-                  part_keys=["class-{0}".format(cls)])["statuses"].append(status)
+                  part_keys=["class-{0}".format(cls), cls])["statuses"].append(status)
         else:
             touch((mode, str(n)), name=cls)["statuses"].append(status)
 
@@ -812,6 +864,14 @@ def _read_lane(lane_dir: str) -> dict:
 
 def _summarize_lane(lane: dict, expected_classes, expected_batches=None) -> dict:
     problems = []
+    # The lane runner's own verdict is a problem in its own right. Every path
+    # that produces a non-pass status also emits a classifiable event today,
+    # but the gate must not depend on that staying true: a runner that says
+    # "fail" (or "error") can never be reported as PASS because the event
+    # vocabulary happened to come up empty.
+    if str(lane.get("status")) not in ("pass", "skipped"):
+        problems.append("lane runner verdict is {0!r}, not 'pass'".format(
+            lane.get("status")))
     if not lane["lane_result_present"]:
         problems.append("lane-result.json missing")
     if lane["executions"] is None:
@@ -883,7 +943,9 @@ def _summarize_lane(lane: dict, expected_classes, expected_batches=None) -> dict
 # batches it never reached). Everything the summary exposes as a list of
 # events is concatenated; counters are summed; coverage is unioned.
 _MERGE_LIST_FIELDS = ("failure_detail", "assertion_failures",
-                      "infrastructure_failures", "timeouts", "not_executed",
+                      "infrastructure_failures", "timeouts",
+                      # not_executed is recomputed against the aggregate, not
+                      # concatenated: see _merge_lane_summaries.
                       "retries", "assertion_retried_until_green",
                       "retried_classes", "infra_recovered_classes",
                       "persistent_infra_classes", "flaky")
@@ -899,7 +961,7 @@ def _merge_lane_summaries(primary: dict, extra: dict, expected_classes) -> dict:
     evidence are kept.
     """
     merged = dict(primary)
-    merged["status"] = "fail" if "fail" in (primary["status"], extra["status"]) \
+    merged["status"] = "fail" if "fail" in (str(primary["status"]), str(extra["status"])) \
         else primary["status"]
     for field in ("executions", "batch_count", "duration_s", "predicted_s",
                   "timeout_s"):
@@ -916,7 +978,6 @@ def _merge_lane_summaries(primary: dict, extra: dict, expected_classes) -> dict:
         bool(extra.get("simulator_erase"))
     for field in _MERGE_LIST_FIELDS:
         merged[field] = list(primary.get(field) or []) + list(extra.get(field) or [])
-
     expected = list(expected_classes or [])
     observed = set()
     for summary in (primary, extra):
@@ -933,11 +994,21 @@ def _merge_lane_summaries(primary: dict, extra: dict, expected_classes) -> dict:
         "problems": list(extra.get("problems") or []),
     }
     problems = list(primary.get("problems") or [])
-    problems = [p for p in problems if not p.startswith("classes never executed")]
+    problems = [p for p in problems
+                if not p.startswith("classes never executed")
+                and not p.startswith("work recorded as not executed")]
     if missing:
         problems.append("classes never executed: {0}".format(_csv(missing)))
+    # "Work recorded as not executed" is primary-lane evidence that the
+    # continuation may have since executed: recomputing it from the aggregate
+    # (instead of carrying the primary's list forward) is what keeps a red
+    # report from telling the operator a class never ran when it did.
+    merged["not_executed"] = [entry for entry in (extra.get("not_executed") or [])]
+    if merged["not_executed"]:
+        problems.append("work recorded as not executed: {0}".format(
+            _csv(sorted({e["name"] for e in merged["not_executed"]}))))
     problems.extend(extra.get("problems") or [])
-    merged["problems"] = problems
+    merged["problems"] = _dedupe(problems)
     return merged
 
 
@@ -1022,8 +1093,14 @@ def cmd_summarize(args) -> int:
 
     expected = meta.get("expected") or {}
     iterations = _int_or_zero(expected.get("repeat_iterations")) or 0
-    repeat_classes = list(expected.get("repeat_classes") or [])
+    declared_repeats = expected.get("repeat_classes")
+    # Corrupt meta must fail closed with a problem, not raise: the shape is
+    # only ever written by this tool, but "readable enough to parse" is not
+    # the same as "well formed".
+    repeat_classes = [str(c) for c in declared_repeats] \
+        if isinstance(declared_repeats, list) else []
     allow_recovered = bool(meta.get("allowed_recovered_infrastructure"))
+    run_flags = meta.get("run_flags") if isinstance(meta.get("run_flags"), dict) else {}
 
     phases = {}
     gate_problems = []
@@ -1048,6 +1125,13 @@ def cmd_summarize(args) -> int:
             if str(check.get("status")) != "pass":
                 gate_problems.append("{0} check {1}: {2}".format(
                     name, check.get("name"), check.get("status")))
+
+    # Simulator preparation is not a verdict: it is environment preparation
+    # whose failure becomes a caveat on the result (see `caveats` below).
+    sim_prep_status, sim_prep_doc = _phase_status(run_dir, "sim-prep")
+    phases["sim-prep"] = sim_prep_doc if sim_prep_doc else {
+        "phase": "sim-prep", "status": sim_prep_status, "duration_s": 0,
+        "checks": []}
 
     # --- lanes ------------------------------------------------------------
     unit = _read_lane(os.path.join(run_dir, "lanes", "unit"))
@@ -1204,6 +1288,24 @@ def cmd_summarize(args) -> int:
     if not meta.get("repeat_policy_enabled"):
         partial_reasons.append(
             "repeat policy disabled (no repeat classes or zero iterations)")
+    # Operating flags that weaken a run must be visible in the artifact the
+    # result is cited from, not only in meta.json: a PASS whose environment
+    # was degraded is not the same evidence as a clean one.
+    caveats = []
+    if allow_recovered and (recovered_infra or recovered_timeouts or
+                            events["infrastructure_recovered_classes"]):
+        caveats.append("--allow-recovered-infrastructure downgraded recovered "
+                       "infrastructure from FAIL to this verdict")
+    if run_flags.get("lock_used") is False:
+        caveats.append("--no-lock: another gate could have been running "
+                       "concurrently on this Mac")
+    if run_flags.get("simulator_prep") is False:
+        caveats.append("--no-simulator-prep: the Simulator was not prepared "
+                       "before the lanes")
+    for entry in phases.get("sim-prep", {}).get("checks") or []:
+        if str(entry.get("status")) != "pass":
+            caveats.append("Simulator preparation failed before {0}".format(
+                entry.get("name")))
 
     result = {
         "schema_version": SCHEMA_VERSION,
@@ -1234,6 +1336,8 @@ def cmd_summarize(args) -> int:
         # absence of artifacts.
         "partial": bool(partial_reasons),
         "partial_reasons": partial_reasons,
+        "caveats": caveats,
+        "run_flags": run_flags,
         "unit": unit_summary,
         "ui": ui_summary,
         "focused_repeats": {
@@ -1360,6 +1464,8 @@ def _write_markdown(path: str, result: dict) -> None:
     if result.get("partial"):
         lines.append("- **PARTIAL RUN — not an exhaustive-gate result:** {0}".format(
             "; ".join(result.get("partial_reasons") or ["unspecified"])))
+    for caveat in result.get("caveats") or []:
+        lines.append("- **CAVEAT:** {0}".format(caveat))
     lines.append("")
     lines.append("| Phase | Status | Executions | Failures | Duration |")
     lines.append("|---|---|---|---|---|")
@@ -1446,6 +1552,8 @@ def _print_human(result: dict) -> None:
                                         infra["timeouts"], infra["retries"]))
     if result.get("partial"):
         print("PARTIAL    : {0}".format("; ".join(result.get("partial_reasons") or [])))
+    for caveat in result.get("caveats") or []:
+        print("CAVEAT     : {0}".format(caveat))
     if result["problems"]:
         print("problems:")
         for problem in result["problems"]:
@@ -1497,6 +1605,8 @@ def main(argv=None) -> int:
     p.add_argument("--repeat-iterations", type=int, default=0)
     p.add_argument("--allow-recovered-infrastructure", action="store_true")
     p.add_argument("--skip-static", action="store_true")
+    p.add_argument("--lock-used", default="")
+    p.add_argument("--simulator-prep", default="")
     p.set_defaults(func=cmd_meta)
 
     p = sub.add_parser("simulator")

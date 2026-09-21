@@ -493,6 +493,25 @@ else
   ok "a non-empty --run-dir is refused"
 fi
 
+# A run directory inside the repository would put gate output in the very
+# working tree the gate promises never to touch.
+if run_gate --ref HEAD --gate-root "$WORK/gate" --run-dir "$WORK/repo/ci-local" \
+    >/dev/null 2>&1; then
+  bad "--run-dir inside the repository was accepted"
+else
+  ok "--run-dir inside the repository is refused"
+fi
+assert_eq "nothing was written into the repository by that refusal" \
+  "$([ -e "$WORK/repo/ci-local" ] && echo yes || echo no)" "no"
+
+# Non-numeric flags fail as usage errors rather than mid-run arithmetic.
+if run_gate --ref HEAD --gate-root "$WORK/gate" --run-dir "$(new_run_dir)" \
+    --repeat-iterations abc >/dev/null 2>&1; then
+  bad "a non-numeric --repeat-iterations was accepted"
+else
+  ok "a non-numeric --repeat-iterations is refused"
+fi
+
 # ---------------------------------------------------------------------------
 echo ""
 echo "--- case: only one gate at a time ---"

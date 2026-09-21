@@ -82,7 +82,8 @@ Options:
   --repeat-iterations N      Unconditional repetitions per repeat class (default 3).
   --repeat-timeout-cap S     Ceiling for one repeat iteration's watchdog
                              (default 900); the planner's batch budget still
-                             applies, capped by this.
+                             applies, capped by this. 0 disables the ceiling
+                             and uses the planner's budget unchanged.
   --allow-recovered-infrastructure
                              Downgrade "an infrastructure failure was
                              recovered by the bounded retry" from FAIL to a
@@ -113,6 +114,8 @@ SKIP_STATIC=0
 USE_LOCK=1
 
 SIM_PREP=1
+SIM_PREP_CHECKS=()
+SIM_PREP_FAILED=0
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -142,6 +145,23 @@ if [ -z "$REF" ]; then
   exit 2
 fi
 
+# Numeric flags are validated up front: a stray value would otherwise surface
+# far later as a bash integer-comparison error (or as an opaque "meta.json not
+# readable") in the middle of a run that has already spent build minutes.
+for pair in "$REPEAT_ITERATIONS:--repeat-iterations" \
+            "$REPEAT_TIMEOUT_CAP:--repeat-timeout-cap"; do
+  value="${pair%%:*}"
+  flag="${pair#*:}"
+  case "$value" in
+    ''|*[!0-9]*) echo "local-ci-gate: $flag must be a non-negative integer, got '$value'" >&2
+                 exit 2 ;;
+  esac
+done
+if [ -z "$SIMULATOR_NAME" ]; then
+  echo "local-ci-gate: --simulator must not be empty" >&2
+  exit 2
+fi
+
 # --- preflight ---------------------------------------------------------------
 for tool in git python3 xcodebuild xcodegen; do
   if ! command -v "$tool" >/dev/null 2>&1; then
@@ -149,6 +169,14 @@ for tool in git python3 xcodebuild xcodegen; do
     exit 2
   fi
 done
+
+# jq is not required, but without it ci-lib.sh cannot resolve the simulator
+# UDID: the destination falls back to a name-based lookup and every
+# erase-based recovery becomes fatal ("environment cannot be trusted"). Better
+# to say so now than an hour into a run.
+if ! command -v jq >/dev/null 2>&1; then
+  echo "local-ci-gate: warning: jq is not on PATH - simulator UDID resolution and erase-based recovery will be degraded" >&2
+fi
 
 if [ ! -f "$HELPER" ]; then
   echo "local-ci-gate: helper missing: $HELPER" >&2
@@ -187,6 +215,39 @@ if [ -z "$WORKTREE_ROOT" ]; then
   WORKTREE_ROOT="$GATE_ROOT/worktrees"
 fi
 
+# ... and an explicit override must not be able to put them inside it either.
+# Both sides are canonicalized (parent-anchored when the path does not exist
+# yet) because a plain string prefix test is defeated by a path that is
+# spelled differently - a relative override, or a different path style on
+# Windows/MSYS - and then the guard would silently protect nothing.
+canonical_path() { # $1 = path that may not exist yet
+  local path="$1" parent base
+  if [ -d "$path" ]; then
+    ( cd "$path" && pwd -P ) 2>/dev/null || printf '%s' "$path"
+    return 0
+  fi
+  parent="$(dirname "$path")"
+  base="$(basename "$path")"
+  if [ -d "$parent" ]; then
+    printf '%s/%s' "$( cd "$parent" && pwd -P )" "$base"
+  else
+    printf '%s' "$path"
+  fi
+}
+REPO_CANON="$(canonical_path "$REPO_ROOT")"
+for pair in "$RUN_DIR:--run-dir" "$WORKTREE_ROOT:--worktree-root" \
+            "$GATE_ROOT:--gate-root"; do
+  candidate="${pair%%:*}"
+  flag="${pair#*:}"
+  [ -z "$candidate" ] && continue
+  case "$(canonical_path "$candidate")" in
+    "$REPO_CANON"|"$REPO_CANON"/*)
+      echo "local-ci-gate: $flag must live outside the repository ($REPO_CANON)" >&2
+      exit 2
+      ;;
+  esac
+done
+
 # --- single-gate-per-Mac lock ------------------------------------------------
 # Two concurrent xcodebuild/test chains on one Mac corrupt each other's
 # Simulator state; a gate result from such a run would be meaningless.
@@ -202,7 +263,15 @@ if [ "$USE_LOCK" -eq 1 ]; then
       exit 2
     fi
     echo "local-ci-gate: taking over a stale gate lock ($(cat "$LOCK_DIR/info" 2>/dev/null || echo 'no info'))" >&2
-    rm -rf "$LOCK_DIR"
+    # Atomic steal: rename the stale lock aside in ONE step, so of two
+    # processes that both saw the dead pid exactly one wins - a
+    # remove-then-mkdir sequence would let the loser delete the winner's live
+    # lock, which is how two gates end up on one Mac.
+    if ! mv "$LOCK_DIR" "$LOCK_DIR.stale.$$" 2>/dev/null; then
+      echo "local-ci-gate: lost the stale-lock takeover race; rerun" >&2
+      exit 2
+    fi
+    rm -rf "$LOCK_DIR.stale.$$"
     if ! mkdir "$LOCK_DIR" 2>/dev/null; then
       echo "local-ci-gate: could not acquire the gate lock at $LOCK_DIR" >&2
       exit 2
@@ -229,9 +298,48 @@ cleanup() {
   fi
   return "$status"
 }
-trap cleanup EXIT INT TERM
+# EXIT runs cleanup and keeps the gate's own exit code. INT/TERM must also
+# STOP: a handler that only returns (the same function on one trap) cleans up
+# and then lets the run continue against a deleted worktree, with the lock
+# released while the run is still going.
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# Any command that talks to Xcode/CoreSimulator gets a wall-clock bound: a
+# wedged CoreSimulatorService can hang `xcrun simctl list` indefinitely, and
+# an operator watching an SSH session with no progress has no way to tell a
+# hung tool from a long build. Bounded here rather than left to the lane
+# runner's own deadlines, because these run before any lane exists.
+run_bounded() { # $1=budget seconds $2=log path $3=working directory, rest=command
+  local budget="$1" log="$2" cwd="$3"
+  shift 3
+  local pid status deadline grace
+  mkdir -p "$(dirname "$log")"
+  ( cd "$cwd" && exec "$@" ) >"$log" 2>&1 &
+  pid=$!
+  deadline=$(( $(date +%s) + budget ))
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      kill -TERM "$pid" 2>/dev/null || true
+      grace=5
+      while [ "$grace" -gt 0 ] && kill -0 "$pid" 2>/dev/null; do
+        sleep 1
+        grace=$(( grace - 1 ))
+      done
+      kill -KILL "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null
+      echo "local-ci-gate: '$*' exceeded its ${budget}s budget" >&2
+      return 124
+    fi
+    sleep 1
+  done
+  status=0
+  wait "$pid" || status=$?
+  return "$status"
+}
 
 # --- resolve the tested revision --------------------------------------------
 if [ "$DO_FETCH" -eq 1 ]; then
@@ -270,7 +378,10 @@ if [ -d "$RUN_DIR" ] && [ -n "$(ls -A "$RUN_DIR" 2>/dev/null)" ]; then
   echo "local-ci-gate: run directory $RUN_DIR already exists and is not empty; choose another --run-dir" >&2
   exit 2
 fi
-mkdir -p "$RUN_DIR"
+if ! mkdir -p "$RUN_DIR"; then
+  echo "local-ci-gate: cannot create the run directory $RUN_DIR (a file in the way, or an unwritable parent?)" >&2
+  exit 2
+fi
 
 GATE_STARTED_AT="$(now_iso)"
 GATE_START_EPOCH=$(date +%s)
@@ -282,22 +393,9 @@ echo "run dir   : $RUN_DIR"
 echo "worktree  : $WT"
 echo "simulator : $SIMULATOR_NAME"
 
-# --- worktree ----------------------------------------------------------------
-# Detached: the gate never checks out a branch and never touches the invoking
-# checkout's index, HEAD or stash.
-if ! git -C "$REPO_ROOT" worktree add --detach "$WT" "$SHA"; then
-  echo "local-ci-gate: could not create a detached worktree at $WT" >&2
-  exit 2
-fi
-WT_SHA="$(git -C "$WT" rev-parse HEAD)"
-if [ "$WT_SHA" != "$SHA" ]; then
-  echo "local-ci-gate: worktree HEAD ($WT_SHA) is not the requested commit ($SHA)" >&2
-  git -C "$REPO_ROOT" worktree remove --force "$WT" >/dev/null 2>&1 || true
-  exit 2
-fi
-echo "worktree ready at $WT (detached at $SHA)"
-
-WORKTREE_REMOVED=0
+# remove_worktree is defined BEFORE the worktree exists: an interrupt landing
+# between `git worktree add` and the trap would otherwise hit an undefined
+# function and leak the registered worktree.
 remove_worktree() {
   if [ "$KEEP_WORKTREE" -eq 1 ]; then
     echo "keeping the throwaway worktree at $WT (--keep-worktree)"
@@ -317,11 +415,34 @@ remove_worktree() {
   fi
 }
 
+# --- worktree ----------------------------------------------------------------
+# Detached: the gate never checks out a branch and never touches the invoking
+# checkout's index, HEAD or stash.
+if ! git -C "$REPO_ROOT" worktree add --detach "$WT" "$SHA"; then
+  echo "local-ci-gate: could not create a detached worktree at $WT" >&2
+  echo "local-ci-gate: a worktree left by a killed run is usually the cause; remove it with:" >&2
+  echo "  git -C \"$REPO_ROOT\" worktree list    # find the stale entry" >&2
+  echo "  git -C \"$REPO_ROOT\" worktree remove --force <stale-path>" >&2
+  exit 2
+fi
+WT_SHA="$(git -C "$WT" rev-parse HEAD)"
+if [ "$WT_SHA" != "$SHA" ]; then
+  echo "local-ci-gate: worktree HEAD ($WT_SHA) is not the requested commit ($SHA)" >&2
+  remove_worktree
+  exit 2
+fi
+echo "worktree ready at $WT (detached at $SHA)"
+
 # The target tree's own tooling is what runs the tests: the planner, the lane
 # runner and the timing extractor must be the ones from the tested commit.
+# extract-test-timings.py is load-bearing too - every count, every
+# classification and every timing the gate reports comes out of it.
 LANE_RUNNER="$WT/scripts/ci-test-lane.sh"
 PLANNER="$WT/scripts/plan-tests.py"
-for script in "$LANE_RUNNER" "$PLANNER" "$WT/scripts/ci-build-for-testing.sh"; do
+for script in "$LANE_RUNNER" "$PLANNER" \
+              "$WT/scripts/ci-build-for-testing.sh" \
+              "$WT/scripts/extract-test-timings.py" \
+              "$WT/scripts/ci-lib.sh"; do
   if [ ! -f "$script" ]; then
     echo "local-ci-gate: $SHA does not carry the tested tree's CI tooling ($script)" >&2
     remove_worktree
@@ -346,32 +467,37 @@ write_meta() { # $1 = finished_at, $2 = wall_s
     --ui-classes "${GATE_UI_CLASS_COUNT:-0}" \
     --repeat-classes "$REPEAT_CLASSES" \
     --repeat-iterations "$REPEAT_ITERATIONS" \
+    --lock-used "$USE_LOCK" \
+    --simulator-prep "$SIM_PREP" \
     $([ "$ALLOW_RECOVERED_INFRA" -eq 1 ] && printf '%s' '--allow-recovered-infrastructure') \
     $([ "$SKIP_STATIC" -eq 1 ] && printf '%s' '--skip-static')
 }
 
 GATE_STATIC_STATUS="skipped"
 GATE_BUILD_STATUS="not_run"
-GATE_UNIT_STATUS="not_run"
-GATE_UI_STATUS="not_run"
-GATE_REPEAT_STATUS="not_run"
 
 # --- phase: generate ---------------------------------------------------------
 echo ""
 echo "== xcodegen generate =="
 GEN_LOG="$RUN_DIR/generate.log"
-if ( cd "$WT" && xcodegen generate ) >"$GEN_LOG" 2>&1; then
+if run_bounded 300 "$GEN_LOG" "$WT" xcodegen generate; then
   echo "xcodegen generate ok"
 else
-  echo "local-ci-gate: xcodegen generate failed; see $GEN_LOG" >&2
+  echo "local-ci-gate: xcodegen generate failed or timed out; see $GEN_LOG" >&2
   tail -n 40 "$GEN_LOG" >&2 || true
   remove_worktree
   exit 2
 fi
 
 # --- the device the run will actually use (recorded in the result) ----------
+# `simctl list` talks to CoreSimulatorService, which ci-lib.sh bounds
+# everywhere else for exactly this reason; bound it here too.
 DEVICES_JSON="$RUN_DIR/simctl-devices.json"
-xcrun simctl list devices available -j >"$DEVICES_JSON" 2>/dev/null || true
+# stderr is silenced INSIDE the command so the JSON file stays parseable even
+# when CoreSimulator emits warnings (run_bounded merges the streams).
+run_bounded 60 "$DEVICES_JSON" "$RUN_DIR" \
+  sh -c 'xcrun simctl list devices available -j 2>/dev/null' || \
+  echo "local-ci-gate: could not list simulator devices within its budget; the recorded device may be incomplete" >&2
 python3 "$HELPER" simulator --devices "$DEVICES_JSON" \
   --name "$SIMULATOR_NAME" --out "$RUN_DIR/simulator.json" >/dev/null 2>&1 || true
 SIMULATOR_RUNTIME="$(python3 -c '
@@ -444,9 +570,21 @@ BUILD_OK=1
 BUILD_ELAPSED=$(( $(date +%s) - BUILD_START ))
 mkdir -p "$RUN_DIR/build"
 # The build script writes ci-lane/build inside the (throwaway) worktree;
-# move the diagnostics out so they survive the worktree's removal.
+# move the diagnostics out so they survive the worktree's removal. A failed
+# move must be reported: the build phase document points at these paths, and
+# a silent loss would leave the gate citing logs that no longer exist.
 if [ -d "$WT/ci-lane/build" ]; then
-  mv "$WT/ci-lane/build"/* "$RUN_DIR/build/" 2>/dev/null || true
+  for artifact in "$WT/ci-lane/build"/*; do
+    [ -e "$artifact" ] || continue
+    if ! mv "$artifact" "$RUN_DIR/build/"; then
+      echo "local-ci-gate: could not move $(basename "$artifact") out of the worktree; copying instead" >&2
+      cp -R "$artifact" "$RUN_DIR/build/" 2>/dev/null || \
+        echo "local-ci-gate: could not preserve $(basename "$artifact")" >&2
+    fi
+  done
+fi
+if [ ! -s "$RUN_DIR/build/build.log" ]; then
+  echo "local-ci-gate: the build log was not preserved in $RUN_DIR/build" >&2
 fi
 XCTESTRUN="$(ls -t "$RUN_DIR/derived-data"/Build/Products/*.xctestrun 2>/dev/null | head -n 1 || true)"
 if [ "$BUILD_OK" -eq 1 ] && [ -n "$XCTESTRUN" ]; then
@@ -506,27 +644,35 @@ run_lane() { # $1=kind $2=lane $3=target $4=classes $5=predicted $6=timeout
 # a test failure until the extraction is read closely.
 simulator_prep() { # $1 = label
   if [ "$SIM_PREP" -eq 0 ]; then
+    echo "simulator preparation skipped (--no-simulator-prep)"
     return 0
   fi
   local label="$1"
   local log="$RUN_DIR/sim-prep-$label.log"
   mkdir -p "$RUN_DIR/sim-prep"
   echo "== simulator preparation before $label =="
-  if ( cd "$WT" && LOG_DIR="$RUN_DIR/sim-prep" SIMULATOR_NAME="$SIMULATOR_NAME" \
-        bash -c '. "$1/scripts/ci-lib.sh"; reset_and_boot_simulator 0' _ "$WT" ) \
-        >"$log" 2>&1; then
-    echo "simulator ready for $label"
+  local started status=0
+  started=$(date +%s)
+  ( cd "$WT" && LOG_DIR="$RUN_DIR/sim-prep" SIMULATOR_NAME="$SIMULATOR_NAME" \
+      bash -c '. "$1/scripts/ci-lib.sh"; reset_and_boot_simulator 0' _ "$WT" ) \
+      >"$log" 2>&1 || status=$?
+  local elapsed=$(( $(date +%s) - started ))
+  if [ "$status" -eq 0 ]; then
+    echo "simulator ready for $label (${elapsed}s)"
   else
-    echo "local-ci-gate: simulator preparation for $label did not complete; continuing (see $log)"
+    echo "local-ci-gate: simulator preparation for $label did not complete (status $status); continuing (see $log)"
+  fi
+  # Recorded even when it succeeded: a wedged environment is a caveat on the
+  # result, and the summarizer only knows what the run directory says.
+  SIM_PREP_CHECKS+=(--check "$label:$( [ "$status" -eq 0 ] && echo pass || echo fail ):$elapsed")
+  if [ "$status" -ne 0 ]; then
+    SIM_PREP_FAILED=1
   fi
 }
 
 if [ "$GATE_BUILD_STATUS" != "pass" ]; then
   echo ""
   echo "== test lanes SKIPPED: the build did not produce test products =="
-  GATE_UNIT_STATUS="skipped"
-  GATE_UI_STATUS="skipped"
-  GATE_REPEAT_STATUS="skipped"
 else
   # --- phase: plan -------------------------------------------------------
   # The planner is the single owner of the batch layout and every watchdog
@@ -545,13 +691,11 @@ else
   if [ "$PLAN_OK" -ne 1 ] || [ ! -s "$RUN_DIR/plan/plan.json" ]; then
     echo "local-ci-gate: planning failed; see $RUN_DIR/plan/plan.log" >&2
     tail -n 40 "$RUN_DIR/plan/plan.log" >&2 || true
-    GATE_UNIT_STATUS="fail"; GATE_UI_STATUS="fail"; GATE_REPEAT_STATUS="fail"
   else
     echo "plan: $RUN_DIR/plan/plan.json"
     if ! python3 "$HELPER" lanes --plan "$RUN_DIR/plan/plan.json" \
         --out "$LANES_ENV" --json-out "$RUN_DIR/lanes.json"; then
       echo "local-ci-gate: lane projection failed" >&2
-      GATE_UNIT_STATUS="fail"; GATE_UI_STATUS="fail"; GATE_REPEAT_STATUS="fail"
     else
       # shellcheck disable=SC1090
       . "$LANES_ENV"
@@ -561,13 +705,12 @@ else
       if run_lane unit "$GATE_UNIT_LANE" "$GATE_UNIT_TARGET" "$GATE_UNIT_CLASSES" \
           "$GATE_UNIT_PREDICTED" "$GATE_UNIT_TIMEOUT" "$RUN_DIR/lanes/unit" \
           --batches-json "$GATE_UNIT_BATCHES_JSON"; then
-        GATE_UNIT_STATUS="pass"
+        echo "unit lane: the complete ConduitTests suite ran"
       else
-        GATE_UNIT_STATUS="fail"
         # The lane stopped at the batch that failed, so the rest of the suite
         # has no result yet. Run the batches it never reached as a
         # CONTINUATION pass (a diagnostic continuation, never a retry of
-        # anything that already ran) so one failure cannot hide the other 129
+        # anything that already ran) so one failure cannot hide the other
         # classes' status from the report.
         CONT_ENV="$RUN_DIR/unit-continuation.env"
         if python3 "$HELPER" not-run-batches \
@@ -604,18 +747,16 @@ else
         if run_lane ui "$GATE_UI_LANE" "$GATE_UI_TARGET" "$GATE_UI_CLASSES" \
             "$GATE_UI_PREDICTED" "$GATE_UI_TIMEOUT" "$RUN_DIR/lanes/ui" \
             --class-timeouts "$GATE_UI_CLASS_TIMEOUTS"; then
-          GATE_UI_STATUS="pass"
+          echo "ui lane: the complete ConduitUITests suite ran"
         else
-          GATE_UI_STATUS="fail"
+          echo "ui lane: the shard reported failures (classified in the result)"
         fi
       else
-        GATE_UI_STATUS="skipped"
+        echo "ui lane: the plan carries no UI classes"
       fi
 
       # --- explicit repeat policy ----------------------------------------
-      GATE_REPEAT_STATUS="pass"
       if [ -z "$REPEAT_CLASSES" ] || [ "$REPEAT_ITERATIONS" -le 0 ]; then
-        GATE_REPEAT_STATUS="skipped"
         echo ""
         echo "== repeat policy disabled =="
       else
@@ -626,7 +767,6 @@ else
             --timeout-cap "$REPEAT_TIMEOUT_CAP" \
             --out "$REPEAT_JSON" --tsv-out "$REPEAT_TSV"; then
           echo "local-ci-gate: repeat policy could not be projected" >&2
-          GATE_REPEAT_STATUS="fail"
         else
           echo ""
           echo "== repeat policy: $REPEAT_ITERATIONS unconditional iterations per class =="
@@ -635,7 +775,6 @@ else
           # have tasks in it.
           if [ ! -s "$REPEAT_TSV" ]; then
             echo "local-ci-gate: the repeat policy projected no tasks" >&2
-            GATE_REPEAT_STATUS="fail"
           fi
           while IFS=$'\t' read -r rcls rbatches rpredicted rtimeout; do
             [ -z "$rcls" ] && continue
@@ -651,7 +790,6 @@ else
                 echo "  $rcls iteration $iteration: pass"
               else
                 echo "  $rcls iteration $iteration: FAIL"
-                GATE_REPEAT_STATUS="fail"
               fi
               iteration=$(( iteration + 1 ))
             done
@@ -663,6 +801,15 @@ else
 fi
 
 # --- summarize ---------------------------------------------------------------
+# The preparation checks are written before the summary so a degraded
+# environment shows up as a caveat on the result rather than only in the log.
+python3 "$HELPER" phase --out "$RUN_DIR/sim-prep/phase.json" \
+  --phase sim-prep \
+  --status "$([ "$SIM_PREP_FAILED" -eq 1 ] && echo fail || echo pass)" \
+  --duration 0 --exit-code "$SIM_PREP_FAILED" \
+  --note "bounded shutdown/boot/wait-for-boot before each lane" \
+  "${SIM_PREP_CHECKS[@]}" >/dev/null 2>&1 || true
+
 GATE_FINISHED_AT="$(now_iso)"
 GATE_ELAPSED=$(( $(date +%s) - GATE_START_EPOCH ))
 write_meta "$GATE_FINISHED_AT" "$GATE_ELAPSED"

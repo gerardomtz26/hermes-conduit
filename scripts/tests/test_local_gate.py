@@ -863,6 +863,130 @@ class SummarizeTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertTrue(any("planned no UI lane" in p for p in doc["problems"]))
 
+    def test_a_failed_lane_verdict_always_fails_the_gate(self):
+        """The runner's own verdict is evidence in its own right: green-looking
+        event classification must not be able to contradict it."""
+        self._layout(repeat_classes=())
+        lane_artifacts(self.run_dir / "lanes" / "unit", status="fail",
+                       classes=("AlphaTests", "BetaTests", "GammaTests"),
+                       cases=11)
+        code, doc, _ = self._summarize()
+        self.assertEqual(code, 1)
+        self.assertTrue(any("lane runner verdict is 'fail'" in p
+                            for p in doc["problems"]), doc["problems"])
+
+    def test_ui_diagnosis_parts_are_attributed_to_their_class(self):
+        """The runner writes UI diagnosis parts as detail-<Cls>-a<k>.json (no
+        'class-' infix). Without that key the synthetic launch failure in a
+        shard that ALSO has a real failure would be mislabeled as an
+        assertion."""
+        self._layout(repeat_classes=())
+        lane_artifacts(self.run_dir / "lanes" / "ui", status="fail",
+                       classes=("LaunchUITests",), cases=2,
+                       failures=[{"class": "System Failures",
+                                  "test": "Conduit encountered an error",
+                                  "attempts": []}],
+                       attempts=[{"mode": "class", "n": 1,
+                                  "class": "LaunchUITests",
+                                  "status": "test-failures"}],
+                       batches=[])
+        parts = self.run_dir / "lanes" / "ui" / "parts"
+        write_json(parts / "detail-LaunchUITests-a1.json",
+                   {"schema_version": 1, "attempts": [], "failures": [
+                       {"class": "System Failures",
+                        "test": "Conduit encountered an error", "attempts": []}]})
+        # The unit lane is metric-neutral for this test: make it clean.
+        lane_artifacts(self.run_dir / "lanes" / "unit",
+                       classes=("AlphaTests", "BetaTests", "GammaTests"), cases=11)
+        code, doc, _ = self._summarize()
+        self.assertEqual(code, 1)
+        self.assertEqual(doc["ui"]["synthetic_failures"], 1)
+        self.assertTrue(doc["ui"]["infrastructure_failures"],
+                        "the launch failure must be infrastructure, not an assertion")
+        self.assertFalse(doc["ui"]["assertion_failures"])
+
+    def test_ui_shard_targeted_retry_is_seen_as_one_work_item(self):
+        """A UI shard has ONE batch, but its targeted retry is recorded under
+        batch-retry with n=2: the two must be read as the same work item, or
+        "failed an assertion then passed" is reported as a plain assertion."""
+        self._layout(repeat_classes=())
+        lane_artifacts(self.run_dir / "lanes" / "ui", status="pass",
+                       classes=("LaunchUITests",), cases=2,
+                       failures=[{"class": "LaunchUITests",
+                                  "test": "testSomething", "attempts": []}],
+                       attempts=[
+                           {"mode": "batch", "n": 1, "class": "all",
+                            "status": "test-failures"},
+                           {"mode": "batch-retry", "n": 2, "class": "all",
+                            "status": "passed"}],
+                       batches=[])
+        lane_artifacts(self.run_dir / "lanes" / "unit",
+                       classes=("AlphaTests", "BetaTests", "GammaTests"), cases=11)
+        code, doc, _ = self._summarize()
+        self.assertEqual(code, 1)
+        self.assertTrue(doc["assertion_rerun_until_green"] >= 1,
+                        "the retried assertion must be reported as rerun-until-green")
+        self.assertTrue(any("retried until they passed" in p
+                            for p in doc["problems"]))
+
+    def test_continuation_clears_stale_not_executed_evidence(self):
+        """After the continuation runs the never-reached batches, the report
+        must not still claim that work was not executed."""
+        self._layout(repeat_classes=(), unit_batches=2)
+        lane_artifacts(self.run_dir / "lanes" / "unit", status="fail",
+                       classes=("AlphaTests", "BetaTests"), cases=4,
+                       failures=[{"class": "AlphaTests", "test": "testBoom",
+                                  "attempts": []}],
+                       attempts=[{"mode": "batch", "n": 1, "class": "all",
+                                  "status": "test-failures"},
+                                 {"mode": "batch", "n": 2, "class": "all",
+                                  "status": "not_run"}],
+                       batches=[
+                           {"batch": 1, "classes": ["AlphaTests", "BetaTests"],
+                            "timeout_s": 600, "status": "test-failures",
+                            "attempts": [{"attempt": 1, "status": "test-failures",
+                                          "seconds": 1.0, "failures": 1}]},
+                           {"batch": 2, "classes": ["GammaTests"],
+                            "timeout_s": 500, "status": "not_run", "attempts": []},
+                       ])
+        lane_artifacts(self.run_dir / "lanes" / "unit-continuation",
+                       status="pass", classes=("GammaTests",), cases=3)
+        code, doc, _ = self._summarize()
+        self.assertEqual(code, 1)
+        self.assertEqual(doc["unit"]["not_executed"], [])
+        self.assertEqual(doc["infrastructure"]["not_executed"], 0)
+        self.assertFalse(any("not executed" in p for p in doc["unit"]["problems"]),
+                         doc["unit"]["problems"])
+
+    def test_weakening_flags_are_recorded_as_caveats(self):
+        self._layout(repeat_classes=(), allow_recovered=True)
+        meta = json.loads((self.run_dir / "meta.json").read_text(encoding="utf-8"))
+        meta["run_flags"] = {"lock_used": False, "simulator_prep": False}
+        write_json(self.run_dir / "meta.json", meta)
+        lane_artifacts(self.run_dir / "lanes" / "unit", status="pass",
+                       classes=("AlphaTests", "BetaTests", "GammaTests"),
+                       cases=11, infra_recovered=("BetaTests",))
+        code, doc, markdown = self._summarize()
+        self.assertEqual(code, 0, doc["problems"])
+        caveats = " ".join(doc["caveats"])
+        self.assertIn("--no-lock", caveats)
+        self.assertIn("--no-simulator-prep", caveats)
+        self.assertIn("--allow-recovered-infrastructure", caveats)
+        self.assertIn("CAVEAT", markdown.read_text(encoding="utf-8"))
+
+    def test_failed_simulator_preparation_is_a_caveat(self):
+        self._layout(repeat_classes=())
+        write_json(self.run_dir / "sim-prep" / "phase.json", {
+            "schema_version": 1, "phase": "sim-prep", "status": "fail",
+            "duration_s": 0, "checks": [
+                {"name": "unit", "status": "fail", "duration_s": 12}]})
+        lane_artifacts(self.run_dir / "lanes" / "unit",
+                       classes=("AlphaTests", "BetaTests", "GammaTests"), cases=11)
+        code, doc, _ = self._summarize()
+        self.assertEqual(code, 0, doc["problems"])
+        self.assertTrue(any("Simulator preparation failed before unit" in c
+                            for c in doc["caveats"]), doc["caveats"])
+
     def test_failed_build_fails_the_gate(self):
         self._layout(repeat_classes=(), ui_classes=0)
         write_json(self.run_dir / "build" / "phase.json", {

@@ -499,7 +499,7 @@ simulator/runtime recorded in the result is the one the tests actually ran on.
 | prepare | before each lane: ci-lib.sh's own bounded shutdown/boot/wait-for-boot | Environment preparation, never a retry — it re-runs nothing and a lane that fails afterwards still fails. Without it, xcodebuild boots a device and installs/launches the host app while CoreSimulator is still settling, which is what cost the gate its first two runs on `main` (`Simulator device failed to launch com.milim.relay … Application failed preflight checks … reason: Busy`). Disable with `--no-simulator-prep`. |
 | unit | the **complete** `ConduitTests` suite | One exhaustive lane: the planner is forced to `--min-lanes 1 --max-lanes 1` so it still owns the sequential batches and every per-batch watchdog |
 | ui | the **complete** `ConduitUITests` suite | One batched invocation over every UI class, with the planner's per-class watchdogs |
-| repeats | the repeat policy below | Runs even when the unit or UI lane failed, so one red lane cannot hide the rest; skipped only when the build or the plan failed, because then there is nothing to repeat against |
+| repeats | the repeat policy below | Runs even when the unit or UI lane failed, so one red lane cannot hide the rest; skipped when the build failed (no test products), and left failing when the plan could not be produced (there is nothing to project the repeat tasks from) |
 
 The lane runner, the planner and the timing extractor come from the **tested
 commit's own tree**, so the policy that decides the verdict is the policy of
@@ -529,20 +529,37 @@ promises is a gate defect, not a warning.
 
 The gate classifies on the lane runner's own attempt tokens (`passed`,
 `test-failures`, `infra-error`, `timeout`, `unclassified`, `incomplete`,
-`not_run`, `not_diagnosed`) rather than re-deriving a verdict from logs:
+`not_run`, `not_diagnosed`) rather than re-deriving a verdict from logs. The
+lane runner's own final verdict is a problem in its own right: a lane that
+says anything other than `pass`/`skipped` fails the gate even if the event
+vocabulary came up empty.
 
-* **genuine assertion failures** — the class ended on `test-failures`, or the
-  extraction recorded failing tests. Fails the gate.
+* **genuine assertion failures** — the invocation's extraction recorded a
+  failing *test* (an entry naming a real test case), and the work item ended
+  on `test-failures`. Fails the gate.
+* **test-runner failures** — XCTest also files the *run* itself: when the
+  Simulator refuses to install or launch the host app, the result bundle
+  carries a synthetic entry under the pseudo-class `System Failures`
+  (`Conduit encountered an error`), and the lane runner's status token cannot
+  tell it from an assertion. The gate splits those apart using the
+  per-invocation extraction parts, so a machine that never started the app is
+  reported as infrastructure — never as an assertion failure. This is not
+  hypothetical: it is what the gate's first runs on `main` produced.
 * **assertions retried until green** — a work item recorded `test-failures`
   and later `passed`. Fails the gate in every mode, including
-  `--allow-recovered-infrastructure`: a flake is a flake, not a pass.
+  `--allow-recovered-infrastructure`: a flake is a flake, not a pass. (A UI
+  shard's targeted retry arrives as a second batch attempt and is grouped
+  back onto the shard's work item for exactly this reason.)
 * **infrastructure failures** — nonzero exit with a known zero failing-test
   count, or a result that could not be classified. Fails the gate. A
   *persistent* one (the environment never recovered) is always fatal; a
   *recovered* one (a bounded retry rescued it) is fatal too, because the run
   is not trustworthy evidence — the operator reruns the gate. The only way to
-  downgrade a recovered one is the explicit, record-it-wherever-you-cite-it
-  `--allow-recovered-infrastructure` flag.
+  downgrade a recovered one is the explicit
+  `--allow-recovered-infrastructure` flag, which is then recorded as a
+  **caveat** in `gate-result.json` and `summary.md`, the two documents a
+  result is cited from. `--no-lock` and `--no-simulator-prep`, and a failed
+  Simulator preparation, are recorded the same way.
 * **watchdog timeouts (hangs)** — classified as timeouts, with the hung class
   or batch named by the runner.
 * **not executed / not diagnosed** — work that never ran. Fails the gate:
@@ -550,18 +567,23 @@ The gate classifies on the lane runner's own attempt tokens (`passed`,
   at the batch that failed, the gate then runs the batches it never reached as
   a **continuation pass** (diagnostic, never a retry of anything that already
   ran) so one failure cannot hide the rest of the suite; the coverage the gate
-  certifies is the aggregate over the lane and its continuation.
+  certifies is the aggregate over the lane and its continuation, and the
+  "never executed" evidence is recomputed against that aggregate rather than
+  carried over from the stopped lane.
 
 ### Result document
 
 `gate-result.json` is machine-readable and carries at least: `tested_sha`
 (plus `requested_ref`), `xcode_version`, `simulator` (`name`, `runtime`,
 `udid`), `unit` and `ui` blocks with `executions`, `failures`,
-`classes_expected`/`classes_observed`, `batch_count`, per-phase
+`classes_expected`/`classes_observed`, `batch_count` (`null` for a UI shard,
+which is one batched invocation rather than a batch layout), per-phase
 `assertion_failures`/`infrastructure_failures`/`timeouts`/`not_executed`,
+`synthetic_failures` (XCTest reporting the run itself),
 `focused_repeats` (per class and per iteration), an `infrastructure` roll-up
 (`persistent`, `recovered`, `retries`, `simulator_resets`/`erases`), a
-`partial`/`partial_reasons` pair, `problems[]`, and the final `verdict`
+`partial`/`partial_reasons` pair, `caveats` and `run_flags` (the operating
+flags a run was given), `problems[]`, and the final `verdict`
 (`PASS`/`FAIL`). The human `summary.md` next to it carries the same numbers.
 
 A run is `partial` when the operator deliberately narrowed it
@@ -580,9 +602,17 @@ bundles that explain it. The `.xcresult` paths the gate recorded for a passing
 lane can legitimately be empty; the timings, counts and logs are the evidence
 there, and the full run is reproducible from the printed SHA.
 
-The throwaway worktree is removed at the end of the run (including on
-interrupt), and reproduce the exact tested tree with the
-`git worktree add --detach` command the gate prints on failure.
+The throwaway worktree is removed at the end of the run, including on
+`INT`/`TERM` (the gate then exits 130/143 rather than continuing); a `SIGKILL`
+is the one case nothing can cover, and the gate prints the
+`git worktree remove --force` command for it. Reproduce the exact tested tree
+with the `git worktree add --detach` command the gate prints on failure.
+
+`--fetch` (opt-in) rewrites the invoking repository's remote-tracking refs and
+tags. It does not touch the working tree, the index or any stash — that is the
+property the gate guarantees — but it is a fetch in that repository rather
+than in a scratch clone, so a run without `--fetch` tests exactly the refs the
+checkout already had.
 
 ### Simulator safety
 
