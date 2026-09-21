@@ -72,10 +72,16 @@ Options:
   --simulator NAME           Simulator device name (default: $SIMULATOR_NAME
                              or "iPhone 17 Pro").
   --no-simulator-prep        Skip the bounded Simulator preparation (shutdown,
-                             boot, wait for boot) that runs before each lane.
-                             Preparation only: it never re-runs anything, but
-                             skipping it makes the "device failed to launch
-                             the host app" wedge far more likely.
+                             erase, boot, wait for boot) that runs before each
+                             lane. Preparation only: it never re-runs
+                             anything, but skipping it makes the "device
+                             failed to launch the host app" wedge far more
+                             likely.
+  --no-simulator-erase       Prepare the device with shutdown+boot instead of
+                             erasing it first. Cheaper (~40s per lane saved),
+                             and it is the mode that reproduced the launch
+                             refusals on our Mac: use it to observe the raw
+                             behavior, not for a release run.
   --repeat-classes CSV       Classes for the repeat policy.
                              Default: settled-Markdown/dormancy + transcript
                              performance families.
@@ -114,6 +120,9 @@ SKIP_STATIC=0
 USE_LOCK=1
 
 SIM_PREP=1
+# 1 = erase the destination before booting it (see simulator_prep: the A/B
+# probe on this machine showed erase is what clears the launch-refusal wedge).
+SIM_ERASE="${GATE_SIMULATOR_ERASE:-1}"
 SIM_PREP_CHECKS=()
 SIM_PREP_FAILED=0
 
@@ -127,6 +136,7 @@ while [ $# -gt 0 ]; do
     --worktree-root) WORKTREE_ROOT="$2"; shift 2 ;;
     --simulator) SIMULATOR_NAME="$2"; shift 2 ;;
     --no-simulator-prep) SIM_PREP=0; shift ;;
+    --no-simulator-erase) SIM_ERASE=0; shift ;;
     --repeat-classes) REPEAT_CLASSES="$2"; shift 2 ;;
     --repeat-iterations) REPEAT_ITERATIONS="$2"; shift 2 ;;
     --repeat-timeout-cap) REPEAT_TIMEOUT_CAP="$2"; shift 2 ;;
@@ -631,17 +641,23 @@ run_lane() { # $1=kind $2=lane $3=target $4=classes $5=predicted $6=timeout
 }
 
 # Bounded Simulator preparation before a lane starts: shut the devices down,
-# boot the destination, and WAIT for a complete boot, using ci-lib.sh's own
-# recovery primitive rather than a new one.
+# ERASE the destination, boot it, and WAIT for a complete boot, using
+# ci-lib.sh's own recovery primitive rather than a new one.
 #
 # This is environment preparation, never a retry: nothing that ran is
 # re-executed, and a lane that then fails still fails. It exists because the
-# gate's first two runs on main both lost their first batch to
-# "Simulator device failed to launch com.milim.relay ... Application failed
-# preflight checks ... reason: Busy" - xcodebuild booting a device and
-# immediately installing and launching the host app, while CoreSimulator was
-# still settling. Each wasted run costs ~20 minutes, and the wedge looks like
-# a test failure until the extraction is read closely.
+# gate's runs on main kept losing their first unit batch to
+#
+#   Simulator device failed to launch com.milim.relay ...
+#   Application failed preflight checks ... reason: Busy
+#
+# and an A/B probe on the same machine settled what clears it: with a
+# shutdown+boot only, the very next single-class lane failed with a launch
+# refusal; after `simctl erase` + boot, the same lane passed. The wedge is
+# leftover device state, not a scheduling race, so the erase is the default.
+# It costs ~40s per lane and it is what makes the run's evidence mean "this
+# commit on a known-clean device". --no-simulator-erase keeps the cheaper
+# shutdown+boot for operators who want the raw behavior.
 simulator_prep() { # $1 = label
   if [ "$SIM_PREP" -eq 0 ]; then
     echo "simulator preparation skipped (--no-simulator-prep)"
@@ -654,7 +670,7 @@ simulator_prep() { # $1 = label
   local started status=0
   started=$(date +%s)
   ( cd "$WT" && LOG_DIR="$RUN_DIR/sim-prep" SIMULATOR_NAME="$SIMULATOR_NAME" \
-      bash -c '. "$1/scripts/ci-lib.sh"; reset_and_boot_simulator 0' _ "$WT" ) \
+      bash -c '. "$1/scripts/ci-lib.sh"; reset_and_boot_simulator "$2"' _ "$WT" "$SIM_ERASE" ) \
       >"$log" 2>&1 || status=$?
   local elapsed=$(( $(date +%s) - started ))
   if [ "$status" -eq 0 ]; then

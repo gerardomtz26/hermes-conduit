@@ -833,7 +833,10 @@ def _read_lane(lane_dir: str) -> dict:
     if isinstance(observations, dict):
         classes = observations.get("classes")
         if isinstance(classes, dict):
-            out["classes_observed"] = sorted(classes.keys())
+            # XCTest's synthetic pseudo-class is not a planned class: it must
+            # not be reported as an unexpected one when the run reports itself.
+            out["classes_observed"] = sorted(
+                c for c in classes.keys() if c not in SYNTHETIC_FAILURE_CLASSES)
         counts = observations.get("counts")
         if isinstance(counts, dict):
             out["executions"] = _int_or_zero(counts.get("cases"))
@@ -847,7 +850,8 @@ def _read_lane(lane_dir: str) -> dict:
             if isinstance(attempts, list):
                 out["classes_observed"] = sorted({
                     str(a.get("class")) for a in attempts
-                    if isinstance(a, dict) and a.get("class")})
+                    if isinstance(a, dict) and a.get("class")
+                    and str(a.get("class")) not in SYNTHETIC_FAILURE_CLASSES})
     # Split the extracted failures: entries XCTest files under its synthetic
     # "System Failures" class report the RUN (the test host never launched),
     # not a test asserting anything. Only the real ones are assertion
