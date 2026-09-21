@@ -75,6 +75,7 @@ enum TranscriptPerf {
             } else {
                 storage.settledMarkdownWindowSources.insert(context)
             }
+            recordWindowSpan(context: context)
         }
         if event == .settledMarkdownBody,
            ProcessInfo.processInfo.environment["CONDUIT_PERF_TRACE"] == "1" {
@@ -84,6 +85,33 @@ enum TranscriptPerf {
         }
         #endif
     }
+
+    /// Bounded record of every settled-Markdown evaluation inside the
+    /// current measurement window: seconds since the window opened, the
+    /// source, and condensed enclosing stack frames. DEBUG-only diagnostics
+    /// so a failed stay-at-zero assertion can name WHAT drove the
+    /// evaluation (hosting trait sync, a parent publish, a fresh mount)
+    /// instead of only reporting the count. Surfaced through
+    /// `windowEvaluationSpans` into fixture failure messages; never logged
+    /// unconditionally.
+    #if DEBUG
+    private static func recordWindowSpan(context: String) {
+        guard storage.windowEvaluationSpans.count < 8 else { return }
+        let offset: String
+        if let openedAt = storage.windowOpenedAt {
+            offset = String(format: "%.3f", Date().timeIntervalSince(openedAt))
+        } else {
+            offset = "?"
+        }
+        let stack = Thread.callStackSymbols
+            .dropFirst(2)
+            .prefix(10)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .joined(separator: " <- ")
+        storage.windowEvaluationSpans
+            .append("t=\(offset)s src=\(context.prefix(24)) [\(stack)]")
+    }
+    #endif
 
     enum Event {
         case settledBubbleBody
@@ -265,6 +293,18 @@ enum TranscriptPerf {
         #endif
     }
 
+    /// Diagnostics: bounded (time-since-window-open, source, call stack)
+    /// records of the settled-Markdown evaluations inside the current
+    /// measurement window. Fixture failure messages embed these so a
+    /// stay-at-zero violation names its driver. DEBUG-only.
+    static var windowEvaluationSpans: [String] {
+        #if DEBUG
+        return storage.windowEvaluationSpans
+        #else
+        return []
+        #endif
+    }
+
     // MARK: - Control
 
     /// Reset all counters and open a fresh measurement window. Sources
@@ -276,6 +316,7 @@ enum TranscriptPerf {
         var fresh = Storage()
         fresh.settledMarkdownKnownSources =
             storage.settledMarkdownKnownSources.union(storage.settledMarkdownWindowSources)
+        fresh.windowOpenedAt = Date()
         storage = fresh
         #endif
     }
@@ -287,6 +328,7 @@ enum TranscriptPerf {
     static func resetRenderLedgerForTesting() {
         #if DEBUG
         storage = Storage()
+        storage.windowOpenedAt = Date()
         #endif
     }
 
@@ -335,6 +377,11 @@ enum TranscriptPerf {
         var settledMarkdownWindowSources = Set<String>()
         /// Ring of recent pre-window repeat sources (DEBUG diagnostics).
         var recentPreWindowRepeatSources: [String] = []
+        /// When the current measurement window opened (DEBUG diagnostics).
+        var windowOpenedAt: Date?
+        /// Bounded evaluation spans inside the current window (DEBUG
+        /// diagnostics, see `windowEvaluationSpans`).
+        var windowEvaluationSpans: [String] = []
         var selectableTextViewUpdate = 0
         var selectableTextViewTextRebuild = 0
         var textKitMeasurement = 0

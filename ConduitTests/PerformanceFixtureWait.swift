@@ -44,10 +44,17 @@ enum PerformanceFixtureWait {
     /// Returns false only when the failsafe `cap` elapsed without a quiet
     /// window. Callers MUST fail the test in that case: measuring while
     /// work is still landing would make the assertions meaningless.
+    ///
+    /// The cap is deliberately generous (45s): on a contended hosted runner
+    /// the trailing lazy-mount/trait-sync tail has been observed to keep
+    /// landing for tens of seconds, and tripping this failsafe fails the
+    /// lane WITHOUT any assertion signal. The cap exists only to bound a
+    /// genuinely stuck run, so it must be far above the slowest observed
+    /// settle time, never a second timing gate.
     @discardableResult
     static func settleUntilCountersQuiet(
         quietFor: TimeInterval = 1.0,
-        cap: TimeInterval = 15.0
+        cap: TimeInterval = 45.0
     ) -> Bool {
         var quietForElapsed: TimeInterval = 0
         var elapsed: TimeInterval = 0
