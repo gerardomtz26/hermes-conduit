@@ -71,6 +71,11 @@ Options:
                              Default: <gate-root>/worktrees
   --simulator NAME           Simulator device name (default: $SIMULATOR_NAME
                              or "iPhone 17 Pro").
+  --no-simulator-prep        Skip the bounded Simulator preparation (shutdown,
+                             boot, wait for boot) that runs before each lane.
+                             Preparation only: it never re-runs anything, but
+                             skipping it makes the "device failed to launch
+                             the host app" wedge far more likely.
   --repeat-classes CSV       Classes for the repeat policy.
                              Default: settled-Markdown/dormancy + transcript
                              performance families.
@@ -107,6 +112,8 @@ KEEP_WORKTREE=0
 SKIP_STATIC=0
 USE_LOCK=1
 
+SIM_PREP=1
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --ref) REF="$2"; shift 2 ;;
@@ -116,6 +123,7 @@ while [ $# -gt 0 ]; do
     --run-dir) RUN_DIR="$2"; shift 2 ;;
     --worktree-root) WORKTREE_ROOT="$2"; shift 2 ;;
     --simulator) SIMULATOR_NAME="$2"; shift 2 ;;
+    --no-simulator-prep) SIM_PREP=0; shift ;;
     --repeat-classes) REPEAT_CLASSES="$2"; shift 2 ;;
     --repeat-iterations) REPEAT_ITERATIONS="$2"; shift 2 ;;
     --repeat-timeout-cap) REPEAT_TIMEOUT_CAP="$2"; shift 2 ;;
@@ -484,6 +492,35 @@ run_lane() { # $1=kind $2=lane $3=target $4=classes $5=predicted $6=timeout
       --iterations 1 --xctestrun "$XCTESTRUN" --result-dir "$result_dir" "$@"
 }
 
+# Bounded Simulator preparation before a lane starts: shut the devices down,
+# boot the destination, and WAIT for a complete boot, using ci-lib.sh's own
+# recovery primitive rather than a new one.
+#
+# This is environment preparation, never a retry: nothing that ran is
+# re-executed, and a lane that then fails still fails. It exists because the
+# gate's first two runs on main both lost their first batch to
+# "Simulator device failed to launch com.milim.relay ... Application failed
+# preflight checks ... reason: Busy" - xcodebuild booting a device and
+# immediately installing and launching the host app, while CoreSimulator was
+# still settling. Each wasted run costs ~20 minutes, and the wedge looks like
+# a test failure until the extraction is read closely.
+simulator_prep() { # $1 = label
+  if [ "$SIM_PREP" -eq 0 ]; then
+    return 0
+  fi
+  local label="$1"
+  local log="$RUN_DIR/sim-prep-$label.log"
+  mkdir -p "$RUN_DIR/sim-prep"
+  echo "== simulator preparation before $label =="
+  if ( cd "$WT" && LOG_DIR="$RUN_DIR/sim-prep" SIMULATOR_NAME="$SIMULATOR_NAME" \
+        bash -c '. "$1/scripts/ci-lib.sh"; reset_and_boot_simulator 0' _ "$WT" ) \
+        >"$log" 2>&1; then
+    echo "simulator ready for $label"
+  else
+    echo "local-ci-gate: simulator preparation for $label did not complete; continuing (see $log)"
+  fi
+}
+
 if [ "$GATE_BUILD_STATUS" != "pass" ]; then
   echo ""
   echo "== test lanes SKIPPED: the build did not produce test products =="
@@ -520,6 +557,7 @@ else
       . "$LANES_ENV"
 
       # --- complete unit suite -------------------------------------------
+      simulator_prep unit
       if run_lane unit "$GATE_UNIT_LANE" "$GATE_UNIT_TARGET" "$GATE_UNIT_CLASSES" \
           "$GATE_UNIT_PREDICTED" "$GATE_UNIT_TIMEOUT" "$RUN_DIR/lanes/unit" \
           --batches-json "$GATE_UNIT_BATCHES_JSON"; then
@@ -541,6 +579,9 @@ else
           if [ "${GATE_CONT_PRESENT:-0}" -eq 1 ]; then
             echo ""
             echo "== unit continuation: re-running the ${GATE_CONT_BATCH_COUNT} batch(es) the lane never reached (batches ${GATE_CONT_BATCH_INDICES}) =="
+            # The lane it continues stopped mid-invocation, so the Simulator is
+            # prepared again before the continuation starts.
+            simulator_prep unit-continuation
             if run_lane unit "$GATE_UNIT_LANE-continuation" "$GATE_UNIT_TARGET" \
                 "$GATE_CONT_CLASSES" "$GATE_CONT_PREDICTED" "$GATE_CONT_TIMEOUT" \
                 "$RUN_DIR/lanes/unit-continuation" \
@@ -559,6 +600,7 @@ else
 
       # --- complete UI suite ---------------------------------------------
       if [ "${GATE_UI_PRESENT:-0}" -eq 1 ]; then
+        simulator_prep ui
         if run_lane ui "$GATE_UI_LANE" "$GATE_UI_TARGET" "$GATE_UI_CLASSES" \
             "$GATE_UI_PREDICTED" "$GATE_UI_TIMEOUT" "$RUN_DIR/lanes/ui" \
             --class-timeouts "$GATE_UI_CLASS_TIMEOUTS"; then

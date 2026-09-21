@@ -496,6 +496,7 @@ simulator/runtime recorded in the result is the one the tests actually ran on.
 | generate | `xcodegen generate` | The generated `.xcodeproj` is never committed |
 | static | `plan-tests.py validate`, `python3 -m unittest discover -s scripts/tests`, `check-l10n-coverage.py` | `--skip-static` exists for developer loops and marks the result **partial** |
 | build | `ci-build-for-testing.sh` once, into a gate-specific DerivedData | The same build-once contract as hosted CI, without the artifact round trip |
+| prepare | before each lane: ci-lib.sh's own bounded shutdown/boot/wait-for-boot | Environment preparation, never a retry — it re-runs nothing and a lane that fails afterwards still fails. Without it, xcodebuild boots a device and installs/launches the host app while CoreSimulator is still settling, which is what cost the gate its first two runs on `main` (`Simulator device failed to launch com.milim.relay … Application failed preflight checks … reason: Busy`). Disable with `--no-simulator-prep`. |
 | unit | the **complete** `ConduitTests` suite | One exhaustive lane: the planner is forced to `--min-lanes 1 --max-lanes 1` so it still owns the sequential batches and every per-batch watchdog |
 | ui | the **complete** `ConduitUITests` suite | One batched invocation over every UI class, with the planner's per-class watchdogs |
 | repeats | the repeat policy below | Runs even when the unit or UI lane failed, so one red lane cannot hide the rest; skipped only when the build or the plan failed, because then there is nothing to repeat against |
@@ -545,7 +546,11 @@ The gate classifies on the lane runner's own attempt tokens (`passed`,
 * **watchdog timeouts (hangs)** — classified as timeouts, with the hung class
   or batch named by the runner.
 * **not executed / not diagnosed** — work that never ran. Fails the gate:
-  unexecuted tests may never masquerade as passed.
+  unexecuted tests may never masquerade as passed. Because a unit lane stops
+  at the batch that failed, the gate then runs the batches it never reached as
+  a **continuation pass** (diagnostic, never a retry of anything that already
+  ran) so one failure cannot hide the rest of the suite; the coverage the gate
+  certifies is the aggregate over the lane and its continuation.
 
 ### Result document
 

@@ -1,0 +1,512 @@
+#!/usr/bin/env bash
+#
+# Integration tests for scripts/local-ci-gate.sh.
+#
+# The gate orchestrates real Xcode project generation, a build-for-testing,
+# the lane runner and the summarizer, so its contract with those pieces
+# (argument shapes, paths, exit codes, the run directory layout) has no unit
+# test: this suite builds a throwaway Conduit-shaped repository and drives the
+# REAL gate against stub xcodegen/xcodebuild/xcrun binaries. No simulator, no
+# Xcode, no macOS required - it runs on the Linux CI job as well.
+#
+# What it pins (each of these was a real defect or a real risk):
+#   * a clean run exits 0 and reports the EXACT commit it tested;
+#   * the repeat policy actually executes its iterations (a path mismatch
+#     between the gate and its helper once made the loop run zero times while
+#     the lane still reported "pass");
+#   * the caller's working tree, index and stashes are untouched;
+#   * a genuine assertion failure fails the gate and is reported as an
+#     assertion; a test-runner/launch failure fails it and is reported as
+#     infrastructure;
+#   * a reused --run-dir is refused (a previous run's artifacts must never be
+#     read back as evidence).
+#
+# Usage: bash scripts/tests/test_local_ci_gate.sh   (exit 0 = all cases pass)
+
+set -u
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SCRIPTS="$(cd "$HERE/.." && pwd)"
+WORK="$(mktemp -d)"
+STUBS="$WORK/stubs"
+mkdir -p "$STUBS"
+# CONDUIT_GATE_TEST_KEEP=1 leaves the throwaway fixture and its run directories
+# in place for inspection instead of deleting them on exit.
+if [ -n "${CONDUIT_GATE_TEST_KEEP:-}" ]; then
+  echo "keeping the test workspace at $WORK"
+  trap 'echo "kept: $WORK"' EXIT
+else
+  trap 'rm -rf "$WORK"' EXIT
+fi
+
+pass_count=0
+fail_count=0
+skip_count=0
+
+ok()  { pass_count=$((pass_count + 1)); echo "  ok: $1"; }
+bad() { fail_count=$((fail_count + 1)); echo "  FAIL: $1"; }
+
+# The timing extractor shells out to `xcrun xcresulttool` with an argv list, so
+# it needs an executable `xcrun` on PATH. On Windows (MSYS/Cygwin) an
+# extension-less script is not executable from Python, so the extraction - and
+# with it every count, classification and verdict the gate derives from the
+# result bundle - cannot be exercised there. Those assertions are SKIPPED
+# loudly rather than quietly passed; the structural ones (refs, exit codes,
+# the caller's tree, the lock, cleanup) still run everywhere. CI runs this
+# suite on Linux/macOS, where nothing is skipped.
+EXTRACTION_SUPPORTED=1
+if ! python3 - "$STUBS" <<'PY'
+import os, subprocess, sys
+os.environ["PATH"] = sys.argv[1] + os.pathsep + os.environ.get("PATH", "")
+try:
+    subprocess.run(["xcrun", "xcresulttool"], capture_output=True, timeout=60)
+except (OSError, ValueError):
+    sys.exit(1)
+sys.exit(0)
+PY
+then
+  EXTRACTION_SUPPORTED=0
+fi
+
+skip() { # $1 = what would have been asserted
+  skip_count=$((skip_count + 1))
+  echo "  skip: $1 (xcrun is not executable from Python on this platform)"
+}
+
+# Run the body only where the result bundle can actually be read.
+needs_extraction() { [ "$EXTRACTION_SUPPORTED" -eq 1 ]; }
+
+assert_eq() { # $1=desc $2=actual $3=expected
+  if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (actual='$2' expected='$3')"; fi
+}
+
+assert_contains() { # $1=desc $2=haystack $3=needle
+  case "$2" in
+    *"$3"*) ok "$1" ;;
+    *) bad "$1 (missing '$3' in: $(printf '%s' "$2" | head -c 400))" ;;
+  esac
+}
+
+json_get() { # $1=file $2=python expression on `doc`
+  python3 -c "
+import json, sys
+doc = json.load(open(sys.argv[1], encoding='utf-8'))
+print(eval(sys.argv[2]))
+" "$1" "$2" 2>/dev/null || printf ''
+}
+
+# --- stubs -------------------------------------------------------------------
+write_stubs() {
+  cat > "$STUBS/xcodegen" <<'EOF'
+#!/bin/bash
+# The gate only requires that project generation succeeds and that the
+# generated project is never committed; nothing here reads it.
+echo "xcodegen stub: $*"
+exit 0
+EOF
+
+  cat > "$STUBS/xcodebuild" <<'EOF'
+#!/bin/bash
+# -version is asked for the result document.
+if [ "${1:-}" = "-version" ]; then
+  echo "Xcode 27.0"
+  echo "Build version 27A0stub"
+  exit 0
+fi
+echo "xcodebuild stub: $*"
+bundle=""
+target="ConduitTests"
+classes=""
+for a in "$@"; do
+  case "$a" in
+    -resultBundlePath) ;;
+    *.xcresult) bundle="$a"; mkdir -p "$a" ;;
+    -only-testing:*) spec="${a#-only-testing:}"; target="${spec%%/*}"; classes="$classes ${spec#*/}" ;;
+  esac
+done
+prev=""
+for a in "$@"; do
+  [ "$prev" = "-resultBundlePath" ] && { bundle="$a"; mkdir -p "$a"; }
+  prev="$a"
+done
+if [ -z "$classes" ]; then
+  classes=" $(cat "$FAKE_CLASSES_FALLBACK" 2>/dev/null)"
+fi
+# One unit batch per class in this fixture, so the batch index is recoverable
+# from the result-bundle stem; the FAKE_* knobs decide that batch's verdict.
+stem="$(basename "$bundle" .xcresult)"
+mode="pass"
+case "$stem" in
+  batch-*) idx="${stem#batch-}"; idx="${idx%%-*}"; attempt="${stem##*-a}"
+           eval "mode=\${FAKE_UNIT_B${idx}_A${attempt}:-pass}" ;;
+  class-*) cls="${stem#class-}"; cls="${cls%-a*}"
+           eval "mode=\${FAKE_CLASS_${cls}:-pass}" ;;
+esac
+result="Passed"
+extra_node=""
+case "$mode" in
+  fail) result="Failed" ;;
+  crash)
+    # The shape XCTest produces when the host never launched: a synthetic
+    # "System Failures" entry, and NO real test case node.
+    result="Failed"
+    classes=""
+    extra_node='{"nodeType": "Test Case", "name": "Conduit encountered an error", "result": "Failed", "durationInSeconds": 0.0}'
+    ;;
+esac
+nodes=""
+sep=""
+for c in $classes; do
+  nodes="$nodes$sep{\"nodeType\": \"Test Suite\", \"name\": \"$c\", \"result\": \"$result\",
+    \"children\": [{\"nodeType\": \"Test Case\", \"name\": \"testSomething\", \"result\": \"$result\",
+    \"durationInSeconds\": 0.1}]}"
+  sep=","
+done
+[ -n "$extra_node" ] && { nodes="$nodes$sep{\"nodeType\": \"Test Suite\", \"name\": \"System Failures\", \"result\": \"Failed\",
+  \"children\": [$extra_node]}"; }
+cat > "$FAKE_CANNED" <<DOC
+{"testNodes": [{"nodeType": "Test Plan", "name": "Conduit", "result": "Passed",
+  "children": [{"nodeType": "Test bundle", "name": "$target", "result": "$result",
+    "children": [$nodes]}]}]}
+DOC
+case "$mode" in
+  crash) echo "Simulator device failed to launch com.milim.relay (stub)"; exit 65 ;;
+  fail) echo "Test Case 'testSomething' failed (stub)"; exit 65 ;;
+  infra) echo "test host quit unexpectedly (stub)"; exit 70 ;;
+  *) exit 0 ;;
+esac
+EOF
+
+  cat > "$STUBS/xcrun" <<'EOF'
+#!/bin/bash
+if [ "$1" = "xcresulttool" ]; then
+  # `xcresulttool get test-results tests --path <bundle>`: serve what the
+  # xcodebuild stub wrote for that invocation.
+  cat "$FAKE_CANNED" 2>/dev/null || exit 0
+  exit 0
+fi
+if [ "$1" = "simctl" ]; then
+  if [ "$2 $3 $4" = "list devices available" ]; then
+    cat <<'DEV'
+{"devices" : {"com.apple.CoreSimulator.SimRuntime.iOS-26-0" : [
+  { "udid" : "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
+    "name" : "iPhone 17 Pro", "state" : "Booted" }]}}
+DEV
+    exit 0
+  fi
+  exit 0
+fi
+exit 0
+EOF
+
+  chmod +x "$STUBS/xcodegen" "$STUBS/xcodebuild" "$STUBS/xcrun"
+
+  # Windows (MSYS/Cygwin) cannot exec an extension-less script: Python's
+  # subprocess (the timing extractor shells out to `xcrun xcresulttool`) needs
+  # a PATHEXT-visible name. CI runs this suite on Linux/macOS, where the plain
+  # scripts are found; these shims exist so the suite is also runnable from a
+  # Windows checkout instead of silently degrading to "extraction failed".
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      for name in xcodegen xcodebuild xcrun; do
+        printf '@bash "%%~dp0%s" %%*\r\n' "$name" > "$STUBS/$name.cmd"
+      done
+      ;;
+  esac
+}
+
+# --- fixture repository ------------------------------------------------------
+# A Conduit-shaped tree: the real CI tooling under test, and stand-ins for the
+# two pieces the gate only needs to SUCCEED at (project generation is stubbed
+# through PATH; the build script is a fixture file, since its real
+# implementation is CI v2's build job and is exercised on macOS).
+make_fixture() { # $1 = path
+  local repo="$1"
+  mkdir -p "$repo/ConduitTests" "$repo/ConduitUITests" "$repo/Conduit" "$repo/scripts/tests"
+  printf 'name: Conduit\n' > "$repo/project.yml"
+  printf 'import Foundation\n' > "$repo/Conduit/App.swift"
+  # 15 unit classes: enough for the planner to split them into THREE batches
+  # (7/7/1 by the default 7-class batch cap), which is what makes the
+  # continuation path reachable - a lane that stops on batch 2 still has a
+  # batch it never reached.
+  for name in Alpha Beta Gamma Delta Epsilon Zeta Eta Theta Iota Kappa Lambda \
+              Mu Nu Xi Omicron; do
+    cat > "$repo/ConduitTests/${name}Tests.swift" <<SWIFT
+import XCTest
+
+final class ${name}Tests: XCTestCase {
+    func testSomething() {}
+}
+SWIFT
+  done
+  cat > "$repo/ConduitUITests/LaunchUITests.swift" <<'SWIFT'
+import XCTest
+
+final class LaunchUITests: XCTestCase {
+    func testSomething() {}
+}
+SWIFT
+  for script in local-ci-gate.sh local-gate.py plan-tests.py ci-test-lane.sh \
+                ci-lib.sh extract-test-timings.py test-timings.json; do
+    cp "$SCRIPTS/$script" "$repo/scripts/$script"
+  done
+  # The localization checker is CI infrastructure, not the gate's subject; a
+  # passing stand-in keeps the static phase's contract (exit code) under test.
+  cat > "$repo/scripts/check-l10n-coverage.py" <<'PY'
+#!/usr/bin/env python3
+import sys
+sys.exit(0)
+PY
+  cat > "$repo/scripts/tests/test_fixture_ok.py" <<'PY'
+import unittest
+
+
+class FixtureSanityTests(unittest.TestCase):
+    def test_ok(self):
+        self.assertTrue(True)
+
+
+if __name__ == "__main__":
+    unittest.main()
+PY
+  cat > "$repo/scripts/ci-build-for-testing.sh" <<'SH'
+#!/usr/bin/env bash
+# Fixture stand-in for CI v2's build job: produce a .xctestrun where the gate
+# expects one and record the build metadata the gate moves into its run dir.
+set -u
+mkdir -p "$DERIVED_DATA_PATH/Build/Products"
+: > "$DERIVED_DATA_PATH/Build/Products/Conduit_stub.xctestrun"
+mkdir -p ci-lane/build
+echo "fixture build-for-testing ok" > ci-lane/build/build.log
+printf '{"schema_version": 1, "status": "ok", "duration_s": 1, "xctestrun": "%s"}\n' \
+  "$DERIVED_DATA_PATH/Build/Products/Conduit_stub.xctestrun" \
+  > ci-lane/build/build-result.json
+exit 0
+SH
+  ( cd "$repo" && git init -q . && git add -A \
+      && git -c user.email=t@example.com -c user.name=t commit -q -m fixture )
+}
+
+# --- gate invocation --------------------------------------------------------
+GATE="$WORK/repo/scripts/local-ci-gate.sh"
+RUN_LOG=""
+
+run_gate() { # extra args...
+  local n=0
+  for arg in "$@"; do
+    n=$((n + 1))
+    case "$arg" in
+      --run-dir-*) [ "$n" -eq 1 ] && run_dir_hint="${arg#--run-dir-}" ;;
+    esac
+  done
+  RUN_LOG="$WORK/gate-$RANDOM.log"
+  # XCODEBUILD_POLL_INTERVAL_S keeps the watchdog polling cheap: the stub
+  # xcodebuild exits instantly, and CI's own suite shrinks the cadence for
+  # the same reason.
+  PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 CONDUIT_PERF_TRACE=1 \
+    bash "$GATE" "$@" >"$RUN_LOG" 2>&1
+}
+
+new_run_dir() { printf '%s\n' "$WORK/run-$RANDOM-$RANDOM"; }
+
+echo "=== local-ci-gate integration suite ==="
+write_stubs
+make_fixture "$WORK/repo"
+
+FIXTURE_HEAD="$(git -C "$WORK/repo" rev-parse HEAD)"
+export FAKE_CANNED="$WORK/canned.json"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: clean run ---"
+RUN1="$(new_run_dir)"
+CLEAN_EXIT=0
+run_gate --ref HEAD --gate-root "$WORK/gate" --run-dir "$RUN1" \
+    --repeat-classes AlphaTests --repeat-iterations 2 || CLEAN_EXIT=$?
+if needs_extraction; then
+  if [ "$CLEAN_EXIT" -eq 0 ]; then
+    ok "clean run exits 0"
+  else
+    bad "clean run exited $CLEAN_EXIT (see $RUN_LOG)"
+    tail -n 30 "$RUN_LOG"
+  fi
+elif [ "$CLEAN_EXIT" -ne 0 ]; then
+  # Nothing can be certified without a readable result bundle, so on this host
+  # the correct behavior is to refuse to pass rather than report an empty
+  # success - which is itself worth pinning.
+  ok "a run whose result bundle cannot be read does not pass"
+else
+  bad "the gate passed a run whose result bundle could not be read"
+fi
+GATE_JSON="$RUN1/gate-result.json"
+if needs_extraction; then
+assert_eq "verdict is PASS" "$(json_get "$GATE_JSON" 'doc["verdict"]')" "PASS"
+assert_eq "tested SHA is the tested commit" \
+  "$(json_get "$GATE_JSON" 'doc["tested_sha"]')" "$FIXTURE_HEAD"
+assert_eq "unit executions counted" \
+  "$(json_get "$GATE_JSON" 'doc["unit"]["executions"]')" "15"
+assert_eq "unit classes complete" \
+  "$(json_get "$GATE_JSON" 'doc["unit"]["classes_observed"]')" "15"
+assert_eq "no continuation was needed" \
+  "$(json_get "$GATE_JSON" '"continuation" in doc["unit"]')" "False"
+assert_eq "UI executions counted" \
+  "$(json_get "$GATE_JSON" 'doc["ui"]["executions"]')" "1"
+assert_eq "repeat policy executed every iteration" \
+  "$(json_get "$GATE_JSON" 'len(doc["focused_repeats"]["classes"][0]["iterations"])')" "2"
+assert_eq "repeat executions counted" \
+  "$(json_get "$GATE_JSON" 'doc["focused_repeats"]["executions"]')" "2"
+assert_eq "no infrastructure events" \
+  "$(json_get "$GATE_JSON" 'doc["infrastructure"]["failures"]')" "0"
+assert_eq "run is not partial" "$(json_get "$GATE_JSON" 'doc["partial"]')" "False"
+else
+  skip "clean-run verdict, execution counts and repeat evidence"
+fi
+assert_eq "the plan's three batches all ran" \
+  "$(json_get "$GATE_JSON" 'doc["unit"]["batch_count"]')" "3"
+assert_eq "xcode version recorded" \
+  "$(json_get "$GATE_JSON" 'doc["xcode_version"].strip()')" "Xcode 27.0 Build version 27A0stub"
+assert_eq "simulator runtime recorded" \
+  "$(json_get "$GATE_JSON" 'doc["simulator"]["runtime"]')" "iOS 26.0"
+assert_eq "static checks ran" \
+  "$(json_get "$GATE_JSON" 'len(doc["static_checks"])')" "3"
+assert_contains "human summary names the tested commit" \
+  "$(cat "$RUN1/summary.md")" "$FIXTURE_HEAD"
+assert_eq "build metadata moved into the run dir" \
+  "$([ -f "$RUN1/build/build.log" ] && echo yes || echo no)" "yes"
+if [ -d "$WORK/gate/worktrees" ] && [ -n "$(ls -A "$WORK/gate/worktrees" 2>/dev/null)" ]; then
+  bad "throwaway worktree was left behind"
+else
+  ok "throwaway worktree removed"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: the caller's tree, index and stashes are untouched ---"
+# Model a developer mid-work: an uncommitted change, an untracked file, and a
+# stash. The gate must test the COMMIT and leave all three alone.
+( cd "$WORK/repo" && printf 'wip\n' >> Conduit/App.swift \
+    && git -c user.email=t@example.com -c user.name=t stash push -q -m gate-wip )
+( cd "$WORK/repo" && printf 'untracked\n' > uncommitted.txt \
+    && printf 'dirty\n' >> Conduit/App.swift )
+STATUS_BEFORE="$(git -C "$WORK/repo" status --porcelain)"
+STASHES_BEFORE="$(git -C "$WORK/repo" stash list)"
+STASH_REF_BEFORE="$(git -C "$WORK/repo" rev-parse refs/stash)"
+HEAD_BEFORE="$(git -C "$WORK/repo" rev-parse HEAD)"
+HEAD_REF_BEFORE="$(git -C "$WORK/repo" symbolic-ref HEAD)"
+RUN2="$(new_run_dir)"
+run_gate --ref HEAD --gate-root "$WORK/gate" --run-dir "$RUN2" \
+    --repeat-classes AlphaTests --repeat-iterations 1 >/dev/null 2>&1
+assert_eq "working tree unchanged" "$(git -C "$WORK/repo" status --porcelain)" "$STATUS_BEFORE"
+assert_eq "stash list unchanged" "$(git -C "$WORK/repo" stash list)" "$STASHES_BEFORE"
+assert_eq "stash commit untouched" "$(git -C "$WORK/repo" rev-parse refs/stash)" "$STASH_REF_BEFORE"
+assert_eq "HEAD unchanged" "$(git -C "$WORK/repo" rev-parse HEAD)" "$HEAD_BEFORE"
+assert_eq "HEAD ref unchanged" "$(git -C "$WORK/repo" symbolic-ref HEAD)" "$HEAD_REF_BEFORE"
+assert_contains "the stash created before the run is still listed" "$STASHES_BEFORE" "gate-wip"
+assert_eq "the dirty working tree was not what got tested" \
+  "$(json_get "$RUN2/gate-result.json" 'doc["tested_sha"]')" "$HEAD_BEFORE"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: a genuine assertion failure stops the lane, and the lane is continued ---"
+export FAKE_UNIT_B1_A1=fail
+RUN3="$(new_run_dir)"
+if run_gate --ref HEAD --gate-root "$WORK/gate" --run-dir "$RUN3" \
+    --repeat-classes "" >/dev/null 2>&1; then
+  bad "a genuine assertion failure did not fail the gate"
+else
+  ok "a genuine assertion failure fails the gate"
+fi
+GATE3="$RUN3/gate-result.json"
+if needs_extraction; then
+assert_eq "verdict is FAIL" "$(json_get "$GATE3" 'doc["verdict"]')" "FAIL"
+assert_eq "reported as an assertion failure" \
+  "$(json_get "$GATE3" 'doc["unit"]["failures"] > 0')" "True"
+assert_eq "not reported as infrastructure" \
+  "$(json_get "$GATE3" 'doc["unit"]["synthetic_failures"]')" "0"
+assert_eq "no infrastructure events" \
+  "$(json_get "$GATE3" 'doc["infrastructure"]["failures"]')" "0"
+assert_contains "the failure names the assertion" \
+  "$(cat "$RUN3/summary.md")" "genuine XCTest assertion failures"
+assert_contains "the failing test is identified" \
+  "$(cat "$RUN3/gate-result.json")" "testSomething"
+# Batches 2 and 3 never ran; the gate runs them as a continuation so one
+# failing batch cannot hide the rest of the suite.
+assert_eq "the never-reached batches were continued" \
+  "$(json_get "$GATE3" '"continuation" in doc["unit"] and doc["unit"]["continuation"] is not None')" "True"
+assert_eq "the continuation executed the remaining class" \
+  "$(json_get "$GATE3" 'doc["unit"]["continuation"]["executions"]')" "1"
+assert_eq "every planned class still has a result" \
+  "$(json_get "$GATE3" 'doc["unit"]["classes_missing"]')" "[]"
+else
+  skip "assertion-failure classification and the continuation pass"
+fi
+unset FAKE_UNIT_B1_A1
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: the test runner never launched the app ---"
+# XCTest reports this under its synthetic "System Failures" class; the gate
+# must call it infrastructure, not an assertion (this is exactly what the
+# gate's first real run on main produced, and it was mislabeled then).
+export FAKE_UNIT_B2_A1=crash
+RUN4="$(new_run_dir)"
+if run_gate --ref HEAD --gate-root "$WORK/gate" --run-dir "$RUN4" \
+    --repeat-classes "" >/dev/null 2>&1; then
+  bad "a test-runner launch failure did not fail the gate"
+else
+  ok "a test-runner launch failure fails the gate"
+fi
+GATE4="$RUN4/gate-result.json"
+if needs_extraction; then
+assert_eq "no assertion failure claimed" \
+  "$(json_get "$GATE4" 'doc["unit"]["failures"]')" "0"
+assert_eq "the synthetic failure is counted separately" \
+  "$(json_get "$GATE4" 'doc["unit"]["synthetic_failures"] > 0')" "True"
+assert_contains "reported as a launch failure" \
+  "$(cat "$RUN4/summary.md")" "never started the app under test"
+assert_eq "the classes that never ran are named, not hidden" \
+  "$(json_get "$GATE4" 'len(doc["unit"]["classes_missing"])')" "7"
+assert_eq "the batch after the crash was still continued" \
+  "$(json_get "$GATE4" 'doc["unit"]["continuation"]["executions"]')" "1"
+else
+  skip "test-runner-crash classification"
+fi
+unset FAKE_UNIT_B2_A1
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: refusals that must not run anything ---"
+RUN5="$(new_run_dir)"
+if run_gate --ref definitely-not-a-ref --gate-root "$WORK/gate" --run-dir "$RUN5" \
+    >/dev/null 2>&1; then
+  bad "an unresolvable ref was accepted"
+else
+  ok "an unresolvable ref is refused"
+fi
+assert_eq "no result document for a refused run" \
+  "$([ -f "$RUN5/gate-result.json" ] && echo yes || echo no)" "no"
+
+if run_gate --ref HEAD --gate-root "$WORK/gate" --run-dir "$RUN3" \
+    >/dev/null 2>&1; then
+  bad "a non-empty --run-dir was reused"
+else
+  ok "a non-empty --run-dir is refused"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: only one gate at a time ---"
+mkdir -p "$WORK/gate/gate.lock"
+echo "$$" > "$WORK/gate/gate.lock/pid"
+RUN6="$(new_run_dir)"
+if run_gate --ref HEAD --gate-root "$WORK/gate" --run-dir "$RUN6" >/dev/null 2>&1; then
+  bad "a second concurrent gate was allowed to start"
+else
+  ok "a second concurrent gate is refused"
+fi
+assert_contains "the refusal explains why" "$(cat "$RUN_LOG")" "another gate is running"
+rm -rf "$WORK/gate/gate.lock"
+
+echo ""
+echo "=== $pass_count passed, $fail_count failed, $skip_count skipped ==="
+[ "$fail_count" -eq 0 ]
