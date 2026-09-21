@@ -112,13 +112,21 @@ if [ -z "$classes" ]; then
 fi
 # One unit batch per class in this fixture, so the batch index is recoverable
 # from the result-bundle stem; the FAKE_* knobs decide that batch's verdict.
+# A knob keyed on a batch number would ALSO hit the continuation pass, which
+# renumbers its own batches from 1 - so the continuation is clean unless a knob
+# explicitly targets it, and the cases below test the primary lane's stop.
 stem="$(basename "$bundle" .xcresult)"
 mode="pass"
-case "$stem" in
-  batch-*) idx="${stem#batch-}"; idx="${idx%%-*}"; attempt="${stem##*-a}"
-           eval "mode=\${FAKE_UNIT_B${idx}_A${attempt}:-pass}" ;;
-  class-*) cls="${stem#class-}"; cls="${cls%-a*}"
-           eval "mode=\${FAKE_CLASS_${cls}:-pass}" ;;
+case "$bundle" in
+  *unit-continuation*) mode="${FAKE_CONTINUATION_MODE:-pass}" ;;
+  *)
+    case "$stem" in
+      batch-*) idx="${stem#batch-}"; idx="${idx%%-*}"; attempt="${stem##*-a}"
+               eval "mode=\${FAKE_UNIT_B${idx}_A${attempt}:-pass}" ;;
+      class-*) cls="${stem#class-}"; cls="${cls%-a*}"
+               eval "mode=\${FAKE_CLASS_${cls}:-pass}" ;;
+    esac
+    ;;
 esac
 result="Passed"
 extra_node=""
@@ -437,8 +445,8 @@ assert_contains "the failing test is identified" \
 # failing batch cannot hide the rest of the suite.
 assert_eq "the never-reached batches were continued" \
   "$(json_get "$GATE3" '"continuation" in doc["unit"] and doc["unit"]["continuation"] is not None')" "True"
-assert_eq "the continuation executed the remaining class" \
-  "$(json_get "$GATE3" 'doc["unit"]["continuation"]["executions"]')" "1"
+assert_eq "the continuation ran every class the lane never reached" \
+  "$(json_get "$GATE3" 'doc["unit"]["continuation"]["executions"]')" "8"
 assert_eq "every planned class still has a result" \
   "$(json_get "$GATE3" 'doc["unit"]["classes_missing"]')" "[]"
 else
