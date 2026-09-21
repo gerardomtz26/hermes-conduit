@@ -175,6 +175,15 @@ struct ChatView: View {
         viewport.renderedScrollScope
     }
 
+    /// Test-only seam for the dormancy fixtures (PR #201 review): ChatView
+    /// re-writes `\.chatTextSize` at its own root from the shared
+    /// @AppStorage preference — an environment write no OUTER harness pin
+    /// can dominate (the nearer write wins). When non-nil, that inner write
+    /// resolves to this value instead, so shared preference state cannot
+    /// leak into (or churn) a measured fixture. Production never sets it
+    /// (nil) and the preference decides exactly as before.
+    var chatTextSizeOverride: ChatTextSize? = nil
+
     /// The chat-only text-size preference (issue #85). Local, device-only
     /// @AppStorage like ComposerReturnKey — never synced to Hermes or the
     /// profile. Injected once here so every transcript Markdown path
@@ -184,7 +193,7 @@ struct ChatView: View {
     @AppStorage(ChatTypography.preferenceKey) private var chatTextSizeRaw = ChatTypography.defaultSize.rawValue
 
     private var chatTextSize: ChatTextSize {
-        ChatTypography.resolve(rawValue: chatTextSizeRaw)
+        chatTextSizeOverride ?? ChatTypography.resolve(rawValue: chatTextSizeRaw)
     }
 
     var body: some View {

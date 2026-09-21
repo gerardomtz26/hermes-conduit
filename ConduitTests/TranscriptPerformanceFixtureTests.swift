@@ -28,12 +28,14 @@ final class TranscriptPerformanceFixtureTests: XCTestCase {
     }
 
     override func tearDown() {
-        // Detach the window first so dismantle work is triggered, flush the
-        // run loop so it completes within THIS test, then reset counters —
-        // the next test starts from zero with no pending teardown updates.
+        // Detach the window first so dismantle work is triggered, then flush
+        // it with a bounded pump (see SettledMessageIsolationTests.tearDown:
+        // a zero-interval tick lets cold-simulator dismantle transactions
+        // land inside the NEXT test's measurement window). Counters reset
+        // after the pump, so the next test starts from zero.
         testWindow?.isHidden = true
         testWindow?.rootViewController = nil
-        RunLoop.current.run(until: Date())
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
         testWindow = nil
         TranscriptPerf.reset()
         super.tearDown()
@@ -154,29 +156,53 @@ final class TranscriptPerformanceFixtureTests: XCTestCase {
     /// booted CI simulator the hosting window's trait resolution lands
     /// asynchronously, and a late trait-sync transaction inside the
     /// measurement window re-opens every mounted row's Equatable gate
-    //  (one burst of spurious settled re-evaluations). Production ChatView
+    /// (one burst of spurious settled re-evaluations). Production ChatView
     /// injects chatTextSize at its root, so pinning it here mirrors the
     /// production environment shape rather than weakening the fixture.
+    ///
+    /// The OUTER harness pin alone is not sufficient for chatTextSize
+    /// (review finding, PR #201): ChatView re-writes `\.chatTextSize` at
+    /// its own root from the shared @AppStorage preference, and the NEARER
+    /// write wins — so the shared preference state (whatever the test
+    /// host's standard defaults hold, or any mid-test change) would shadow
+    /// the pin and decide the rows' gate input. The fixture therefore also
+    /// pins the INNER write through ChatView's test-only
+    /// `chatTextSizeOverride`, making the effective value deterministic at
+    /// exactly the point that currently consumes the AppStorage value.
     private func mountChat(
         appState: AppState,
         streaming: String
-    ) -> UIHostingController<AnyView> {
+    ) -> UIHostingController<PinnedChatRoot> {
         appState.streamingText = streaming
-        let host = UIHostingController(
-            rootView: AnyView(
-                DormancyHarnessEnvironment.applying(
-                    ChatView().environmentObject(appState)
-                )
-            )
-        )
+        let host = UIHostingController(rootView: PinnedChatRoot(appState: appState))
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         window.rootViewController = host
-        window.isHidden = false
+        // makeKeyAndVisible so the key/attach transition completes during
+        // the mount drain (same cold-first-launch discipline as
+        // SettledMessageIsolationTests.mountRow), never inside a window.
+        window.makeKeyAndVisible()
         testWindow = window
         host.view.setNeedsLayout()
         host.view.layoutIfNeeded()
         RunLoop.current.run(until: Date())
         return host
+    }
+
+    /// Concrete pinned ChatView root, built identically for mount and churn
+    /// so a re-created root keeps the exact concrete modifier chain. A
+    /// stable concrete type (instead of an erased AnyView) keeps subtree
+    /// identity STRUCTURAL across the churn re-creation — same discipline
+    /// as the isolation suite's ChurnableRoot — so the preference-churn
+    /// regression cannot depend on AnyView same-type identity preservation.
+    private struct PinnedChatRoot: View {
+        let appState: AppState
+
+        var body: some View {
+            DormancyHarnessEnvironment.applying(
+                ChatView(chatTextSizeOverride: DormancyHarnessEnvironment.pinnedChatTextSize)
+                    .environmentObject(appState)
+            )
+        }
     }
 
     /// Drives `ticks` streaming publishes at the production ~30 Hz cadence,
@@ -190,7 +216,7 @@ final class TranscriptPerformanceFixtureTests: XCTestCase {
     private func streamTicks(
         _ ticks: Int,
         appState: AppState,
-        host: UIHostingController<AnyView>
+        host: UIHostingController<PinnedChatRoot>
     ) {
         let steadyBody = String(repeating: "Steady padding body text for the live row. ", count: 10)
         for tick in 0..<ticks {
@@ -313,6 +339,211 @@ final class TranscriptPerformanceFixtureTests: XCTestCase {
         XCTAssertLessThanOrEqual(
             TranscriptPerf.textKitMeasurementCalls, 30 + 5 * plainEdgeAllowance,
             "TextKit measurement must be bounded to the live row plus tolerated edge remounts"
+        )
+    }
+
+    /// The shared chat text-size preference must not leak into the fixture
+    /// (review finding, PR #201). ChatView re-writes `\.chatTextSize` at
+    /// its own root from the shared @AppStorage preference — an environment
+    /// write NO outer harness pin can dominate — so the fixture pins that
+    /// INNER write through ChatView's test-only `chatTextSizeOverride`, and
+    /// this regression proves the pin at the effective write point:
+    ///
+    /// 1. Mid-measurement, the SHARED preference (standard defaults —
+    ///    exactly what @AppStorage reads) flips to a non-pinned value.
+    /// 2. The ChatView root is then re-created through the same concrete
+    ///    modifier chain, so the fresh body synchronously consumes the
+    ///    churned preference at the inner write. SwiftUI preserves the
+    ///    LazyVStack row identity across the re-creation (same structure,
+    ///    same message ids), so every settled row re-diffs through its
+    ///    Equatable gate — the production re-creation shape.
+    /// 3. With the pin, the rows keep observing the pinned test value:
+    ///    the re-creation provably reaches ChatView's body and the rows'
+    ///    body chain (vacuity gates below), yet opens no gate and
+    ///    re-renders no INTERIOR settled row — only viewport-edge remounts
+    ///    of fresh row instances (rendered through the same pinned inner
+    ///    write) are tolerated, bounded exactly as the streaming fixtures
+    ///    bound them.
+    ///
+    /// Mutation-sensitive: strip the override and the re-created ChatView
+    /// writes the churned preference into EVERY preserved row's gate input
+    /// (field: chatTextSize — visible in the gate-reopen report) — those
+    /// re-evaluations are interior pre-window repeats and fail the
+    /// assertions below.
+    ///
+    /// Why not a live defaults-only mutation: in a hosted unit-test host,
+    /// @AppStorage's preference-change invalidation does not reach the view
+    /// at all (verified while authoring: a landed store write left
+    /// ChatView's body flat across a 10s run-loop pump). Re-creating the
+    /// ChatView root while the store holds the churned value is the
+    /// deterministic equivalent of the re-presentation shape and requires
+    /// no notification delivery.
+    func testSharedChatTextSizePreferenceChurnDoesNotReopenSettledGate() throws {
+        let appState = try makeAppState()
+        appState.messages = Self.markdownTranscript()
+
+        let host = mountChat(appState: appState, streaming: "Initial streaming frame")
+        let settled = PerformanceFixtureWait.settleUntilCountersQuiet(quietFor: 1.2)
+        guard settled else {
+            XCTFail("counters never reached a quiet state; the churn measurement would be meaningless")
+            return
+        }
+
+        TranscriptPerf.reset()
+
+        // Precondition: the churned value must actually DIVERGE from the
+        // pin, or the whole vector no-ops trivially.
+        XCTAssertNotEqual(
+            DormancyHarnessEnvironment.pinnedChatTextSize, .largest,
+            "the pinned chatTextSize must differ from the churned preference for this regression to bite"
+        )
+
+        // The churn: the SHARED preference flips to a non-pinned value
+        // mid-measurement, then the ChatView root is re-created — its
+        // fresh body reads the churned store value at the inner write.
+        // Whatever the store held before is restored, so a crash mid-test
+        // cannot leak the churned value into later suites in this lane.
+        let preferenceKey = ChatTypography.preferenceKey
+        let previousPreference = UserDefaults.standard.object(forKey: preferenceKey)
+        defer {
+            if let previousPreference {
+                UserDefaults.standard.set(previousPreference, forKey: preferenceKey)
+            } else {
+                UserDefaults.standard.removeObject(forKey: preferenceKey)
+            }
+        }
+        UserDefaults.standard.set(ChatTextSize.largest.rawValue, forKey: preferenceKey)
+        // The write itself must have landed: a runner whose CFPrefs store
+        // is wedged ("Path not accessible") cannot exercise the shared-
+        // preference vector at all, and the vacuity gates below would only
+        // report flat counters.
+        guard ChatTextSize(rawValue: UserDefaults.standard.integer(forKey: preferenceKey)) == .largest else {
+            XCTFail(
+                "the shared-preference write never landed in standard defaults; "
+                    + "this runner cannot exercise the preference-churn vector"
+            )
+            return
+        }
+        host.rootView = PinnedChatRoot(appState: appState)
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+        // Snapshot AFTER the re-creation so vacuity gate 2 can attribute the
+        // bubble-body re-runs to the streaming publish, not to the
+        // re-creation itself.
+        let bubblesAfterRecreation = TranscriptPerf.settledMessageBubbleBodyEvaluations
+
+        // Vacuity gate 1: the re-creation must have re-run ChatView's body.
+        let chatViewReran = PerformanceFixtureWait.eventually {
+            TranscriptPerf.chatViewBodyEvaluations > 0
+        }
+        guard chatViewReran else {
+            XCTFail(
+                "the re-created ChatView body never re-ran; the fixture's "
+                    + "chatTextSize pinning is not under test on this runner"
+            )
+            return
+        }
+
+        // A streaming publish tick in the same window: the publish
+        // invalidation re-runs the settled rows' body chains THROUGH the
+        // re-created environment (the same vector the streaming fixtures
+        // drive), so the dormancy assertions below measure a genuinely
+        // consulted gate under the churned preference — not a pruned
+        // subtree.
+        appState.streamingText = "Shared-preference churn tick — the live row only."
+        host.view.setNeedsLayout()
+        host.view.layoutIfNeeded()
+
+        // Vacuity gate 2: the publish must have re-run the settled rows'
+        // body chains BEYOND what the re-creation itself did (AssistantBubble
+        // bodies note through the publish) — otherwise the dormancy
+        // assertions measure a pruned update, not a consulted gate.
+        let rowsReran = PerformanceFixtureWait.eventually {
+            TranscriptPerf.settledMessageBubbleBodyEvaluations > bubblesAfterRecreation
+        }
+        guard rowsReran else {
+            XCTFail(
+                "the churn never reached the settled rows' body chain; "
+                    + "the dormancy assertions would be vacuous"
+            )
+            return
+        }
+        // And the store really holds the churned value the inner write was
+        // required to ignore.
+        XCTAssertEqual(
+            ChatTypography.stored(), .largest,
+            "precondition: the churned preference must be what @AppStorage resolves"
+        )
+
+        // Give any (incorrect) re-evaluation time to surface before
+        // asserting; a non-quiet post-churn hierarchy would make the
+        // snapshot below race in-flight commits, so the failsafe must
+        // fail the test (the helper's contract), not be discarded.
+        let postChurnSettled = PerformanceFixtureWait.settleUntilCountersQuiet(quietFor: 1.2)
+        guard postChurnSettled else {
+            XCTFail("post-churn counters never quieted; the dormancy snapshot would race in-flight commits on this runner")
+            return
+        }
+
+        // Dormancy invariant, classified by position (the same discipline
+        // as the streaming fixtures): re-creating the ChatView root may
+        // legitimately remount rows AT THE VIEWPORT EDGES as the
+        // bottom-anchored LazyVStack re-settles — those are fresh row
+        // instances rendered THROUGH the pinned inner write. The guarded
+        // failure shapes are: an INTERIOR row re-rendering (its source was
+        // already at rest, so any re-evaluation means the row's gate input
+        // changed — i.e. the churned preference leaked in), a gate-reopen
+        // report naming chatTextSize, or SelectableTextView work beyond
+        // the live row plus tolerated edge remounts.
+        let atRestRerenders = TranscriptPerf.settledMarkdownPreWindowRepeatEvaluations
+        let interiorRerenders = TranscriptPerf.interiorAtRestRerenders(
+            sources: TranscriptPerf.recentPreWindowRepeatSources,
+            transcript: Self.markdownTranscript()
+        )
+        let reopenSuffix = TranscriptPerf.recentGateReopenReports.isEmpty
+            ? ""
+            : " (gate reopens: \(TranscriptPerf.recentGateReopenReports.joined(separator: "; ")))"
+        let spanSuffix = TranscriptPerf.windowEvaluationSpans.isEmpty
+            ? ""
+            : " — spans:\n\(TranscriptPerf.windowEvaluationSpans.joined(separator: "\n"))"
+        XCTAssertTrue(
+            interiorRerenders.isEmpty,
+            "the shared chatTextSize preference churn re-rendered \(interiorRerenders.count) interior "
+                + "settled rows (of \(atRestRerenders) at-rest re-renders; edge remounts are "
+                + "tolerated) — the fixture's inner override failed to hold the rows' gate input"
+                + "\(reopenSuffix)\(spanSuffix)"
+        )
+        // The chatTextSize dimension of the same invariant, asserted
+        // directly: NO gate may reopen on chatTextSize while the churned
+        // shared preference is in effect.
+        let chatTextSizeReopens = TranscriptPerf.recentGateReopenReports.filter {
+            $0.contains("chatTextSize")
+        }
+        XCTAssertTrue(
+            chatTextSizeReopens.isEmpty,
+            "a gate reopened on chatTextSize under the churned shared preference "
+                + "— the inner override must prevent the churned value from reaching "
+                + "any row's gate input: \(chatTextSizeReopens)"
+        )
+        // The preserved rows kept observing the pinned test value: with the
+        // override stripped (mutation check) the re-created ChatView writes
+        // the churned preference into EVERY preserved row's gate, whose
+        // re-evaluations land as interior pre-window repeats and gate
+        // reopens — caught above. Window duplicates and edge remounts are
+        // mount noise, bounded here exactly as the streaming fixtures bound
+        // them.
+        let edgeRemountAllowance = max(atRestRerenders, TranscriptPerf.settledMarkdownWindowDuplicateEvaluations)
+        XCTAssertLessThanOrEqual(
+            TranscriptPerf.selectableTextViewUpdateCalls, 30 + 5 * edgeRemountAllowance,
+            "SelectableTextView work must be bounded to the live row plus tolerated edge remounts"
+        )
+        XCTAssertLessThanOrEqual(
+            TranscriptPerf.textKitMeasurementCalls, 30 + 5 * edgeRemountAllowance,
+            "TextKit measurement must be bounded to the live row plus tolerated edge remounts"
+        )
+        XCTAssertLessThanOrEqual(
+            TranscriptPerf.selectableTextViewTextRebuilds, 20 + 3 * edgeRemountAllowance,
+            "attributed-text rebuilds must be bounded to the live row's changed content plus tolerated edge remounts"
         )
     }
 

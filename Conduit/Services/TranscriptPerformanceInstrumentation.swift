@@ -69,12 +69,15 @@ enum TranscriptPerf {
             // before ANY window is a fresh mount; a re-evaluation of an
             // already-seen source is a re-render of an existing row. The
             // ledger survives resets so cross-test mount history stays
-            // classifiable (bounded to keep diagnostics memory flat).
-            if !storage.everSeenMarkdownSources.contains(context) {
+            // classifiable (bounded to keep diagnostics memory flat). Once
+            // the ledger is SATURATED, classification stops: an unseen
+            // source is neither counted nor inserted, so a full ledger
+            // degrades to "no new classification" instead of re-counting
+            // every unseen evaluation as a fresh mount.
+            if !storage.everSeenMarkdownSources.contains(context),
+               storage.everSeenMarkdownSources.count < 4096 {
                 storage.settledMarkdownFreshMountBody += 1
-                if storage.everSeenMarkdownSources.count < 4096 {
-                    storage.everSeenMarkdownSources.insert(context)
-                }
+                storage.everSeenMarkdownSources.insert(context)
             }
             if storage.settledMarkdownKnownSources.contains(context) {
                 storage.settledMarkdownPreWindowRepeatBody += 1
@@ -124,6 +127,15 @@ enum TranscriptPerf {
     }
     #endif
 
+    #if DEBUG
+    /// Serializes `noteGateReopen`'s count-guard-and-append and the report
+    /// getter: SwiftUI may evaluate a nonisolated Equatable conformance off
+    /// the main actor, so concurrent gate comparisons can race the ring and
+    /// lose or corrupt DEBUG reports. Locking is DEBUG-only; Release never
+    /// records reports.
+    private static let gateReopenLock = NSLock()
+    #endif
+
     /// Record which Equatable field opened a settled-content gate (DEBUG
     /// diagnostics, bounded). A dormancy violation WITH a gate-reopen
     /// report naming `sizeCategory`/`chatTextSize` is hosting trait churn
@@ -133,6 +145,8 @@ enum TranscriptPerf {
     /// tell these apart.
     #if DEBUG
     static func noteGateReopen(component: String, fields: [String]) {
+        gateReopenLock.lock()
+        defer { gateReopenLock.unlock() }
         guard storage.recentGateReopenReports.count < 32 else { return }
         let offset: String
         if let openedAt = storage.windowOpenedAt {
@@ -149,6 +163,8 @@ enum TranscriptPerf {
     /// Most recent gate-reopen reports (bounded ring, DEBUG diagnostics).
     static var recentGateReopenReports: [String] {
         #if DEBUG
+        gateReopenLock.lock()
+        defer { gateReopenLock.unlock() }
         return storage.recentGateReopenReports
         #else
         return []
@@ -180,6 +196,12 @@ enum TranscriptPerf {
     static var settledMessageBubbleBodyEvaluations: Int {
         get { read(\.settledBubbleBody) }
     }
+    // Note on the counter above: both MessageBubble.body AND AssistantBubble.body
+    // note `.settledBubbleBody`, so an assistant row rendered through the
+    // production MessageBubble path counts ~2 per pass, while the isolation
+    // harness (which mounts AssistantBubble directly) counts 1. The meaning is
+    // therefore path-dependent by design; consumers must stay RELATIVE
+    // (> 0, quiet-delta), never assert absolute per-row values.
 
     static var settledMarkdownTextBodyEvaluations: Int {
         get { read(\.settledMarkdownBody) }
@@ -337,7 +359,9 @@ enum TranscriptPerf {
 
     /// Process-lifetime fresh-mount count of settled Markdown sources
     /// (DEBUG diagnostics): increments the first time any given source
-    /// string is ever evaluated in the process, regardless of window.
+    /// string is ever evaluated in the process, regardless of window —
+    /// until the bounded ever-seen ledger (4096 entries) saturates, after
+    /// which unseen sources are no longer classified (or counted) at all.
     /// A re-render report whose sources are all first-seen inside the
     /// current window is a LAZY MOUNT story, not an at-rest cascade.
     static var settledMarkdownFreshMountEvaluations: Int {

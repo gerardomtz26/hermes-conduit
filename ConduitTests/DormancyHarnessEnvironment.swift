@@ -14,9 +14,16 @@ import SwiftUI
 /// hosted failure that blocked build 147 (unit-7, run 35597418648).
 ///
 /// Every dormancy harness mounts through `applying(_:sizeCategory:chatTextSize:)`
-/// so the pinning contract has exactly one implementation, and
-/// `testDormancyHarnessPinsGateEnvironmentInputs` can hold it: strip the
-/// environment writes there and that probe test fails deterministically.
+/// so the pinning contract has exactly one implementation. The mutation
+/// sensitivities are carried where the effective writes live: strip the
+/// sizeCategory write HERE and `testWindowTraitChurnDoesNotReopenSettledGate`
+/// fails deterministically (the ambient churn then reaches the row). The
+/// chatTextSize write here mirrors ChatView's production shape but is
+/// shadowed by ChatView's own inner @AppStorage-driven write — that vector's
+/// mutation sensitivity lives at the effective write point: strip
+/// `ChatView.chatTextSizeOverride` (in the fixture harness) and
+/// `testSharedChatTextSizePreferenceChurnDoesNotReopenSettledGate` fails
+/// deterministically.
 enum DormancyHarnessEnvironment {
 
     /// The Dynamic Type value the isolation harnesses pin (production

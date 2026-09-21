@@ -70,4 +70,35 @@ final class TranscriptPerfLedgerContractTests: XCTestCase {
             "resetRenderLedgerForTesting() must clear both ledgers"
         )
     }
+
+    /// The ever-seen mount ledger behind the fresh-mount diagnostic is
+    /// bounded (4096 entries). Once SATURATED, classification must stop:
+    /// an unseen source evaluated after saturation is neither counted nor
+    /// inserted, so the bounded ledger degrades to "no new classification"
+    /// instead of re-counting every evaluation of every unseen source as a
+    /// fresh mount (the pre-fix behavior inflated the diagnostic by one on
+    /// each pass and grew without bound).
+    func testFreshMountLedgerStopsCountingOnceSaturated() {
+        // setUp cleared the ledger; saturate it with distinct sources, each
+        // counted fresh exactly once.
+        for index in 0..<4096 {
+            TranscriptPerf.note(.settledMarkdownBody, context: "saturation-source-\(index)")
+        }
+        let freshAtSaturation = TranscriptPerf.settledMarkdownFreshMountEvaluations
+        XCTAssertEqual(
+            freshAtSaturation, 4096,
+            "each distinct source's first evaluation is one fresh mount"
+        )
+
+        // An UNSEEN source after saturation, evaluated repeatedly: none of
+        // its passes may count as fresh.
+        for _ in 0..<5 {
+            TranscriptPerf.note(.settledMarkdownBody, context: "post-saturation-unseen-source")
+        }
+        XCTAssertEqual(
+            TranscriptPerf.settledMarkdownFreshMountEvaluations, freshAtSaturation,
+            "once the bounded ledger is saturated, repeated evaluations of an unseen "
+                + "source must not be re-counted as fresh mounts"
+        )
+    }
 }
