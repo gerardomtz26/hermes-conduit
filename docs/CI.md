@@ -441,7 +441,17 @@ From any machine with the `ios-mac` SSH alias (see the workspace `AGENTS.md`):
 ssh ios-mac 'bash ~/projects/conduit-gate-tooling/scripts/local-ci-gate.sh --ref <sha-or-ref>'
 ```
 
-`--ref` accepts any ref or SHA the Mac clone already has; add `--fetch` to
+`~/projects/conduit-gate-tooling` is a scratch worktree **of the Conduit
+repository itself** (created once with `git -C
+~/projects/hermes-conduit-swiftui worktree add --detach
+~/projects/conduit-gate-tooling origin/main`), not a separate clone: `--ref`
+is resolved in the shared object store, so the SHA that gets reported is a
+Conduit commit. The script refuses to run at all unless the checkout it is
+invoked from looks like Conduit (`project.yml`, `ConduitTests/`,
+`ConduitUITests/`), so pointing it at an unrelated repository fails fast
+instead of certifying a meaningless SHA.
+
+`--ref` accepts any ref or SHA that repository already has; add `--fetch` to
 fetch `origin` first, which makes the whole thing one command:
 
 ```
@@ -451,6 +461,11 @@ ssh ios-mac 'bash ~/projects/conduit-gate-tooling/scripts/local-ci-gate.sh --ref
 The gate prints the full SHA it tested and writes
 `gate-result.json` + `summary.md` under its run directory. Exit status is `0`
 only when the entire gate passed. Run `--help` for every flag.
+
+The device is pinned by name (`--simulator`, default `iPhone 17 Pro`; the
+environment's `SIMULATOR_OS`/`SIMULATOR_ARCH` are honoured by ci-lib.sh as
+usual) and the SAME device is exported to every phase, so the
+simulator/runtime recorded in the result is the one the tests actually ran on.
 
 ### Policy (non-negotiable)
 
@@ -483,7 +498,7 @@ only when the entire gate passed. Run `--help` for every flag.
 | build | `ci-build-for-testing.sh` once, into a gate-specific DerivedData | The same build-once contract as hosted CI, without the artifact round trip |
 | unit | the **complete** `ConduitTests` suite | One exhaustive lane: the planner is forced to `--min-lanes 1 --max-lanes 1` so it still owns the sequential batches and every per-batch watchdog |
 | ui | the **complete** `ConduitUITests` suite | One batched invocation over every UI class, with the planner's per-class watchdogs |
-| repeats | the repeat policy below | Runs even if earlier phases failed, so one red lane cannot hide the rest |
+| repeats | the repeat policy below | Runs even when the unit or UI lane failed, so one red lane cannot hide the rest; skipped only when the build or the plan failed, because then there is nothing to repeat against |
 
 The lane runner, the planner and the timing extractor come from the **tested
 commit's own tree**, so the policy that decides the verdict is the policy of
@@ -541,16 +556,28 @@ The gate classifies on the lane runner's own attempt tokens (`passed`,
 `assertion_failures`/`infrastructure_failures`/`timeouts`/`not_executed`,
 `focused_repeats` (per class and per iteration), an `infrastructure` roll-up
 (`persistent`, `recovered`, `retries`, `simulator_resets`/`erases`), a
-`partial` flag, `problems[]`, and the final `verdict` (`PASS`/`FAIL`). The
-human `summary.md` next to it carries the same numbers.
+`partial`/`partial_reasons` pair, `problems[]`, and the final `verdict`
+(`PASS`/`FAIL`). The human `summary.md` next to it carries the same numbers.
 
-Both artifacts, every lane log, every per-iteration log and every `.xcresult`
-bundle live under the run directory (default
+A run is `partial` when the operator deliberately narrowed it
+(`--skip-static`, or a disabled repeat policy): a partial run can pass, but it
+must never be cited as the exhaustive result for a release head.
+
+Both artifacts, every phase log, every per-iteration log and the `.xcresult`
+bundles live under the run directory (default
 `<parent of the repo>/conduit-local-gate/runs/<sha12>-<UTC>`), which is
 **outside** the repository, so the gate never adds files to a working tree.
-The throwaway worktree itself is removed at the end of the run; reproduce the
-exact tested tree with the `git worktree add --detach` command the gate prints
-on failure.
+
+What is kept is the lane runner's existing retention policy, not a new one: a
+clean pass prunes its own bundles (timings have already been extracted), a
+failing or retried lane keeps them, and a red run therefore always carries the
+bundles that explain it. The `.xcresult` paths the gate recorded for a passing
+lane can legitimately be empty; the timings, counts and logs are the evidence
+there, and the full run is reproducible from the printed SHA.
+
+The throwaway worktree is removed at the end of the run (including on
+interrupt), and reproduce the exact tested tree with the
+`git worktree add --detach` command the gate prints on failure.
 
 ### Simulator safety
 

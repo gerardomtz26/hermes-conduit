@@ -55,9 +55,45 @@ NOT_EXECUTED_STATUSES = ("not_run", "not_diagnosed")
 # already ran" (the runner's bounded recovery, never a policy of its own).
 RETRY_MODES = ("batch-retry", "class-retry")
 
+# XCTest does NOT only report real test cases. When the test host cannot be
+# installed or launched (a wedged or "Busy" Simulator refusing
+# com.milim.relay, a crashed test runner, a missing binary) the result bundle
+# carries a synthetic entry under the pseudo-class "System Failures" -
+# observed in the gate's first real run: class "System Failures", test
+# "Conduit encountered an error", with the launch refusal in the log. Such an
+# entry is NOT a test asserting anything, and counting it as an assertion
+# failure is exactly the mislabeling the gate exists to prevent: it would
+# report "genuine XCTest assertion failures present" for a machine that never
+# managed to start the app.
+SYNTHETIC_FAILURE_CLASSES = ("System Failures",)
+
 REPEAT_BATCH_TIMEOUT_CAP_DEFAULT = 900
 
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
+# The lane runner's per-invocation extraction part names; the group captures
+# the same "class" key extract-test-timings.py's _part_class derives.
+PART_NAME = re.compile(r"^detail-(?P<key>.+?)-a\d+\.json$")
+
+
+def is_synthetic_failure(entry) -> bool:
+    """True when a failure entry is XCTest reporting the RUN (not a test):
+    no real test method, reported under a pseudo-class."""
+    if not isinstance(entry, dict):
+        return False
+    return str(entry.get("class") or "") in SYNTHETIC_FAILURE_CLASSES
+
+
+def split_failures(failures):
+    """Split extracted failures into (real_test_failures, synthetic).
+
+    The extraction is the only place the distinction survives: the lane
+    runner's own batch status cannot tell them apart (it counts failing
+    entries), so the gate classifies here instead of trusting that token.
+    """
+    real, synthetic = [], []
+    for entry in failures if isinstance(failures, list) else []:
+        (synthetic if is_synthetic_failure(entry) else real).append(entry)
+    return real, synthetic
 
 
 def warn(msg: str) -> None:
@@ -103,6 +139,13 @@ def write_env(path: str, mapping) -> None:
 
 def _csv(values) -> str:
     return ",".join(values)
+
+
+def _split_classes(raw: str):
+    """Parse a comma-separated class list. Whitespace around entries is
+    tolerated ("A, B") because the repeat policy is hand-edited; empty
+    entries are dropped."""
+    return [c.strip() for c in str(raw or "").split(",") if c.strip()]
 
 
 def _single_lane(plan: dict, key: str) -> dict:
@@ -159,11 +202,12 @@ def cmd_lanes(args) -> int:
             "GATE_UI_PREDICTED": ui.get("predicted_s") or 0,
             "GATE_UI_TIMEOUT": int(ui.get("timeout_s") or 0),
         })
-    # The audit copy sits next to the shell-sourceable file under a stable
-    # name (lanes.env -> lanes.json), because the summarizer reads it back by
-    # that name to check completeness against what was planned.
+    # The audit copy is written where the shell says, not at a name derived
+    # from the env file: the summarizer reads it back by that exact path to
+    # check completeness against what was planned, so the two paths must not
+    # be able to drift apart.
     write_env(args.out, env)
-    write_json(os.path.splitext(args.out)[0] + ".json", {
+    write_json(args.json_out or (os.path.splitext(args.out)[0] + ".json"), {
         "schema_version": SCHEMA_VERSION,
         "unit": {
             "lane": env["GATE_UNIT_LANE"],
@@ -213,7 +257,7 @@ def cmd_repeat_spec(args) -> int:
         return 3
 
     batches = unit["batches"]
-    classes = [c for c in (args.classes or "").split(",") if c]
+    classes = _split_classes(args.classes)
     tasks = []
     missing = []
     for name in classes:
@@ -250,8 +294,9 @@ def cmd_repeat_spec(args) -> int:
         "tasks": tasks,
     })
     # TSV the shell reads line by line (same idiom as the runner's own
-    # batch-plan.txt): class, batches-json, predicted_s, timeout_s.
-    tsv = os.path.splitext(args.out)[0] + ".tsv"
+    # batch-plan.txt): class, batches-json, predicted_s, timeout_s. The shell
+    # passes this path explicitly so the two sides cannot disagree about it.
+    tsv = args.tsv_out or (os.path.splitext(args.out)[0] + ".tsv")
     with open(tsv, "w", encoding="utf-8", newline="\n") as fh:
         for task in tasks:
             batches_json = json.dumps(
@@ -265,6 +310,65 @@ def cmd_repeat_spec(args) -> int:
     print("repeat policy: {0} class(es) x {1} iterations".format(
         len(tasks), args.iterations))
     return 0
+
+
+def cmd_not_run_batches(args) -> int:
+    """Project the batches a stopped unit lane never executed.
+
+    A unit lane stops at the batch that failed, so a single failure would
+    otherwise hide the rest of the suite: the gate runs those batches as a
+    CONTINUATION pass so the report still covers every class. This is a
+    diagnostic continuation, never a retry - the batches that already ran
+    (including the one that failed) are never re-executed here.
+
+    The continuation reuses the PLANNER's own batch objects (predicted_s,
+    timeout_s) looked up by index, so its watchdogs carry the same policy as
+    the lane it continues rather than a formula invented here.
+    """
+    plan = load_json(args.plan)
+    lane_result = load_json(args.lane_result)
+    if not isinstance(plan, dict) or not isinstance(lane_result, dict):
+        fail("plan or lane result not readable")
+        return 3
+    unit = _single_lane(plan, "unit_lanes")
+    planned = unit.get("batches") if unit else None
+    recorded = lane_result.get("batches")
+    if not isinstance(planned, list) or not isinstance(recorded, list):
+        fail("plan/lane result carry no batch layout to continue from")
+        return 3
+
+    indices = []
+    for batch in recorded:
+        if isinstance(batch, dict) and str(batch.get("status")) == "not_run":
+            idx = _int_or_zero(batch.get("batch"))
+            if 1 <= idx <= len(planned):
+                indices.append(idx)
+    env = {"GATE_CONT_PRESENT": 0}
+    if indices:
+        selected = [planned[i - 1] for i in indices]
+        env = {
+            "GATE_CONT_PRESENT": 1,
+            "GATE_CONT_BATCH_INDICES": _csv(str(i) for i in indices),
+            "GATE_CONT_BATCH_COUNT": len(selected),
+            "GATE_CONT_CLASSES": _csv(
+                [c for b in selected for c in (b.get("classes") or [])]),
+            "GATE_CONT_BATCHES_JSON": json.dumps(selected, separators=(",", ":")),
+            "GATE_CONT_PREDICTED": sum(
+                _num_or_zero(b.get("predicted_s")) for b in selected),
+            "GATE_CONT_TIMEOUT": int(sum(
+                _num_or_zero(b.get("timeout_s")) for b in selected)),
+        }
+    write_env(args.out, env)
+    print("unit continuation: {0} batch(es) never executed{1}".format(
+        len(indices), " (" + _csv(str(i) for i in indices) + ")" if indices else ""))
+    return 0
+
+
+def _num_or_zero(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -287,11 +391,13 @@ def cmd_meta(args) -> int:
         "wall_s": args.wall_s,
         "allowed_recovered_infrastructure": bool(args.allow_recovered_infrastructure),
         "static_checks_enabled": not args.skip_static,
+        "repeat_policy_enabled": bool(_split_classes(args.repeat_classes)) and
+                                 args.repeat_iterations > 0,
         "expected": {
             "unit_classes": args.unit_classes,
             "unit_batches": args.unit_batches,
             "ui_classes": args.ui_classes,
-            "repeat_classes": [c for c in (args.repeat_classes or "").split(",") if c],
+            "repeat_classes": _split_classes(args.repeat_classes),
             "repeat_iterations": args.repeat_iterations,
         },
     }
@@ -426,15 +532,19 @@ def _work_items(attempts, batches):
     order = []
     items = {}
 
-    def touch(key, name=None, batch=None):
+    def touch(key, name=None, batch=None, part_keys=()):
         if key not in items:
-            items[key] = {"name": name or "", "batch": batch, "statuses": []}
+            items[key] = {"name": name or "", "batch": batch, "statuses": [],
+                          "part_keys": list(part_keys)}
             order.append(key)
         entry = items[key]
         if name and not entry["name"]:
             entry["name"] = name
         if batch is not None and entry["batch"] is None:
             entry["batch"] = batch
+        for part_key in part_keys:
+            if part_key not in entry["part_keys"]:
+                entry["part_keys"].append(part_key)
         return entry
 
     for item in attempts if isinstance(attempts, list) else []:
@@ -447,9 +557,13 @@ def _work_items(attempts, batches):
         if mode.startswith("batch"):
             key = ("batch", str(n))
             name = _csv(batch_classes.get(str(n)) or []) or "batch-{0}".format(n)
-            touch(key, name=name, batch=n)["statuses"].append(status)
+            # "batch-<n>" is the unit naming; a UI shard has one batch-level
+            # invocation whose part is named without the index.
+            touch(key, name=name, batch=n,
+                  part_keys=["batch-{0}".format(n), "batch"])["statuses"].append(status)
         elif mode.startswith("class") or mode == "skipped":
-            touch(("class", cls), name=cls)["statuses"].append(status)
+            touch(("class", cls), name=cls,
+                  part_keys=["class-{0}".format(cls)])["statuses"].append(status)
         else:
             touch((mode, str(n)), name=cls)["statuses"].append(status)
 
@@ -466,14 +580,42 @@ def _work_items(attempts, batches):
             or "batch-{0}".format(n)
         chain = [a for a in (batch.get("attempts") or []) if isinstance(a, dict)]
         for attempt in chain:
-            entry = touch(key, name=name, batch=n)
+            entry = touch(key, name=name, batch=n,
+                          part_keys=["batch-{0}".format(n), "batch"])
             status = str(attempt.get("status") or "")
             if status and status not in entry["statuses"]:
                 entry["statuses"].append(status)
     return order, items
 
 
-def _classify_attempts(attempts, batches):
+def _read_parts(lane_dir: str):
+    """Per-invocation extraction parts, keyed as the lane runner names them:
+    `detail-batch-<n>-a<k>.json` for a unit batch, `detail-class-<Cls>-a<k>.json`
+    for a UI class, `detail-batch-a<k>.json` for a UI shard. Only the failure
+    lists are used, and only to attribute a failure to the invocation that
+    produced it (the merged detail document cannot).
+    """
+    parts = {}
+    parts_dir = os.path.join(lane_dir, "parts")
+    try:
+        names = sorted(os.listdir(parts_dir))
+    except OSError:
+        return parts
+    for name in names:
+        match = PART_NAME.match(name)
+        if not match:
+            continue
+        doc = load_json(os.path.join(parts_dir, name))
+        if not isinstance(doc, dict):
+            continue
+        real, synthetic = split_failures(doc.get("failures"))
+        entry = parts.setdefault(match.group("key"), {"real": 0, "synthetic": 0})
+        entry["real"] += len(real)
+        entry["synthetic"] += len(synthetic)
+    return parts
+
+
+def _classify_attempts(attempts, batches, parts=None, lane_has_real_failures=True):
     """Split lane evidence into assertion failures, infrastructure events,
     timeouts and never-executed work, using the runner's own status tokens.
 
@@ -484,13 +626,34 @@ def _classify_attempts(attempts, batches):
     accept in any mode - the same work item recorded `test-failures` and then
     `passed`, i.e. a genuine assertion was re-run until it agreed (a flake),
     which is not validation.
+
+    `parts` is the per-invocation failure attribution from _read_parts;
+    `lane_has_real_failures` is the lane-level fallback for when the parts
+    could not be read.
     """
+    parts = parts or {}
     order, items = _work_items(attempts, batches)
     assertion = []
     infrastructure = []
     timeouts = []
     not_executed = []
     retried_until_green = []
+
+    # A `test-failures` status means the invocation EXITED with failing
+    # entries - but XCTest also reports the RUN under "System Failures" when
+    # the test host never launched. Only the per-invocation extraction parts
+    # can tell those apart, so the classification of a `test-failures` item
+    # is decided by the parts when they are available and falls back to the
+    # lane-level split when they are not (never to "assume assertion").
+    def part_counts(entry):
+        real = synthetic = 0
+        seen = False
+        for part_key in entry.get("part_keys") or []:
+            if part_key in parts:
+                seen = True
+                real += parts[part_key]["real"]
+                synthetic += parts[part_key]["synthetic"]
+        return real, synthetic, seen
 
     for key in order:
         entry = items[key]
@@ -507,11 +670,26 @@ def _classify_attempts(attempts, batches):
         recovered = final == "passed"
 
         if saw_assertion:
-            assertion.append(dict(common, kind="assertion",
-                                  status="test-failures",
-                                  recovered=recovered, statuses=statuses))
-            if recovered:
-                retried_until_green.append(dict(common, statuses=statuses))
+            real, synthetic, seen = part_counts(entry)
+            if seen and real == 0 and synthetic > 0:
+                # The invocation's only "failures" were XCTest reporting the
+                # run: a test-runner/host failure, i.e. infrastructure.
+                infrastructure.append(dict(
+                    common, kind="infrastructure", status="test-runner-failure",
+                    synthetic_failures=synthetic, recovered=recovered,
+                    statuses=statuses))
+            elif not seen and not lane_has_real_failures:
+                infrastructure.append(dict(
+                    common, kind="infrastructure", status="test-runner-failure",
+                    synthetic_failures=0, recovered=recovered,
+                    statuses=statuses))
+            else:
+                assertion.append(dict(common, kind="assertion",
+                                      status="test-failures", real_failures=real,
+                                      synthetic_failures=synthetic,
+                                      recovered=recovered, statuses=statuses))
+                if recovered:
+                    retried_until_green.append(dict(common, statuses=statuses))
         if saw_infra:
             infrastructure.append(dict(common, kind="infrastructure",
                                        status=final if final in INFRASTRUCTURE_STATUSES
@@ -618,7 +796,17 @@ def _read_lane(lane_dir: str) -> dict:
                 out["classes_observed"] = sorted({
                     str(a.get("class")) for a in attempts
                     if isinstance(a, dict) and a.get("class")})
-    out.update(_classify_attempts(out["attempts"], out["batches"]))
+    # Split the extracted failures: entries XCTest files under its synthetic
+    # "System Failures" class report the RUN (the test host never launched),
+    # not a test asserting anything. Only the real ones are assertion
+    # failures, and only they justify calling this a product failure.
+    synthetic = [f for f in out["failures"] if is_synthetic_failure(f)]
+    out["synthetic_failures"] = synthetic
+    out["real_failures"] = [f for f in out["failures"] if not is_synthetic_failure(f)]
+    out["failures"] = out["real_failures"]
+    out["parts"] = _read_parts(lane_dir)
+    out.update(_classify_attempts(out["attempts"], out["batches"], out["parts"],
+                                 bool(out["real_failures"])))
     return out
 
 
@@ -629,14 +817,20 @@ def _summarize_lane(lane: dict, expected_classes, expected_batches=None) -> dict
     if lane["executions"] is None:
         problems.append("observations.json missing or without counts (execution "
                         "count could not be read from the result bundle)")
+    # expected_classes is None when the planned list is unknown: the caller
+    # reports that separately, and asserting coverage against an empty set
+    # would turn every executed class into a bogus "unexpected class".
     observed = set(lane["classes_observed"])
     expected = set(expected_classes or [])
-    missing = sorted(expected - observed)
-    extra = sorted(observed - expected)
-    if missing:
-        problems.append("classes never executed: {0}".format(_csv(missing)))
-    if extra:
-        problems.append("unexpected classes executed: {0}".format(_csv(extra)))
+    if expected_classes is not None:
+        missing = sorted(expected - observed)
+        extra = sorted(observed - expected)
+        if missing:
+            problems.append("classes never executed: {0}".format(_csv(missing)))
+        if extra:
+            problems.append("unexpected classes executed: {0}".format(_csv(extra)))
+    else:
+        missing, extra = [], sorted(observed)
     if expected_batches is not None:
         if len(lane["batches"] or []) != expected_batches:
             problems.append("expected {0} planned batches, lane result carries "
@@ -654,10 +848,15 @@ def _summarize_lane(lane: dict, expected_classes, expected_batches=None) -> dict
         "executions": lane["executions"],
         "failures": len(lane["failures"]),
         "failure_detail": lane["failures"],
+        # XCTest's own "the run failed" entries (test host never launched).
+        # Counted as infrastructure, reported separately, and never as an
+        # assertion failure.
+        "synthetic_failures": len(lane.get("synthetic_failures") or []),
         "flaky": lane["flaky"],
         "classes_expected": len(expected),
         "classes_observed": len(observed),
         "classes_missing": missing,
+        "observed_names": sorted(observed),
         "batch_count": len(lane["batches"] or []) or None,
         "batches_expected": expected_batches,
         "assertion_failures": lane["assertion_failures"],
@@ -678,6 +877,68 @@ def _summarize_lane(lane: dict, expected_classes, expected_batches=None) -> dict
         "timeout_s": lane["timeout_s"],
         "problems": problems,
     }
+
+
+# Fields concatenated when a lane is continued (the gate's unit lane plus the
+# batches it never reached). Everything the summary exposes as a list of
+# events is concatenated; counters are summed; coverage is unioned.
+_MERGE_LIST_FIELDS = ("failure_detail", "assertion_failures",
+                      "infrastructure_failures", "timeouts", "not_executed",
+                      "retries", "assertion_retried_until_green",
+                      "retried_classes", "infra_recovered_classes",
+                      "persistent_infra_classes", "flaky")
+
+
+def _merge_lane_summaries(primary: dict, extra: dict, expected_classes) -> dict:
+    """Fold a continuation pass into the lane it continues.
+
+    The continuation's own coverage check is deliberately not applied here:
+    what must hold is the AGGREGATE one (every class the plan promised was
+    executed by the lane or by its continuation), which is computed against
+    `expected_classes`. Its result-directory checks and its failure/event
+    evidence are kept.
+    """
+    merged = dict(primary)
+    merged["status"] = "fail" if "fail" in (primary["status"], extra["status"]) \
+        else primary["status"]
+    for field in ("executions", "batch_count", "duration_s", "predicted_s",
+                  "timeout_s"):
+        left, right = primary.get(field), extra.get(field)
+        if left is None or right is None:
+            merged[field] = left if right is None else right
+        else:
+            merged[field] = left + right
+    for field in ("failures", "synthetic_failures"):
+        merged[field] = _int_or_zero(primary.get(field)) + _int_or_zero(extra.get(field))
+    merged["simulator_reset"] = bool(primary.get("simulator_reset")) or \
+        bool(extra.get("simulator_reset"))
+    merged["simulator_erase"] = bool(primary.get("simulator_erase")) or \
+        bool(extra.get("simulator_erase"))
+    for field in _MERGE_LIST_FIELDS:
+        merged[field] = list(primary.get(field) or []) + list(extra.get(field) or [])
+
+    expected = list(expected_classes or [])
+    observed = set()
+    for summary in (primary, extra):
+        observed.update(summary.get("observed_names") or [])
+    missing = sorted(set(expected) - observed)
+    merged["classes_expected"] = len(expected)
+    merged["classes_observed"] = len(observed)
+    merged["classes_missing"] = missing
+    merged["continuation"] = {
+        "batches": extra.get("batch_count"),
+        "classes": extra.get("classes_observed"),
+        "executions": extra.get("executions"),
+        "failures": extra.get("failures"),
+        "problems": list(extra.get("problems") or []),
+    }
+    problems = list(primary.get("problems") or [])
+    problems = [p for p in problems if not p.startswith("classes never executed")]
+    if missing:
+        problems.append("classes never executed: {0}".format(_csv(missing)))
+    problems.extend(extra.get("problems") or [])
+    merged["problems"] = problems
+    return merged
 
 
 def _read_repeats(repeats_dir: str, expected, iterations: int):
@@ -792,19 +1053,38 @@ def cmd_summarize(args) -> int:
     unit = _read_lane(os.path.join(run_dir, "lanes", "unit"))
     if not os.path.isdir(os.path.join(run_dir, "lanes", "unit")):
         gate_problems.append("unit lane results are missing")
-    unit_summary = _summarize_lane(unit, _expected_classes(
-        run_dir, "unit", expected.get("unit_classes")),
-        _int_or_zero(expected.get("unit_batches")) or None)
+    unit_expected, unit_expect_problems = _expected_classes(run_dir, "unit", expected)
+    gate_problems.extend(unit_expect_problems)
+    unit_summary = _summarize_lane(unit, unit_expected,
+                                   _int_or_zero(expected.get("unit_batches")) or None)
+    # A unit lane stops at the batch that failed; the shell then runs the
+    # batches that never executed as a continuation so one failure cannot hide
+    # the rest of the suite. Its evidence is folded in here, and the coverage
+    # that matters is the aggregate against the plan's full class list.
+    continuation_dir = os.path.join(run_dir, "lanes", "unit-continuation")
+    if os.path.isdir(continuation_dir):
+        continuation = _read_lane(continuation_dir)
+        continuation_summary = _summarize_lane(continuation, None)
+        unit_summary = _merge_lane_summaries(unit_summary, continuation_summary,
+                                            unit_expected)
     gate_problems.extend("unit: " + p for p in unit_summary["problems"])
 
-    ui_expected = _expected_classes(run_dir, "ui", expected.get("ui_classes"))
+    ui_expected, ui_expect_problems = _expected_classes(run_dir, "ui", expected)
     if ui_expected:
+        gate_problems.extend(ui_expect_problems)
         ui = _read_lane(os.path.join(run_dir, "lanes", "ui"))
         if not os.path.isdir(os.path.join(run_dir, "lanes", "ui")):
             gate_problems.append("UI lane results are missing")
         ui_summary = _summarize_lane(ui, ui_expected)
         gate_problems.extend("ui: " + p for p in ui_summary["problems"])
     else:
+        # No UI lane in the plan is legitimate (a repo with no UI classes), but
+        # uiclasses recorded in meta.json with no lane means the run skipped
+        # work it planned - that is a gate defect, not a clean pass.
+        if _int_or_zero(expected.get("ui_classes")) > 0:
+            gate_problems.append(
+                "the run expected {0} UI classes but planned no UI lane".format(
+                    expected.get("ui_classes")))
         ui_summary = {"status": "skipped", "executions": 0, "failures": 0,
                       "classes_expected": 0, "classes_observed": 0,
                       "problems": []}
@@ -883,6 +1163,14 @@ def cmd_summarize(args) -> int:
         gate_problems.append("genuine XCTest assertion failures present ({0})".format(
             len(events["assertion_failures"]) or
             unit_summary.get("failures") or ui_summary.get("failures")))
+    runner_failures = int(unit_summary.get("synthetic_failures") or 0) + \
+        int(ui_summary.get("synthetic_failures") or 0)
+    if runner_failures:
+        gate_problems.append(
+            "the test runner never started the app under test ({0} XCTest "
+            "'System Failures' entr{1}); the affected invocation is an "
+            "infrastructure failure, not an assertion".format(
+                runner_failures, "y" if runner_failures == 1 else "ies"))
     if persistent_infra or persistent_timeouts:
         gate_problems.append(
             "persistent infrastructure failure(s)/hang(s) present "
@@ -910,6 +1198,13 @@ def cmd_summarize(args) -> int:
     deduped = _dedupe(gate_problems)
     verdict = "PASS" if not deduped else "FAIL"
 
+    partial_reasons = []
+    if not meta.get("static_checks_enabled"):
+        partial_reasons.append("static checks skipped (--skip-static)")
+    if not meta.get("repeat_policy_enabled"):
+        partial_reasons.append(
+            "repeat policy disabled (no repeat classes or zero iterations)")
+
     result = {
         "schema_version": SCHEMA_VERSION,
         "gate": "conduit-local-ci-gate",
@@ -933,9 +1228,12 @@ def cmd_summarize(args) -> int:
             "xctestrun": (phases.get("build", {}).get("details") or {}).get("xctestrun", ""),
             "note": phases.get("build", {}).get("note", ""),
         },
-        # A run with the cheap static checks skipped is explicitly partial:
-        # it can never be cited as the exhaustive gate for a release head.
-        "partial": not bool(meta.get("static_checks_enabled")),
+        # A PARTIAL run is one the operator deliberately narrowed: it can
+        # never be cited as the exhaustive gate result for a release head, so
+        # the reasons are recorded explicitly rather than inferred from the
+        # absence of artifacts.
+        "partial": bool(partial_reasons),
+        "partial_reasons": partial_reasons,
         "unit": unit_summary,
         "ui": ui_summary,
         "focused_repeats": {
@@ -966,6 +1264,11 @@ def cmd_summarize(args) -> int:
             "summary_md": os.path.join(run_dir, "summary.md"),
             "build_log": os.path.join(run_dir, "build", "build.log"),
             "unit_dir": os.path.join(run_dir, "lanes", "unit"),
+            "unit_continuation_dir": (os.path.join(run_dir, "lanes",
+                                                   "unit-continuation")
+                                      if os.path.isdir(os.path.join(run_dir, "lanes",
+                                                                    "unit-continuation"))
+                                      else None),
             "ui_dir": os.path.join(run_dir, "lanes", "ui") if ui_expected else None,
             "repeats_dir": repeats_dir if repeat_entries else None,
         },
@@ -983,16 +1286,34 @@ def cmd_summarize(args) -> int:
     return 1
 
 
-def _expected_classes(run_dir: str, kind: str, fallback):
-    """The class list the gate planned to execute. Preferred source is the
-    plan projection the shell wrote, so completeness is checked against what
-    was planned rather than against a count passed on the command line."""
+def _expected_classes(run_dir: str, kind: str, expected: dict):
+    """Return (planned_classes_or_None, problems).
+
+    The planned class list comes from the projection the shell wrote. When it
+    is unreadable the gate cannot know WHICH classes were planned - meta.json
+    carries counts, not names - so the completeness check has nothing to
+    compare against: that is reported, never silently treated as "everything
+    ran". The recorded count is cross-checked as well, so a stale or
+    truncated projection can never certify a shorter run than was planned.
+    """
+    count_key = "unit_classes" if kind == "unit" else "ui_classes"
+    declared = expected.get(count_key)
     doc = load_json(os.path.join(run_dir, "lanes.json"))
+    classes = None
     if isinstance(doc, dict):
         entry = doc.get(kind)
         if isinstance(entry, dict) and entry.get("classes"):
-            return list(entry["classes"])
-    return list(fallback or [])
+            classes = list(entry["classes"])
+    if classes is None:
+        if isinstance(declared, int) and declared > 0:
+            return None, ["{0}: the planned class list is missing from the run "
+                          "directory although {1} {0} classes were expected - "
+                          "completeness cannot be checked".format(kind, declared)]
+        return None, []
+    if isinstance(declared, int) and declared != len(classes):
+        return classes, ["{0}: the plan projection lists {1} classes but the run "
+                         "recorded {2}".format(kind, len(classes), declared)]
+    return classes, []
 
 
 def _dedupe(items):
@@ -1037,8 +1358,8 @@ def _write_markdown(path: str, result: dict) -> None:
         sim.get("name") or "?", sim.get("runtime") or "?", sim.get("udid") or "?"))
     lines.append("- Wall clock: {0}s".format(result["timing"]["wall_s"]))
     if result.get("partial"):
-        lines.append("- **PARTIAL RUN**: the cheap static checks were skipped; "
-                     "this is not an exhaustive-gate result.")
+        lines.append("- **PARTIAL RUN — not an exhaustive-gate result:** {0}".format(
+            "; ".join(result.get("partial_reasons") or ["unspecified"])))
     lines.append("")
     lines.append("| Phase | Status | Executions | Failures | Duration |")
     lines.append("|---|---|---|---|---|")
@@ -1123,6 +1444,8 @@ def _print_human(result: dict) -> None:
     print("infra      : {0} failure(s), {1} recovered, {2} timeout(s), "
           "{3} retry attempt(s)".format(infra["failures"], infra["recovered"],
                                         infra["timeouts"], infra["retries"]))
+    if result.get("partial"):
+        print("PARTIAL    : {0}".format("; ".join(result.get("partial_reasons") or [])))
     if result["problems"]:
         print("problems:")
         for problem in result["problems"]:
@@ -1136,6 +1459,8 @@ def main(argv=None) -> int:
     p = sub.add_parser("lanes")
     p.add_argument("--plan", required=True)
     p.add_argument("--out", required=True, help="shell-sourceable env file")
+    p.add_argument("--json-out", default="",
+                   help="plan-projection audit copy (read back by summarize)")
     p.set_defaults(func=cmd_lanes)
 
     p = sub.add_parser("repeat-spec")
@@ -1144,7 +1469,15 @@ def main(argv=None) -> int:
     p.add_argument("--iterations", type=int, default=3)
     p.add_argument("--timeout-cap", type=int, default=REPEAT_BATCH_TIMEOUT_CAP_DEFAULT)
     p.add_argument("--out", required=True)
+    p.add_argument("--tsv-out", default="",
+                   help="TSV of per-class repeat tasks (read by the gate shell)")
     p.set_defaults(func=cmd_repeat_spec)
+
+    p = sub.add_parser("not-run-batches")
+    p.add_argument("--plan", required=True)
+    p.add_argument("--lane-result", required=True)
+    p.add_argument("--out", required=True, help="shell-sourceable env file")
+    p.set_defaults(func=cmd_not_run_batches)
 
     p = sub.add_parser("meta")
     p.add_argument("--out", required=True)

@@ -153,6 +153,23 @@ if [ -z "$REPO_ROOT" ]; then
   exit 2
 fi
 
+# Fail closed on the wrong repository: the gate certifies Conduit commits, so
+# the invoking checkout must BE a Conduit checkout. Without this, running the
+# script from some unrelated repository would resolve --ref there and report a
+# meaningless SHA as the tested commit.
+for marker in project.yml ConduitTests ConduitUITests; do
+  if [ ! -e "$REPO_ROOT/$marker" ]; then
+    echo "local-ci-gate: $REPO_ROOT does not look like the Conduit repository (missing $marker)" >&2
+    exit 2
+  fi
+done
+
+# The device is pinned by name and every phase must use the SAME one: the
+# build, the unit lane and the UI lane all resolve their destination through
+# ci-lib.sh, which reads this variable. Exporting it here is what keeps the
+# recorded simulator/runtime honest when --simulator overrides the default.
+export SIMULATOR_NAME
+
 # Everything the gate writes lives OUTSIDE the repository: the invoking
 # checkout is never the run's workspace and never accumulates gate output.
 if [ -z "$GATE_ROOT" ]; then
@@ -193,9 +210,18 @@ cleanup() {
   if [ "$LOCK_HELD" -eq 1 ]; then
     rm -rf "$LOCK_DIR"
   fi
+  # An interrupt (Ctrl-C, closed SSH session) must not leave a registered
+  # worktree behind: the next run for the same commit would then fail at
+  # `git worktree add`, and the operator would have to clean up by hand.
+  # remove_worktree is idempotent, so the normal exit path calling it too is
+  # harmless. A SIGKILL is the one case nothing can cover; the gate prints
+  # the manual recovery command for that.
+  if [ -n "${WT:-}" ] && [ -d "$WT" ] && command -v remove_worktree >/dev/null 2>&1; then
+    remove_worktree >/dev/null 2>&1 || true
+  fi
   return "$status"
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
@@ -219,12 +245,24 @@ case "$SHA" in
   *) echo "local-ci-gate: resolved revision is not a commit id: $SHA" >&2; exit 2 ;;
 esac
 SHA12="${SHA%${SHA#????????????}}"
+GATE_STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 
 if [ -z "$RUN_DIR" ]; then
-  RUN_DIR="$GATE_ROOT/runs/${SHA12}-$(date -u +%Y%m%dT%H%M%SZ)"
+  RUN_DIR="$GATE_ROOT/runs/${SHA12}-$GATE_STAMP"
 fi
-WT="$WORKTREE_ROOT/$SHA12"
-mkdir -p "$RUN_DIR" "$WORKTREE_ROOT"
+# Unique per run: a worktree left behind by an interrupted run (or two commits
+# sharing a 12-character prefix) must never collide with this one.
+WT="$WORKTREE_ROOT/${SHA12}-$GATE_STAMP"
+mkdir -p "$WORKTREE_ROOT"
+
+# A reused run directory would let a previous run's plan projection or lane
+# artifacts be read back as this run's evidence. Refuse it instead of
+# producing a result assembled from two different runs.
+if [ -d "$RUN_DIR" ] && [ -n "$(ls -A "$RUN_DIR" 2>/dev/null)" ]; then
+  echo "local-ci-gate: run directory $RUN_DIR already exists and is not empty; choose another --run-dir" >&2
+  exit 2
+fi
+mkdir -p "$RUN_DIR"
 
 GATE_STARTED_AT="$(now_iso)"
 GATE_START_EPOCH=$(date +%s)
@@ -255,6 +293,11 @@ WORKTREE_REMOVED=0
 remove_worktree() {
   if [ "$KEEP_WORKTREE" -eq 1 ]; then
     echo "keeping the throwaway worktree at $WT (--keep-worktree)"
+    return 0
+  fi
+  # Idempotent: the normal path removes it at the end of the run and the EXIT
+  # trap removes it again, and an already-removed worktree is not an error.
+  if [ ! -d "$WT" ]; then
     return 0
   fi
   # Only ever the worktree this run created: the dirty state is the generated
@@ -342,7 +385,9 @@ except Exception:
 if [ "$SKIP_STATIC" -eq 1 ]; then
   echo ""
   echo "== static checks SKIPPED (--skip-static) =="
-  record_phase static skipped 0 0 "--skip-static"
+  python3 "$HELPER" phase --out "$RUN_DIR/static/phase.json" \
+    --phase static --status skipped --duration 0 --exit-code 0 \
+    --note "static checks disabled with --skip-static (partial run)"
 else
   echo ""
   echo "== static checks (planner inventory, CI tooling, localization) =="
@@ -429,7 +474,11 @@ run_lane() { # $1=kind $2=lane $3=target $4=classes $5=predicted $6=timeout
   echo ""
   echo "== $kind lane $lane =="
   echo "classes: $(printf '%s' "$classes" | tr ',' '\n' | wc -l | tr -d ' ') | watchdog: ${timeout}s"
+  # SIMULATOR_NAME is restated here (it is also exported) so the lane can never
+  # silently fall back to ci-lib.sh's default device when --simulator differs:
+  # the recorded simulator/runtime must describe the device the tests ran on.
   CONDUIT_PERF_TRACE="${CONDUIT_PERF_TRACE:-1}" \
+    SIMULATOR_NAME="$SIMULATOR_NAME" \
     bash "$LANE_RUNNER" --kind "$kind" --lane "$lane" --target "$target" \
       --classes "$classes" --predicted "$predicted" --timeout "$timeout" \
       --iterations 1 --xctestrun "$XCTESTRUN" --result-dir "$result_dir" "$@"
@@ -442,9 +491,6 @@ if [ "$GATE_BUILD_STATUS" != "pass" ]; then
   GATE_UI_STATUS="skipped"
   GATE_REPEAT_STATUS="skipped"
 else
-  # shellcheck disable=SC1090
-  . "$LANES_ENV"
-
   # --- phase: plan -------------------------------------------------------
   # The planner is the single owner of the batch layout and every watchdog
   # budget, so it must succeed before any lane starts.
@@ -465,7 +511,8 @@ else
     GATE_UNIT_STATUS="fail"; GATE_UI_STATUS="fail"; GATE_REPEAT_STATUS="fail"
   else
     echo "plan: $RUN_DIR/plan/plan.json"
-    if ! python3 "$HELPER" lanes --plan "$RUN_DIR/plan/plan.json" --out "$LANES_ENV"; then
+    if ! python3 "$HELPER" lanes --plan "$RUN_DIR/plan/plan.json" \
+        --out "$LANES_ENV" --json-out "$RUN_DIR/lanes.json"; then
       echo "local-ci-gate: lane projection failed" >&2
       GATE_UNIT_STATUS="fail"; GATE_UI_STATUS="fail"; GATE_REPEAT_STATUS="fail"
     else
@@ -479,6 +526,35 @@ else
         GATE_UNIT_STATUS="pass"
       else
         GATE_UNIT_STATUS="fail"
+        # The lane stopped at the batch that failed, so the rest of the suite
+        # has no result yet. Run the batches it never reached as a
+        # CONTINUATION pass (a diagnostic continuation, never a retry of
+        # anything that already ran) so one failure cannot hide the other 129
+        # classes' status from the report.
+        CONT_ENV="$RUN_DIR/unit-continuation.env"
+        if python3 "$HELPER" not-run-batches \
+            --plan "$RUN_DIR/plan/plan.json" \
+            --lane-result "$RUN_DIR/lanes/unit/lane-result.json" \
+            --out "$CONT_ENV"; then
+          # shellcheck disable=SC1090
+          . "$CONT_ENV"
+          if [ "${GATE_CONT_PRESENT:-0}" -eq 1 ]; then
+            echo ""
+            echo "== unit continuation: re-running the ${GATE_CONT_BATCH_COUNT} batch(es) the lane never reached (batches ${GATE_CONT_BATCH_INDICES}) =="
+            if run_lane unit "$GATE_UNIT_LANE-continuation" "$GATE_UNIT_TARGET" \
+                "$GATE_CONT_CLASSES" "$GATE_CONT_PREDICTED" "$GATE_CONT_TIMEOUT" \
+                "$RUN_DIR/lanes/unit-continuation" \
+                --batches-json "$GATE_CONT_BATCHES_JSON"; then
+              echo "unit continuation: the never-reached batches ran clean"
+            else
+              echo "unit continuation: the never-reached batches produced their own failures (reported below)"
+            fi
+          else
+            echo "unit continuation: no batch was left unexecuted"
+          fi
+        else
+          echo "local-ci-gate: could not project the unit continuation pass" >&2
+        fi
       fi
 
       # --- complete UI suite ---------------------------------------------
@@ -501,15 +577,24 @@ else
         echo ""
         echo "== repeat policy disabled =="
       else
-        REPEAT_SPEC="$RUN_DIR/repeats.json"
+        REPEAT_JSON="$RUN_DIR/repeats.json"
+        REPEAT_TSV="$RUN_DIR/repeats.tsv"
         if ! python3 "$HELPER" repeat-spec --plan "$RUN_DIR/plan/plan.json" \
             --classes "$REPEAT_CLASSES" --iterations "$REPEAT_ITERATIONS" \
-            --timeout-cap "$REPEAT_TIMEOUT_CAP" --out "$REPEAT_SPEC"; then
+            --timeout-cap "$REPEAT_TIMEOUT_CAP" \
+            --out "$REPEAT_JSON" --tsv-out "$REPEAT_TSV"; then
           echo "local-ci-gate: repeat policy could not be projected" >&2
           GATE_REPEAT_STATUS="fail"
         else
           echo ""
           echo "== repeat policy: $REPEAT_ITERATIONS unconditional iterations per class =="
+          # A projection that produced no tasks would silently satisfy the
+          # summarizer with "no repeats expected"; the policy must actually
+          # have tasks in it.
+          if [ ! -s "$REPEAT_TSV" ]; then
+            echo "local-ci-gate: the repeat policy projected no tasks" >&2
+            GATE_REPEAT_STATUS="fail"
+          fi
           while IFS=$'\t' read -r rcls rbatches rpredicted rtimeout; do
             [ -z "$rcls" ] && continue
             rtimeout="${rtimeout%$'\r'}"
@@ -528,7 +613,7 @@ else
               fi
               iteration=$(( iteration + 1 ))
             done
-          done < "$REPEAT_SPEC.tsv"
+          done < "$REPEAT_TSV"
         fi
       fi
     fi
