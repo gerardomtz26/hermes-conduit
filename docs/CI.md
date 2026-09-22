@@ -530,6 +530,13 @@ round is allowed for exactly one infrastructure class:
   (shutdown/erase/boot/wait, via ci-lib.sh) and retries exactly the
   incomplete work **once** (the other suite's round, if it ever runs,
   performs its own erase);
+* the round heals evidence only where its OWN pass re-ran the work: an
+  infrastructure event (or hang) counts as recovered by the round only when
+  that event's suite ran a recovery pass **and** that pass observed every
+  class the event names — a unit round never heals UI evidence, a UI round
+  never heals unit evidence, and work the round never re-ran stays
+  **persistent** and fails the run (repeat-lane events are never healed by
+  it: their own bounded retry decides them);
 * **a genuine assertion anywhere disqualifies the round entirely** — the
   projection refuses, so a product failure is never retried around;
 * if the same class comes back after the round, the gate fails as

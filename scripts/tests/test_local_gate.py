@@ -416,13 +416,27 @@ class RecoveryVerdictTests(unittest.TestCase):
                        batches=self.WEDGE_BATCHES)
         self._wedge_log(self.run_dir / "lanes" / "unit")
 
-    def test_recovered_retry_passes_overall(self):
-        """The wedge is recovered by one bounded round -> PASS, with the retry
-        recorded in the result document."""
-        self._primary(observed=("AlphaTests", "BetaTests"), cases=2)
+    def _faithful_unit_round(self):
+        """The real wedge sequence, faithfully shaped.
+
+        Batch 1 was refused before any of its classes produced results; the
+        continuation ran the batch the stopped lane never reached; the round
+        re-ran exactly the classes left without results - batch 1's own. The
+        round's evidence therefore covers the batch its event names, which is
+        what makes the event legitimately healed.
+        """
+        self._primary(observed=(), cases=0)
+        lane_artifacts(self.run_dir / "lanes" / "unit-continuation",
+                       status="pass", classes=("GammaTests",), cases=1)
         lane_artifacts(self.run_dir / "lanes" / "unit-recovery", status="pass",
-                       classes=("GammaTests",), cases=1)
+                       classes=("AlphaTests", "BetaTests"), cases=2)
         self._recovery_phase("pass")
+
+    def test_recovered_retry_passes_overall(self):
+        """Same-suite recovery that OBSERVED the wedged work item -> the event
+        is recovered by the round and the run PASSes, with the retry recorded
+        in the result document."""
+        self._faithful_unit_round()
         code, doc = self._summarize()
         self.assertEqual(code, 0, doc["problems"])
         self.assertEqual(doc["verdict"], "PASS")
@@ -440,11 +454,116 @@ class RecoveryVerdictTests(unittest.TestCase):
             infra["events"]["infrastructure_failures"][0]["recovered_by"],
             "gate recovery round")
         self.assertEqual(infra["retry_detail"][0]["name"], "round-1")
-        self.assertEqual(len(doc["unit"]["passes"]), 2)
+        self.assertEqual(len(doc["unit"]["passes"]), 3,
+                         "primary, continuation and recovery")
         # The round is recorded, never hidden: both the machine-readable
         # document and the human summary carry it.
         self.assertIn("recovered", self.human)
         self.assertIn("recovery", json.dumps(doc))
+
+    def test_a_round_that_never_reran_the_work_item_does_not_heal_it(self):
+        """Same-suite round runs, but does NOT observe the failing work item
+        -> FAIL.
+
+        The round re-ran Gamma (the class left without results) while the
+        wedged batch's own classes already had results, so the batch's event
+        names work the round never re-ran. Before the per-suite evidence
+        discipline it was stamped "healed" and this run passed on a round it
+        never earned.
+        """
+        self._primary(observed=("AlphaTests", "BetaTests"), cases=2)
+        lane_artifacts(self.run_dir / "lanes" / "unit-recovery", status="pass",
+                       classes=("GammaTests",), cases=1)
+        self._recovery_phase("pass")
+        code, doc = self._summarize()
+        unit_infra = [
+            e for e in doc["infrastructure"]["events"]["infrastructure_failures"]
+            if e.get("lane") == "unit"]
+        self.assertTrue(unit_infra, doc["infrastructure"]["events"])
+        self.assertFalse(
+            any(e.get("recovered_by") == "gate recovery round"
+                for e in unit_infra),
+            "the round may not claim work its own pass never observed")
+        self.assertEqual(doc["infrastructure"]["persistent"], 1)
+        self.assertEqual(code, 1, doc["problems"])
+        self.assertEqual(doc["verdict"], "FAIL")
+        self.assertTrue(any("persistent infrastructure" in p
+                            for p in doc["problems"]), doc["problems"])
+
+    def test_a_unit_recovery_never_heals_ui_infrastructure(self):
+        """Cross-suite: a unit round that healed the unit wedge must not touch
+        an unrelated UI event. The UI event's work was never re-run by
+        anything, so it stays persistent and the run FAILS."""
+        self._faithful_unit_round()
+        # The UI invocation was refused while the shard's class already had
+        # results (the wedge alternates per launch); nothing re-ran it.
+        lane_artifacts(self.run_dir / "lanes" / "ui", status="fail",
+                       classes=("LaunchUITests",), cases=3,
+                       failures=self.WEDGE_FAILURE,
+                       attempts=[{"mode": "batch", "n": 1, "class": "all",
+                                  "status": "test-failures"}],
+                       batches=[{"batch": 1, "classes": ["LaunchUITests"],
+                                 "timeout_s": 600, "status": "test-failures",
+                                 "attempts": [{"attempt": 1,
+                                               "status": "test-failures",
+                                               "seconds": 1.0,
+                                               "failures": 1}]}])
+        self._wedge_log(self.run_dir / "lanes" / "ui")
+        code, doc = self._summarize()
+        ui_infra = [
+            e for e in doc["infrastructure"]["events"]["infrastructure_failures"]
+            if e.get("lane") == "ui"]
+        self.assertTrue(ui_infra, doc["infrastructure"]["events"])
+        self.assertFalse(
+            any(e.get("recovered_by") == "gate recovery round"
+                for e in ui_infra),
+            "a unit recovery must never heal UI evidence")
+        self.assertTrue(any("persistent infrastructure" in p
+                            for p in doc["problems"]), doc["problems"])
+        self.assertEqual(code, 1, doc["problems"])
+        self.assertEqual(doc["verdict"], "FAIL")
+
+    def test_a_ui_recovery_never_heals_unit_infrastructure(self):
+        """Cross-suite, the mirror: a UI round that healed the UI wedge must
+        not touch an unrelated unit event - that event stays persistent."""
+        # The unit wedge's classes all had results; no unit round ran at all.
+        self._primary(observed=("AlphaTests", "BetaTests", "GammaTests"), cases=3)
+        # The UI shard was refused with no results, and the UI round re-ran it.
+        lane_artifacts(self.run_dir / "lanes" / "ui", status="fail",
+                       classes=(), cases=0, failures=self.WEDGE_FAILURE,
+                       attempts=[{"mode": "batch", "n": 1, "class": "all",
+                                  "status": "test-failures"}],
+                       batches=[{"batch": 1, "classes": ["LaunchUITests"],
+                                 "timeout_s": 600, "status": "test-failures",
+                                 "attempts": [{"attempt": 1,
+                                               "status": "test-failures",
+                                               "seconds": 1.0,
+                                               "failures": 1}]}])
+        self._wedge_log(self.run_dir / "lanes" / "ui")
+        lane_artifacts(self.run_dir / "lanes" / "ui-recovery", status="pass",
+                       classes=("LaunchUITests",), cases=3)
+        self._recovery_phase("pass")
+        code, doc = self._summarize()
+        unit_infra = [
+            e for e in doc["infrastructure"]["events"]["infrastructure_failures"]
+            if e.get("lane") == "unit"]
+        ui_infra = [
+            e for e in doc["infrastructure"]["events"]["infrastructure_failures"]
+            if e.get("lane") == "ui"]
+        self.assertTrue(unit_infra and ui_infra,
+                        doc["infrastructure"]["events"])
+        self.assertFalse(
+            any(e.get("recovered_by") == "gate recovery round"
+                for e in unit_infra),
+            "a UI recovery must never heal unit evidence")
+        self.assertTrue(
+            all(e.get("recovered_by") == "gate recovery round"
+                for e in ui_infra),
+            "the UI round healed its OWN wedge - that much is legitimate")
+        self.assertTrue(any("persistent infrastructure" in p
+                            for p in doc["problems"]), doc["problems"])
+        self.assertEqual(code, 1, doc["problems"])
+        self.assertEqual(doc["verdict"], "FAIL")
 
     def _watchdog_lane_with_partial_results(self):
         """Batch 1 [Alpha, Beta] hit its watchdog with Alpha's results
@@ -593,10 +712,7 @@ class RecoveryVerdictTests(unittest.TestCase):
         the run. Stamping them 'gate recovery round' would launder a
         repetition that never executed into a PASS.
         """
-        self._primary(observed=("AlphaTests", "BetaTests"), cases=2)
-        lane_artifacts(self.run_dir / "lanes" / "unit-recovery",
-                       status="pass", classes=("GammaTests",), cases=1)
-        self._recovery_phase("pass")
+        self._faithful_unit_round()
         meta = json.loads(
             (self.run_dir / "meta.json").read_text(encoding="utf-8"))
         meta["expected"]["repeat_classes"] = ["AlphaTests"]
@@ -770,7 +886,7 @@ class RecoveryVerdictTests(unittest.TestCase):
         stale when BOTH classes have results - and the coverage check has to
         split the name to see that (a whole-string match never would)."""
         lane_artifacts(self.run_dir / "lanes" / "unit", status="fail",
-                       classes=("AlphaTests",), cases=1,
+                       classes=(), cases=0,
                        failures=self.WEDGE_FAILURE,
                        attempts=[{"mode": "batch", "n": 1, "class": "all",
                                   "status": "test-failures"},
@@ -785,8 +901,13 @@ class RecoveryVerdictTests(unittest.TestCase):
                             "timeout_s": 500, "status": "not_run",
                             "attempts": []}])
         self._wedge_log(self.run_dir / "lanes" / "unit")
+        # The continuation ran the batch the stopped lane never reached; the
+        # round re-ran the batch 1 lost (so its event is healed too).
+        lane_artifacts(self.run_dir / "lanes" / "unit-continuation",
+                       status="pass", classes=("BetaTests", "GammaTests"),
+                       cases=2)
         lane_artifacts(self.run_dir / "lanes" / "unit-recovery", status="pass",
-                       classes=("BetaTests", "GammaTests"), cases=2)
+                       classes=("AlphaTests",), cases=1)
         self._recovery_phase("pass")
         code, doc = self._summarize()
         self.assertEqual(code, 0, doc["problems"])
@@ -946,11 +1067,24 @@ class UIRecoveryVerdictTests(unittest.TestCase):
             "schema_version": 1, "phase": "recovery", "status": "skipped",
             "duration_s": 0, "checks": []})
 
-    def _wedge_lane(self, lane_dir, classes=None):
+    def _wedge_lane(self, lane_dir, batch_classes=("LaunchUITests",
+                                                   "SettingsUITests")):
+        """A UI invocation the launcher refused, NAMING the work it lost.
+
+        The name is what the round's evidence is judged against: the event is
+        healed only when a UI recovery pass observed every class named here.
+        """
         lane_artifacts(lane_dir, status="fail", classes=(), cases=0,
-                       failures=self.WEDGE_FAILURE, batches=[],
-                       attempts=[{"mode": "class", "n": 1, "class": "any",
-                                  "status": "test-failures"}])
+                       failures=self.WEDGE_FAILURE,
+                       attempts=[{"mode": "batch", "n": 1, "class": "all",
+                                  "status": "test-failures"}],
+                       batches=[{"batch": 1,
+                                 "classes": list(batch_classes),
+                                 "timeout_s": 600, "status": "test-failures",
+                                 "attempts": [{"attempt": 1,
+                                               "status": "test-failures",
+                                               "seconds": 1.0,
+                                               "failures": 1}]}])
         logs = Path(lane_dir) / "logs"
         logs.mkdir(parents=True, exist_ok=True)
         (logs / "batch-a1.log").write_text(self.BUSY_LOG + chr(10),
@@ -1024,11 +1158,14 @@ class UIRecoveryVerdictTests(unittest.TestCase):
     def test_only_the_failed_subset_is_recovered_without_double_counting(self):
         self._round_ran()
         # The shard ran LaunchUITests but was refused before SettingsUITests
-        # produced results; the round retries only the incomplete class.
+        # produced results; the round retries only the incomplete class - and
+        # the event names exactly that class, which is what it must do for
+        # the round's own evidence to cover it.
         lane_artifacts(self.run_dir / "lanes" / "ui", status="fail",
                        classes=("LaunchUITests",), cases=1, batches=[],
                        failures=self.WEDGE_FAILURE,
-                       attempts=[{"mode": "class", "n": 1, "class": "any",
+                       attempts=[{"mode": "class", "n": 1,
+                                  "class": "SettingsUITests",
                                   "status": "test-failures"}])
         logs = self.run_dir / "lanes" / "ui" / "logs"
         logs.mkdir(parents=True, exist_ok=True)

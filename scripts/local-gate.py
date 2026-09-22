@@ -1138,6 +1138,41 @@ def _is_recovery_pass(name) -> bool:
     return base.startswith("unit-recovery") or base.startswith("ui-recovery")
 
 
+def _recovery_observations(unit_summary, ui_summary):
+    """Per-suite classes the gate's OWN recovery passes observed.
+
+    Returns ({suite: set of class names}, {suites that ran a recovery pass}).
+    The round is per suite: evidence one suite's pass produced must never heal
+    the other suite's records.
+    """
+    observed = {"unit": set(), "ui": set()}
+    ran = set()
+    for suite, summary in (("unit", unit_summary), ("ui", ui_summary)):
+        for lane_pass in (summary or {}).get("passes") or []:
+            if _is_recovery_pass(lane_pass.get("name")):
+                ran.add(suite)
+                observed[suite].update(lane_pass.get("observed_names") or [])
+    return observed, ran
+
+
+def _round_reran(entry, observed, ran) -> bool:
+    """True when the round's own passes re-ran the work `entry` names.
+
+    Shared by infrastructure events and hangs so the two healing paths cannot
+    drift: the entry's lane must be exactly unit or ui (a repeat lane is never
+    healed - its own bounded retry decides it), a recovery pass for THAT suite
+    must have run, and that pass's observations must cover every class the
+    entry names (a batch CSV counts only when all of its classes have
+    results). Work a suite's round never observed is not re-run work, and
+    calling it healed is what lets a must-FAIL run pass.
+    """
+    suite = str(entry.get("lane") or "")
+    if suite not in ("unit", "ui") or suite not in ran:
+        return False
+    return _classes_have_results(observed.get(suite) or set(),
+                                 str(entry.get("name") or ""))
+
+
 def _lane_pass_dirs(lanes_root, primary, extra, recovery_prefix):
     """The primary lane dir, an optional follow-up dir (the unit lane's
     continuation), and every recovery-pass dir - in execution order.
@@ -1725,48 +1760,40 @@ def cmd_summarize(args) -> int:
         # assigned classes - exactly what the round then ran), and
         # `unclassified`. The round only runs when work was left incomplete,
         # so complete coverage after it means that incomplete work was
-        # completed. A wedge INSIDE the round is still a FAIL - that decision
-        # comes from the passes' `is_launch_wedge` check, not from these
-        # counts. An entry the LANE's own retry already recovered keeps ITS
-        # healer: docs/CI.md splits recovered infrastructure by healer, and
-        # lane-runner-retry recovery stays fatal (only
-        # --allow-recovered-infrastructure downgrades it) - the round must
-        # not steal that provenance to make the run look clean.
+        # completed - and `_round_reran` below still requires the individual
+        # event's work to be among what the round observed. A wedge INSIDE the
+        # round is still a FAIL - that decision comes from the passes'
+        # `is_launch_wedge` check, not from these counts. An entry the LANE's
+        # own retry already recovered keeps ITS healer: docs/CI.md splits
+        # recovered infrastructure by healer, and lane-runner-retry recovery
+        # stays fatal (only --allow-recovered-infrastructure downgrades it) -
+        # the round must not steal that provenance to make the run look clean.
+        # Both healing paths share ONE evidence rule (`_round_reran`): the
+        # round heals an event only when the entry's SUITE ran a recovery pass
+        # AND that pass's own observations cover every class the entry names.
+        # A unit round never heals UI evidence and vice versa; an event whose
+        # work item the suite's round never observed stays PERSISTENT and
+        # fails the run. Repeat lanes are never healed (their own bounded
+        # retry decides), and an entry the LANE's retry already recovered
+        # keeps ITS healer.
+        recovery_observed, recovery_ran = _recovery_observations(unit_summary,
+                                                                 ui_summary)
         for entry in events["infrastructure_failures"]:
             if entry.get("recovered"):
                 continue
-            if str(entry.get("lane") or "") not in ("unit", "ui"):
-                # The round never re-runs a repetition (the repeat policy
-                # owns its one bounded retry), so repeat provenance must not
-                # be stolen: a double-wedged repetition stays PERSISTENT and
-                # fails the run instead of being stamped "healed".
+            if not _round_reran(entry, recovery_observed, recovery_ran):
                 continue
             entry["recovered"] = True
             entry["recovered_by"] = "gate recovery round"
-        # A timeout is healed only when the round's own passes observed every
-        # class the hang names: then the round really did re-run that exact
-        # work, so the hang's cause was retried and completed. A repeat
-        # iteration's hang is excluded outright (its `lane` is "repeat:..."):
-        # the round never re-runs a repetition, its own one bounded retry
-        # decides it, and attributing it to the round would be a lie in the
-        # report.
-        recovery_observed = set()
-        for summary in (unit_summary, ui_summary):
-            for lane_pass in summary.get("passes") or []:
-                if _is_recovery_pass(lane_pass.get("name")):
-                    recovery_observed.update(
-                        lane_pass.get("observed_names") or [])
         for entry in events["timeouts"]:
             if entry.get("recovered"):
                 # Already recovered by the lane's own retry: same provenance
                 # rule as infrastructure - it keeps its real healer.
                 continue
-            if str(entry.get("lane") or "") not in ("unit", "ui"):
+            if not _round_reran(entry, recovery_observed, recovery_ran):
                 continue
-            if _classes_have_results(recovery_observed,
-                                     str(entry.get("name") or "")):
-                entry["recovered"] = True
-                entry["recovered_by"] = "gate recovery round"
+            entry["recovered"] = True
+            entry["recovered_by"] = "gate recovery round"
     persistent_infra = [e for e in events["infrastructure_failures"]
                         if not e.get("recovered")]
     recovered_infra = [e for e in events["infrastructure_failures"]
