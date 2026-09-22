@@ -115,8 +115,11 @@ GATE_ROOT=""; RUN_DIR=""; WORKTREE_ROOT=""
 # The gate runs on its OWN simulator device, so that erasing it (part of both
 # the preparation and the bounded recovery round) can never touch a device a
 # developer is using. GATE_SIMULATOR_NAME picks the device name; --simulator
-# still overrides it for an operator who wants a specific one.
-SIMULATOR_NAME="${SIMULATOR_NAME:-${GATE_SIMULATOR_NAME:-Conduit CI Gate}}"
+# still overrides it for an operator who wants a specific one. An inherited
+# SIMULATOR_NAME is deliberately IGNORED: the hosted workflow exports one, and
+# naming a device the gate is free to erase is exactly what must never happen
+# to a developer's simulator.
+SIMULATOR_NAME="${GATE_SIMULATOR_NAME:-Conduit CI Gate}"
 REPEAT_CLASSES="$DEFAULT_REPEAT_CLASSES"
 REPEAT_ITERATIONS=3
 REPEAT_TIMEOUT_CAP=900
@@ -841,18 +844,19 @@ else
         . "$RUN_DIR/recovery.env"
         if [ "${GATE_RECOVERY_PRESENT:-0}" -eq 1 ] && [ -s "$RUN_DIR/recovery.tsv" ]; then
           echo "== recovery round 1 of 1: erasing the gate simulator and retrying ${GATE_RECOVERY_CLASS_COUNT} class(es) once =="
-          # ONE erase, then one invocation PER CLASS: a lane stops at the batch
-          # that fails, so a single multi-class invocation would let one wedged
-          # class eat the rest of the round. Per-class invocations keep the loss
-          # to one class - the same shape the repeat policy uses.
+          # ONE erase, then one invocation per CHUNK of at most 7 classes (the
+          # planner's resilient batch shape): a lane stops at the batch that
+          # fails, so one giant invocation would let its first wedged batch eat
+          # the round, while one invocation per class multiplies the per-launch
+          # wedge risk. Chunking keeps the loss at worst one chunk.
           simulator_prep recovery
-          while IFS=$'\t' read -r rcls rbatches rpredicted rtimeout; do
+          while IFS=$'\t' read -r rcls rclasses rbatches rpredicted rtimeout; do
             [ -z "$rcls" ] && continue
             rtimeout="${rtimeout%$'\r'}"
             rpredicted="${rpredicted%$'\r'}"
             rbatches="${rbatches%$'\r'}"
             if run_lane unit "$GATE_UNIT_LANE-recovery-$rcls" "$GATE_UNIT_TARGET" \
-                "$rcls" "$rpredicted" "$rtimeout" \
+                "$rclasses" "$rpredicted" "$rtimeout" \
                 "$RUN_DIR/lanes/unit-recovery-$rcls" \
                 --batches-json "$rbatches"; then
               echo "  recovery $rcls: recovered"
@@ -931,7 +935,7 @@ else
           if [ ! -s "$REPEAT_TSV" ]; then
             echo "local-ci-gate: the repeat policy projected no tasks" >&2
           fi
-          while IFS=$'\t' read -r rcls rbatches rpredicted rtimeout; do
+          while IFS=$'\t' read -r rcls rclasses rbatches rpredicted rtimeout; do
             [ -z "$rcls" ] && continue
             rtimeout="${rtimeout%$'\r'}"
             rpredicted="${rpredicted%$'\r'}"
@@ -939,7 +943,7 @@ else
             iteration=1
             while [ "$iteration" -le "$REPEAT_ITERATIONS" ]; do
               if run_lane unit "repeat-$rcls-$iteration" "$GATE_UNIT_TARGET" \
-                  "$rcls" "$rpredicted" "$rtimeout" \
+                  "$rclasses" "$rpredicted" "$rtimeout" \
                   "$RUN_DIR/repeats/$rcls/iter-$iteration" \
                   --batches-json "$rbatches"; then
                 echo "  $rcls iteration $iteration: pass"

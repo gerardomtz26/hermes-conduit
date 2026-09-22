@@ -518,8 +518,9 @@ def cmd_recovery_spec(args) -> int:
                   "predicted_s": round(sum(t["predicted_s"] for t in chunk), 1),
                   "timeout_s": int(sum(t["timeout_s"] for t in chunk))}],
                 separators=(",", ":"))
-            fh.write("{0}\t{1}\t{2}\t{3}\n".format(
-                "chunk-{0}".format(index), batches_json,
+            fh.write("{0}\t{1}\t{2}\t{3}\t{4}\n".format(
+                "chunk-{0}".format(index),
+                _csv(t["class"] for t in chunk), batches_json,
                 round(sum(t["predicted_s"] for t in chunk), 1),
                 int(sum(t["timeout_s"] for t in chunk))))
     print("recovery round ({0}): retrying {1} class(es) once in {2} chunk(s)".format(
