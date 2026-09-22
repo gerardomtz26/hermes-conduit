@@ -619,6 +619,9 @@ vocabulary came up empty.
   infrastructure failures: healed by the gate's round the run may pass with
   the caveat; healed by the lane runner's own retry they are fatal by
   default (the same `--allow-recovered-infrastructure` downgrade applies).
+  The gate's round never re-runs a repetition, so a hang inside the repeat
+  policy is decided by that policy's own one bounded retry; a hang neither
+  recovered stays fatal.
 * **not executed / not diagnosed** — work that never ran. Fails the gate:
   unexecuted tests may never masquerade as passed. Because a unit lane stops
   at the batch that failed, the gate then runs the batches it never reached as

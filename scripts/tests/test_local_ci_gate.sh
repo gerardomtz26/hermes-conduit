@@ -29,6 +29,12 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="$(cd "$HERE/.." && pwd)"
 WORK="$(mktemp -d)"
 STUBS="$WORK/stubs"
+# The gate's wedge-mitigation sleeps and bounded-poll cadence are wall-clock
+# behaviour for a REAL run; the stubs exit instantly, so scaling them to 0
+# keeps ~20 stubbed gate runs inside the hosted self-test job's ceiling.
+# Deadlines still come from `date`, so watchdog cases are unaffected - the
+# synthetic hang is Python time.sleep inside a fake script, not shell sleep.
+export GATE_SLEEP_SCALE=0
 mkdir -p "$STUBS"
 # CONDUIT_GATE_TEST_KEEP=1 leaves the throwaway fixture and its run directories
 # in place for inspection instead of deleting them on exit.

@@ -83,6 +83,12 @@ def lane_artifacts(lane_dir, *, status="pass", classes=("AlphaTests",),
     earlier write: tests that model a missing extraction must start from a
     directory without one, otherwise the fixture silently passes for the
     wrong reason.
+
+    Fixture hazard: `batches` defaults to a PASSING batch, whose attempt
+    chain appends `passed` onto whatever `attempts` says - a fixture that
+    passes failing `attempts` without matching `batches=` gets its status
+    laundered (the work item reads as recovered). Always pass both together
+    when modelling a failure.
     """
     lane_dir = Path(lane_dir)
     lane_dir.mkdir(parents=True, exist_ok=True)
@@ -640,10 +646,9 @@ class RecoveryVerdictTests(unittest.TestCase):
             any("persistent infrastructure" in p for p in doc["problems"]),
             doc["problems"])
 
-    def test_a_timeout_the_lane_retry_healed_is_still_fatal(self):
-        """A hang the LANE's own retry passed is recovered evidence with the
-        lane as its healer: fatal by default, exactly like infrastructure -
-        never a silent PASS with nothing recorded anywhere.
+    def _lane_retry_healed_hang(self):
+        """Batch 1's watchdog stalled and the lane runner's own same-batch
+        retry passed it - a hang recovered by the LANE, no round involved.
         """
         lane_artifacts(self.run_dir / "lanes" / "unit", status="pass",
                        classes=("AlphaTests", "BetaTests", "GammaTests"),
@@ -666,6 +671,13 @@ class RecoveryVerdictTests(unittest.TestCase):
                             "attempts": [{"attempt": 1, "status": "passed",
                                           "seconds": 1.0, "failures": 0}]},
                        ])
+
+    def test_a_timeout_the_lane_retry_healed_is_still_fatal(self):
+        """A hang the LANE's own retry passed is recovered evidence with the
+        lane as its healer: fatal by default, exactly like infrastructure -
+        never a silent PASS with nothing recorded anywhere.
+        """
+        self._lane_retry_healed_hang()
         code, doc = self._summarize()
         retry_msgs = [p for p in doc["problems"] if "bounded retry" in p]
         self.assertEqual(len(retry_msgs), 1, doc["problems"])
@@ -673,6 +685,25 @@ class RecoveryVerdictTests(unittest.TestCase):
                       retry_msgs[0])
         self.assertEqual(code, 1, doc["problems"])
         self.assertEqual(doc["verdict"], "FAIL")
+
+    def test_allow_recovered_downgrades_a_lane_retry_healed_hang(self):
+        """The flag's positive direction for hangs: the same lane-retry-
+        healed hang that is fatal by default becomes PASS, with the caveat
+        naming the downgrade it actually performed.
+        """
+        meta = json.loads(
+            (self.run_dir / "meta.json").read_text(encoding="utf-8"))
+        meta["allowed_recovered_infrastructure"] = True
+        write_json(self.run_dir / "meta.json", meta)
+        self._lane_retry_healed_hang()
+        code, doc = self._summarize()
+        self.assertEqual(code, 0, doc["problems"])
+        self.assertEqual(doc["verdict"], "PASS")
+        self.assertTrue(
+            any("--allow-recovered-infrastructure" in c
+                for c in doc["caveats"]),
+            "the downgrade must be recorded as a caveat: {0}".format(
+                doc["caveats"]))
 
     def test_recurrence_after_recovery_fails_as_infrastructure(self):
         """The same class comes back after the round -> FAIL (infrastructure),

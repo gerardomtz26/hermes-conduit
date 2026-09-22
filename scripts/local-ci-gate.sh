@@ -42,6 +42,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # jq is not required: every JSON-aware step goes through local-gate.py.
 # Homebrew tools (xcodegen) are not on the minimal non-interactive SSH PATH.
 export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+# Test knob: every wedge-mitigation sleep and bounded-poll cadence below is
+# wall-clock BEHAVIOUR for a real run (scale 1); the stubbed integration
+# suite scales it to 0 so ~20 stubbed gate runs fit the hosted self-test
+# job's ceiling. Deadlines are computed from `date`, never from sleep counts,
+# so watchdog budgets are unaffected by the scale.
+export GATE_SLEEP_SCALE="${GATE_SLEEP_SCALE:-1}"
 
 HELPER="$SCRIPT_DIR/local-gate.py"
 # Explicit default repeat classes: the settled-Markdown/dormancy and
@@ -377,7 +383,7 @@ run_bounded() { # $1=budget seconds $2=log path $3=working directory, rest=comma
       kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
       grace=5
       while [ "$grace" -gt 0 ] && kill -0 "$pid" 2>/dev/null; do
-        sleep 1
+        sleep $(( 1 * GATE_SLEEP_SCALE ))
         grace=$(( grace - 1 ))
       done
       kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
@@ -385,7 +391,7 @@ run_bounded() { # $1=budget seconds $2=log path $3=working directory, rest=comma
       echo "local-ci-gate: '$*' exceeded its ${budget}s budget" >&2
       return 124
     fi
-    sleep 1
+    sleep $(( 1 * GATE_SLEEP_SCALE ))
   done
   status=0
   wait "$pid" || status=$?
@@ -768,9 +774,9 @@ simulator_prime() { # $1 = label for the log files
   i=1
   while [ "$i" -le 2 ]; do
     run_bounded 60 "$RUN_DIR/sim-prime-$label-$i.launch.log" "$RUN_DIR"       xcrun simctl launch "$udid" com.milim.relay || true
-    sleep 2
+    sleep $(( 2 * GATE_SLEEP_SCALE ))
     run_bounded 60 "$RUN_DIR/sim-prime-$label-$i.term.log" "$RUN_DIR"       xcrun simctl terminate "$udid" com.milim.relay || true
-    sleep 2
+    sleep $(( 2 * GATE_SLEEP_SCALE ))
     i=$(( i + 1 ))
   done
 }
@@ -817,7 +823,7 @@ simulator_prep() { # $1 = label
               # at every lane boundary. ci-lib.sh is already sourced, so
               # bounded_run is available here.
               udid=$(simulator_udid) && bounded_run 60 xcrun simctl terminate "$udid" com.milim.relay
-              sleep 2' _ "$WT" "$SIM_ERASE" ) \
+              sleep $(( 2 * ${GATE_SLEEP_SCALE:-1} ))' _ "$WT" "$SIM_ERASE" ) \
       >"$log" 2>&1 || status=$?
   local elapsed=$(( $(date +%s) - started ))
   if [ "$status" -eq 0 ]; then

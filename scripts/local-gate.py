@@ -1791,6 +1791,9 @@ def cmd_summarize(args) -> int:
         e for e in recovered_timeouts
         if e.get("recovered_by") != "gate recovery round"]
     events["infrastructure_recovered_by_round"] = healed_by_round
+    events["timeouts_recovered_by_round"] = [
+        e for e in recovered_timeouts
+        if e.get("recovered_by") == "gate recovery round"]
     if events["assertion_failures"] or repeat_failures or unit_summary.get("failures") \
             or ui_summary.get("failures"):
         gate_problems.append("genuine XCTest assertion failures present ({0})".format(
@@ -1885,13 +1888,20 @@ def cmd_summarize(args) -> int:
             caveats.append("Simulator preparation failed before {0}".format(
                 entry.get("name")))
     if round_healed:
-        healed_by_round_n = len(healed_by_round) + sum(
+        healed_infra_n = len(healed_by_round)
+        healed_hangs_n = sum(
             1 for e in recovered_timeouts
             if e.get("recovered_by") == "gate recovery round")
+        healed_desc = " and ".join(
+            part for part in (
+                "{0} infrastructure failure(s)".format(healed_infra_n)
+                if healed_infra_n else "",
+                "{0} hang(s)".format(healed_hangs_n)
+                if healed_hangs_n else "") if part) or "0 evidence entries"
         caveats.append(
-            "the bounded recovery round healed {0} infrastructure "
-            "failure(s)/hang(s) after erasing the gate simulator; this run "
-            "is not an entirely clean one".format(healed_by_round_n))
+            "the bounded recovery round healed {0} after erasing the gate "
+            "simulator; this run is not an entirely clean one".format(
+                healed_desc))
     healed_repeats = [
         "{0}#{1}".format(entry["class"], iteration["iteration"])
         for entry in (repeat_entries or [])
