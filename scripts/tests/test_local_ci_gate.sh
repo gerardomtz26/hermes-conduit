@@ -318,7 +318,7 @@ run_gate() { # extra args...
   # xcodebuild exits instantly, and CI's own suite shrinks the cadence for
   # the same reason.
   PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 CONDUIT_PERF_TRACE=1 \
-    bash "$GATE" "$@" >"$RUN_LOG" 2>&1
+    bash "$GATE" --allow-another-run "$@" >"$RUN_LOG" 2>&1
 }
 
 new_run_dir() { printf '%s\n' "$WORK/run-$RANDOM-$RANDOM"; }
@@ -663,7 +663,7 @@ export FAKE_STATIC_SLEEP=30
 RUN10="$(new_run_dir)"
 STATUS_BEFORE_INTERRUPT="$(git -C "$WORK/repo" status --porcelain)"
 PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 \
-  bash "$GATE" --ref HEAD --gate-root "$WORK/gate" --run-dir "$RUN10" \
+  bash "$GATE" --allow-another-run --ref HEAD --gate-root "$WORK/gate" --run-dir "$RUN10" \
     --repeat-classes "" >"$WORK/interrupt.log" 2>&1 &
 INTERRUPTED_PID=$!
 sleep 3
@@ -707,7 +707,41 @@ unset FAKE_NO_GATE_DEVICE
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "--- case: only one gate at a time ---"
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: one authoritative full-gate invocation per requested SHA ---"
+# The gate is single-shot: after a verdict, another COMPLETE run for the same
+# SHA must be an explicit caller request. Nothing may restart it into "until
+# green" - and the tooling refuses rather than trusting whatever drives it.
+# (exit 2 is the policy refusal; 0/1 is a run that actually started, so these
+# assertions are structural and hold on every platform.)
+RUN12="$(new_run_dir)"
+FIRST_EXIT=0
+PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 CONDUIT_PERF_TRACE=1 bash "$GATE" --allow-another-run --ref HEAD --gate-root "$WORK/gate-policy" --run-dir "$RUN12" --repeat-classes "" >"$WORK/policy-first.log" 2>&1 || FIRST_EXIT=$?
+if [ "$FIRST_EXIT" -eq 2 ]; then
+  bad "the first full gate run for this SHA was refused"
+else
+  ok "the first full gate run for this SHA is allowed to start"
+fi
+RUN13="$(new_run_dir)"
+SECOND_EXIT=0
+PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 CONDUIT_PERF_TRACE=1 bash "$GATE" --ref HEAD --gate-root "$WORK/gate-policy" --run-dir "$RUN13" --repeat-classes "" >"$WORK/policy-second.log" 2>&1 || SECOND_EXIT=$?
+assert_eq "a second full gate run is refused (exit 2)" "$SECOND_EXIT" "2"
+assert_contains "the refusal states the policy" "$(cat "$WORK/policy-second.log")"   "one authoritative full-gate invocation per requested SHA"
+assert_contains "the refusal names the explicit escape" "$(cat "$WORK/policy-second.log")"   "--allow-another-run"
+assert_eq "the refused run started no work at all"   "$([ -d "$RUN13/lanes" ] && echo yes || echo no)" "no"
+RUN14="$(new_run_dir)"
+EXPLICIT_EXIT=0
+PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 CONDUIT_PERF_TRACE=1 bash "$GATE" --allow-another-run --ref HEAD --gate-root "$WORK/gate-policy" --run-dir "$RUN14" --repeat-classes "" >"$WORK/policy-third.log" 2>&1 || EXPLICIT_EXIT=$?
+if [ "$EXPLICIT_EXIT" -eq 2 ]; then
+  bad "--allow-another-run did not allow the explicitly requested run"
+else
+  ok "an explicitly requested second run is allowed to start"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: only one gate at a time ---"echo "--- case: only one gate at a time ---"
 mkdir -p "$WORK/gate/gate.lock"
 echo "$$" > "$WORK/gate/gate.lock/pid"
 RUN6="$(new_run_dir)"

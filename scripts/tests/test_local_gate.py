@@ -1424,6 +1424,28 @@ class ScriptContractTests(unittest.TestCase):
         self.assertIn("worktree add --detach", self.text)
         self.assertIn("worktree remove --force", self.text)
 
+    def test_the_gate_is_single_shot_and_never_restarts_itself(self):
+        """One authoritative full-gate invocation per requested SHA.
+
+        Whatever drives the gate must not be able to loop it into "until
+        green": the script never re-executes itself after a verdict, and a
+        second full run for a SHA that already has a result is refused unless
+        the caller explicitly asks for one.
+        """
+        self.assertIn("--allow-another-run", self.text)
+        self.assertIn("one authoritative full-gate invocation per requested SHA",
+                      self.text)
+        # No self-invocation and no self-re-exec anywhere in the RUNNABLE
+        # body (the usage banner legitimately names the script).
+        body = self.text.split("usage() {", 1)[-1].split("}", 1)[-1]
+        for forbidden in ('bash "$0"', "bash $0", "exec bash", 'exec "$0"',
+                          "local-ci-gate.sh", "while true"):
+            self.assertNotIn(forbidden, body,
+                             "the gate must be a single-shot program")
+        # The verdict path exits exactly once, at the end.
+        self.assertIn("exit 0", self.text)
+        self.assertIn("exit 1", self.text)
+
     def test_never_stashes_or_touches_the_invoking_tree(self):
         for forbidden in ("git stash", "git checkout", "git reset",
                           "worktree prune", "git clean"):

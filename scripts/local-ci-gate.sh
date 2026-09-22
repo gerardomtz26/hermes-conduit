@@ -73,6 +73,11 @@ Options:
                              $GATE_SIMULATOR_NAME or "Conduit CI Gate" - the
                              gate's OWN device, created if it does not exist,
                              which is what makes erasing it safe).
+  --allow-another-run        Explicitly request ANOTHER full gate run for a
+                             SHA that already has a result. Without this the
+                             gate refuses: one authoritative invocation per
+                             requested SHA, and the gate never restarts
+                             itself after a verdict.
   --no-simulator-prep        Skip the bounded Simulator preparation (shutdown,
                              erase, boot, wait for boot) that runs before each
                              lane. Preparation only: it never re-runs
@@ -128,6 +133,10 @@ KEEP_WORKTREE=0
 SKIP_STATIC=0
 USE_LOCK=1
 
+# One authoritative full-gate invocation per requested SHA: another full run
+# must be an EXPLICIT caller request, never an automatic restart. The gate is
+# a single-shot program - it never re-executes itself after a verdict.
+ALLOW_ANOTHER_RUN=0
 SIM_PREP=1
 # 1 = erase the destination before booting it (see simulator_prep: the A/B
 # probe on this machine showed erase is what clears the launch-refusal wedge).
@@ -144,6 +153,7 @@ while [ $# -gt 0 ]; do
     --run-dir) RUN_DIR="$2"; shift 2 ;;
     --worktree-root) WORKTREE_ROOT="$2"; shift 2 ;;
     --simulator) SIMULATOR_NAME="$2"; shift 2 ;;
+    --allow-another-run) ALLOW_ANOTHER_RUN=1; shift ;;
     --no-simulator-prep) SIM_PREP=0; shift ;;
     --no-simulator-erase) SIM_ERASE=0; shift ;;
     --repeat-classes) REPEAT_CLASSES="$2"; shift 2 ;;
@@ -395,6 +405,22 @@ mkdir -p "$WORKTREE_ROOT"
 # A reused run directory would let a previous run's plan projection or lane
 # artifacts be read back as this run's evidence. Refuse it instead of
 # producing a result assembled from two different runs.
+# One authoritative full-gate invocation per requested SHA. A second full run
+# is a caller decision, never an automatic restart: the gate itself is
+# single-shot and must not be looped into "until green" by whatever drives it.
+# The record lives under the gate ROOT (not the run dir), so it holds however
+# the run's artifacts were laid out (--run-dir included).
+SHA_REGISTRY_DIR="$GATE_ROOT/sha-results"
+SHA_REGISTRY="$SHA_REGISTRY_DIR/$SHA12.log"
+if [ -s "$SHA_REGISTRY" ] && [ "$ALLOW_ANOTHER_RUN" -ne 1 ]; then
+  echo "local-ci-gate: a full gate result already exists for $SHA:" >&2
+  sed 's/^/  /' "$SHA_REGISTRY" >&2
+  echo "local-ci-gate: one authoritative full-gate invocation per requested SHA." >&2
+  echo "local-ci-gate: if you really want another full run, request it explicitly with --allow-another-run" >&2
+  exit 2
+fi
+mkdir -p "$SHA_REGISTRY_DIR"
+
 if [ -d "$RUN_DIR" ] && [ -n "$(ls -A "$RUN_DIR" 2>/dev/null)" ]; then
   echo "local-ci-gate: run directory $RUN_DIR already exists and is not empty; choose another --run-dir" >&2
   exit 2
@@ -1050,6 +1076,9 @@ if python3 "$HELPER" summarize --run-dir "$RUN_DIR" \
     --out "$RUN_DIR/gate-result.json" --markdown "$RUN_DIR/summary.md"; then
   VERDICT=0
 fi
+
+printf '%s	%s	%s	%s
+' "$(now_iso)" "$RUN_DIR" "${VERDICT}" "$SHA" >> "$SHA_REGISTRY" 2>/dev/null || true
 
 echo ""
 echo "tested SHA : $SHA"
