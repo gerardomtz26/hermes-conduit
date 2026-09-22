@@ -497,13 +497,13 @@ def cmd_recovery_spec(args) -> int:
     write_env(args.out, env)
     tsv = args.tsv_out or (os.path.splitext(args.out)[0] + ".tsv")
     # TSV the shell loops over: ONE retry invocation for the whole retry set,
-    # in ONE batch. The
-    # verified wedge on this machine alternates across app launches (every
-    # other launch is refused, regardless of terminate/uninstall/erase between
-    # them - see docs/CI.md), so the round minimises the number of launches:
-    # a single launch gives the retry its one chance, and a refusal of it fails
-    # the gate as infrastructure with no third attempt. Chunking into many
-    # launches would make a clean round impossible at the observed rate.
+    # in ONE batch. The verified wedge on this machine alternates across app
+    # launches (every other launch is refused, regardless of
+    # terminate/uninstall/erase between them - see docs/CI.md), so the round
+    # minimises the number of launches: a single launch gives the retry its
+    # one chance, and a refusal of it fails the gate as infrastructure with no
+    # third attempt. Chunking into many launches would make a clean round
+    # impossible at the observed rate.
     batches_json = json.dumps(
         [{"classes": [t["class"] for t in tasks],
           "predicted_s": round(sum(t["predicted_s"] for t in tasks), 1),
@@ -1719,15 +1719,22 @@ def cmd_summarize(args) -> int:
     # unexecuted; healing that hang would flip a must-FAIL run into PASS on
     # coverage the round never produced.
     if round_healed:
-        # Every infrastructure token a pass can record is healed when the
-        # round left the run COMPLETE: `test-runner-failure` (the launch
-        # refusal), `incomplete` (a shard whose result was missing assigned
-        # classes - exactly what the round then ran), and `unclassified`. The
-        # round only runs when work was left incomplete, so complete coverage
-        # after it means that incomplete work was completed. A wedge INSIDE the
-        # round is still a FAIL - that decision comes from the passes'
-        # `is_launch_wedge` check, not from these counts.
+        # Every PERSISTENT infrastructure token a pass can record is healed
+        # when the round left the run COMPLETE: `test-runner-failure` (the
+        # launch refusal), `incomplete` (a shard whose result was missing
+        # assigned classes - exactly what the round then ran), and
+        # `unclassified`. The round only runs when work was left incomplete,
+        # so complete coverage after it means that incomplete work was
+        # completed. A wedge INSIDE the round is still a FAIL - that decision
+        # comes from the passes' `is_launch_wedge` check, not from these
+        # counts. An entry the LANE's own retry already recovered keeps ITS
+        # healer: docs/CI.md splits recovered infrastructure by healer, and
+        # lane-runner-retry recovery stays fatal (only
+        # --allow-recovered-infrastructure downgrades it) - the round must
+        # not steal that provenance to make the run look clean.
         for entry in events["infrastructure_failures"]:
+            if entry.get("recovered"):
+                continue
             entry["recovered"] = True
             entry["recovered_by"] = "gate recovery round"
         # A timeout is healed only when the round's own passes observed every
@@ -1744,6 +1751,10 @@ def cmd_summarize(args) -> int:
                     recovery_observed.update(
                         lane_pass.get("observed_names") or [])
         for entry in events["timeouts"]:
+            if entry.get("recovered"):
+                # Already recovered by the lane's own retry: same provenance
+                # rule as infrastructure - it keeps its real healer.
+                continue
             if str(entry.get("lane") or "") not in ("unit", "ui"):
                 continue
             if _classes_have_results(recovery_observed,
@@ -1766,9 +1777,6 @@ def cmd_summarize(args) -> int:
     recovered_without_healing = [e for e in recovered_infra
                                  if e.get("recovered_by") != "gate recovery round"]
     events["infrastructure_recovered_by_round"] = healed_by_round
-    recovered_evidence = (recovered_without_healing + recovered_timeouts +
-                         events["infrastructure_recovered_classes"])
-
     if events["assertion_failures"] or repeat_failures or unit_summary.get("failures") \
             or ui_summary.get("failures"):
         gate_problems.append("genuine XCTest assertion failures present ({0})".format(
@@ -1788,13 +1796,21 @@ def cmd_summarize(args) -> int:
             "({0} infra, {1} timeout)".format(len(persistent_infra),
                                               len(persistent_timeouts)))
     if recovered_without_healing and not allow_recovered:
+        # Only a timeout the LANE's own retry healed belongs in this message:
+        # one the gate's round healed was healed by the round, and telling the
+        # operator to rerun evidence the round already recovered is a
+        # misattribution.
+        lane_retry_timeouts = [
+            e for e in recovered_timeouts
+            if e.get("recovered_by") != "gate recovery round"]
         gate_problems.append(
             "infrastructure failures were recovered by a bounded retry"
             " ({0} infra, {1} timeout: {2}); the run is not trustworthy "
             "evidence - rerun the gate".format(
-                len(recovered_without_healing), len(recovered_timeouts),
+                len(recovered_without_healing), len(lane_retry_timeouts),
                 _csv(sorted({e["name"] for e in
-                             recovered_without_healing + recovered_timeouts}))))
+                             recovered_without_healing +
+                             lane_retry_timeouts}))))
     # The lane runner also labels recovered classes directly. That label is
     # the same recovery seen through a second lens, so it is never ADDED to
     # the count - but a label the attempt chain cannot account for means the
@@ -1828,7 +1844,12 @@ def cmd_summarize(args) -> int:
     # result is cited from, not only in meta.json: a PASS whose environment
     # was degraded is not the same evidence as a clean one.
     caveats = []
-    if allow_recovered and recovered_evidence:
+    # Only claim a downgrade the flag actually PERFORMED: evidence the
+    # recovery round healed left the verdict PASS without the flag, so the
+    # caveat would describe a downgrade that never happened. The flag flips
+    # exactly two problems - the lane-retry one above and an unaccounted
+    # runner label - so those are the conditions.
+    if allow_recovered and (recovered_without_healing or unaccounted):
         caveats.append("--allow-recovered-infrastructure downgraded recovered "
                        "infrastructure from FAIL to this verdict")
     sim_record = meta.get("simulator") or {}

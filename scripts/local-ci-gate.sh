@@ -930,10 +930,9 @@ else
             rtimeout="${rtimeout%$'\r'}"
             rpredicted="${rpredicted%$'\r'}"
             rbatches="${rbatches%$'\r'}"
-            # A freshly erased device per chunk: the wedge is STICKY across
-            # launches (only an erase clears it - see the A/B probe in
-            # simulator_prep), and each piece of work is still retried
-            # exactly once.
+            # A freshly erased device for the retry set: the wedge is STICKY
+            # across launches (only an erase clears it - see the A/B probe in
+            # simulator_prep), and the set is still retried exactly once.
             simulator_prep "recovery-$rcls"
             simulator_prime "recovery-$rcls"
             if run_lane unit "$GATE_UNIT_LANE-recovery-$rcls" "$GATE_UNIT_TARGET" \

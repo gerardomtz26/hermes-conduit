@@ -511,6 +511,76 @@ class RecoveryVerdictTests(unittest.TestCase):
         self.assertEqual(code, 0, doc["problems"])
         self.assertEqual(doc["verdict"], "PASS")
 
+    def test_the_rerun_message_counts_only_lane_retry_timeouts(self):
+        """The "recovered by a bounded retry" problem must not attribute the
+        ROUND's healed hang to the lane retry: the message tells the operator
+        to rerun, and a hang the round already healed has no business in it.
+        """
+        # Primary: batch 1 hung with Alpha's results already written, and
+        # batch 2 recovered by the runner's OWN same-batch retry - a
+        # classifier-recovered INFRA event whose healer is nobody (no
+        # `recovered_by`), which is what triggers the message.
+        lane_artifacts(self.run_dir / "lanes" / "unit", status="fail",
+                       classes=("AlphaTests", "GammaTests"), cases=2,
+                       attempts=[{"mode": "batch", "n": 1, "class": "all",
+                                  "status": "timeout"},
+                                 {"mode": "batch", "n": 2, "class": "all",
+                                  "status": "infra-error"},
+                                 {"mode": "batch-retry", "n": 2,
+                                  "class": "all", "status": "passed"}],
+                       batches=[
+                           {"batch": 1, "classes": ["AlphaTests", "BetaTests"],
+                            "timeout_s": 600, "status": "timeout",
+                            "attempts": [{"attempt": 1, "status": "timeout",
+                                          "seconds": 600.0, "failures": 0}]},
+                           {"batch": 2, "classes": ["GammaTests"],
+                            "timeout_s": 500, "status": "pass",
+                            "attempts": [{"attempt": 1,
+                                          "status": "infra-error",
+                                          "seconds": 1.0, "failures": 0},
+                                         {"attempt": 2, "status": "passed",
+                                          "seconds": 1.0, "failures": 0}]},
+                       ])
+        self._wedge_log(self.run_dir / "lanes" / "unit")
+        # The round re-ran EVERY class the hang names -> healed by the round.
+        lane_artifacts(self.run_dir / "lanes" / "unit-recovery",
+                       status="pass",
+                       classes=("AlphaTests", "BetaTests"), cases=2)
+        self._recovery_phase("pass")
+        code, doc = self._summarize()
+        retry_msgs = [p for p in doc["problems"] if "bounded retry" in p]
+        self.assertEqual(len(retry_msgs), 1, doc["problems"])
+        self.assertIn("(1 infra, 0 timeout: GammaTests)", retry_msgs[0],
+                      "the message counts only the LANE-retry evidence, not "
+                      "the hang the gate's round healed")
+        self.assertNotIn("AlphaTests", retry_msgs[0])
+        self.assertEqual(code, 1, doc["problems"])
+
+    def test_allow_recovered_does_not_claim_a_downgrade_it_did_not_perform(self):
+        """With ONLY round-healed evidence present the flag changed nothing:
+        the verdict was already PASS, so its caveat would describe a
+        downgrade that never happened.
+        """
+        meta = json.loads(
+            (self.run_dir / "meta.json").read_text(encoding="utf-8"))
+        meta["allowed_recovered_infrastructure"] = True
+        write_json(self.run_dir / "meta.json", meta)
+        self._watchdog_lane_with_partial_results()
+        lane_artifacts(self.run_dir / "lanes" / "unit-continuation",
+                       status="pass", classes=("GammaTests",), cases=1)
+        lane_artifacts(self.run_dir / "lanes" / "unit-recovery",
+                       status="pass",
+                       classes=("AlphaTests", "BetaTests"), cases=2)
+        self._recovery_phase("pass")
+        code, doc = self._summarize()
+        self.assertEqual(code, 0, doc["problems"])
+        self.assertEqual(doc["verdict"], "PASS")
+        self.assertFalse(
+            any("--allow-recovered-infrastructure" in c
+                for c in doc["caveats"]),
+            "the flag downgraded nothing here, so it must not claim to have: "
+            "{0}".format(doc["caveats"]))
+
     def test_recurrence_after_recovery_fails_as_infrastructure(self):
         """The same class comes back after the round -> FAIL (infrastructure),
         and no third attempt is made."""
