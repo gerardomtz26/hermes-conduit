@@ -869,7 +869,11 @@ else
             rtimeout="${rtimeout%$'\r'}"
             rpredicted="${rpredicted%$'\r'}"
             rbatches="${rbatches%$'\r'}"
-            simulator_settle
+            # A freshly erased device per chunk: the wedge is STICKY across
+            # launches (only an erase clears it - see the A/B probe in
+            # simulator_prep), and each piece of work is still retried
+            # exactly once.
+            simulator_prep "recovery-$rcls"
             if run_lane unit "$GATE_UNIT_LANE-recovery-$rcls" "$GATE_UNIT_TARGET" \
                 "$rclasses" "$rpredicted" "$rtimeout" \
                 "$RUN_DIR/lanes/unit-recovery-$rcls" \
@@ -912,7 +916,7 @@ else
           if [ "${GATE_RECOVERY_PRESENT:-0}" -eq 1 ]; then
             echo "== recovery round 1 of 1 (UI): erasing the gate simulator and retrying ${GATE_RECOVERY_CLASS_COUNT} class(es) once =="
             simulator_prep ui-recovery
-            simulator_settle
+            simulator_prep "ui-recovery"
             if run_lane ui "$GATE_UI_LANE-recovery" "$GATE_UI_TARGET" \
                 "$GATE_RECOVERY_CLASSES" 0 "$GATE_RECOVERY_TIMEOUT" \
                 "$RUN_DIR/lanes/ui-recovery" \
