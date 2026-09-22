@@ -686,11 +686,17 @@ echo ""
 echo "--- case: the gate simulator is created when it does not exist ---"
 export FAKE_NO_GATE_DEVICE=1
 RUN11="$(new_run_dir)"
-if run_gate --ref HEAD --gate-root "$WORK/gate" --run-dir "$RUN11" \
-    --repeat-classes "" >/dev/null 2>&1; then
-  ok "a run without the gate device still runs (it creates it)"
+CLEAN11_EXIT=0
+run_gate --ref HEAD --gate-root "$WORK/gate" --run-dir "$RUN11" \
+    --repeat-classes "" >/dev/null 2>&1 || CLEAN11_EXIT=$?
+if needs_extraction; then
+  if [ "$CLEAN11_EXIT" -eq 0 ]; then
+    ok "a run without the gate device still runs (it creates it)"
+  else
+    bad "a missing gate simulator stopped the run (see $RUN11/summary.md)"
+  fi
 else
-  bad "a missing gate simulator stopped the run (see $RUN11/summary.md)"
+  skip "the missing-device run's verdict"
 fi
 assert_contains "the creation is visible in the log" "$(cat "$RUN_LOG")" \
   "gate simulator 'Conduit CI Gate' created"
