@@ -935,7 +935,7 @@ else
           if [ ! -s "$REPEAT_TSV" ]; then
             echo "local-ci-gate: the repeat policy projected no tasks" >&2
           fi
-          while IFS=$'\t' read -r rcls rclasses rbatches rpredicted rtimeout; do
+          while IFS=$'\t' read -r rcls rbatches rpredicted rtimeout; do
             [ -z "$rcls" ] && continue
             rtimeout="${rtimeout%$'\r'}"
             rpredicted="${rpredicted%$'\r'}"
@@ -943,7 +943,7 @@ else
             iteration=1
             while [ "$iteration" -le "$REPEAT_ITERATIONS" ]; do
               if run_lane unit "repeat-$rcls-$iteration" "$GATE_UNIT_TARGET" \
-                  "$rclasses" "$rpredicted" "$rtimeout" \
+                  "$rcls" "$rpredicted" "$rtimeout" \
                   "$RUN_DIR/repeats/$rcls/iter-$iteration" \
                   --batches-json "$rbatches"; then
                 echo "  $rcls iteration $iteration: pass"
