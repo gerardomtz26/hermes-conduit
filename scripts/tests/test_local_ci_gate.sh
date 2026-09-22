@@ -624,7 +624,7 @@ else
   skip "wedge recovery outcome (verdict and classification)"
 fi
 assert_eq "the recovery passes exist (one per class)" \
-  "$(ls -d "$RUN8"/lanes/unit-recovery-* 2>/dev/null | wc -l | tr -d ' ')" "15"
+  "$(ls -d "$RUN8"/lanes/unit-recovery-* 2>/dev/null | wc -l | tr -d ' ')" "3"
 assert_eq "the gate ran on its own simulator device" \
   "$(json_get "$GATE8" 'doc["simulator"]["name"]')" "Conduit CI Gate"
 assert_contains "the recovery is recorded, not hidden" \

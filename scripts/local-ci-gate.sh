@@ -736,7 +736,9 @@ simulator_prep() { # $1 = label
   local started status=0
   started=$(date +%s)
   ( cd "$WT" && LOG_DIR="$RUN_DIR/sim-prep" SIMULATOR_NAME="$SIMULATOR_NAME" \
-      bash -c '. "$1/scripts/ci-lib.sh"; reset_and_boot_simulator "$2"' _ "$WT" "$SIM_ERASE" ) \
+      bash -c '. "$1/scripts/ci-lib.sh"; reset_and_boot_simulator "$2" || exit 1
+              udid=$(simulator_udid) && xcrun simctl terminate "$udid" com.milim.relay >/dev/null 2>&1
+              sleep 2' _ "$WT" "$SIM_ERASE" ) \
       >"$log" 2>&1 || status=$?
   local elapsed=$(( $(date +%s) - started ))
   if [ "$status" -eq 0 ]; then

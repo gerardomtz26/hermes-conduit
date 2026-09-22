@@ -501,18 +501,29 @@ def cmd_recovery_spec(args) -> int:
     # invocation keeps the loss to one class (the same shape the repeat policy
     # uses for exactly this reason).
     tsv = args.tsv_out or (os.path.splitext(args.out)[0] + ".tsv")
+    # The round runs in CHUNKS of at most 7 classes (the planner's own
+    # MAX_UNIT_CLASSES_PER_XCODEBUILD_BATCH shape, which is the resilient one:
+    # PR #184's sequential small-batch finding), one xcodebuild invocation per
+    # chunk. Per-class invocations would mean one launch per class - and the
+    # wedge is a per-launch risk, so that multiplies the odds of losing a
+    # class - while one giant invocation would let its first wedged batch eat
+    # everything. Chunking keeps the loss at worst one chunk, and the launches
+    # few.
+    chunk_size = 7
+    chunks = [tasks[i:i + chunk_size] for i in range(0, len(tasks), chunk_size)]
     with open(tsv, "w", encoding="utf-8", newline="\n") as fh:
-        for task in tasks:
+        for index, chunk in enumerate(chunks, start=1):
             batches_json = json.dumps(
-                [{"classes": [task["class"]],
-                  "predicted_s": task["predicted_s"],
-                  "timeout_s": task["timeout_s"]}],
+                [{"classes": [t["class"] for t in chunk],
+                  "predicted_s": round(sum(t["predicted_s"] for t in chunk), 1),
+                  "timeout_s": int(sum(t["timeout_s"] for t in chunk))}],
                 separators=(",", ":"))
             fh.write("{0}\t{1}\t{2}\t{3}\n".format(
-                task["class"], batches_json, task["predicted_s"],
-                task["timeout_s"]))
-    print("recovery round ({0}): retrying {1} class(es) once".format(
-        kind, len(tasks)))
+                "chunk-{0}".format(index), batches_json,
+                round(sum(t["predicted_s"] for t in chunk), 1),
+                int(sum(t["timeout_s"] for t in chunk))))
+    print("recovery round ({0}): retrying {1} class(es) once in {2} chunk(s)".format(
+        kind, len(tasks), len(chunks)))
     return 0
 
 
