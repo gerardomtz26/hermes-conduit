@@ -355,15 +355,23 @@ run_bounded() { # $1=budget seconds $2=log path $3=working directory, rest=comma
   shift 3
   local pid status deadline grace
   mkdir -p "$(dirname "$log")"
+  # Job control puts this one background job into its OWN process group - the
+  # idiom ci-lib.sh's run_with_deadline uses for the same reason. Without it a
+  # non-interactive bash leaves the child in the SCRIPT's group, so
+  # `kill -- -$pid` targets a group that does not exist, fails silently, and
+  # only the direct child dies while a grandchild keeps the Simulator busy
+  # after the budget expired.
+  set -m
   ( cd "$cwd" && exec "$@" ) >"$log" 2>&1 &
   pid=$!
+  set +m
   deadline=$(( $(date +%s) + budget ))
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$(date +%s)" -ge "$deadline" ]; then
-      # Kill the GROUP, not just the wrapper: the command runs through a
-      # subshell that execs a shell running xcrun, so a TERM to the pid
-      # alone leaves a grandchild holding the simulator after the budget
-      # expired (or after an interrupt).
+      # Kill the job's GROUP (set -m above made the child its leader) so
+      # grandchildren spawned by the command go too: a TERM to $pid alone
+      # would leave them holding the Simulator after the budget expired or
+      # after an interrupt.
       kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
       grace=5
       while [ "$grace" -gt 0 ] && kill -0 "$pid" 2>/dev/null; do
@@ -802,7 +810,11 @@ simulator_prep() { # $1 = label
   started=$(date +%s)
   ( cd "$WT" && LOG_DIR="$RUN_DIR/sim-prep" SIMULATOR_NAME="$SIMULATOR_NAME" \
       bash -c '. "$1/scripts/ci-lib.sh"; reset_and_boot_simulator "$2" || exit 1
-              udid=$(simulator_udid) && xcrun simctl terminate "$udid" com.milim.relay >/dev/null 2>&1
+              # Bounded like every other simctl call: a wedged
+              # CoreSimulatorService hangs simctl indefinitely, and this runs
+              # at every lane boundary. ci-lib.sh is already sourced, so
+              # bounded_run is available here.
+              udid=$(simulator_udid) && bounded_run 60 xcrun simctl terminate "$udid" com.milim.relay
               sleep 2' _ "$WT" "$SIM_ERASE" ) \
       >"$log" 2>&1 || status=$?
   local elapsed=$(( $(date +%s) - started ))
@@ -1025,7 +1037,7 @@ else
                 # failing test is final and is never re-run.
                 if python3 "$HELPER" is-infra-only \
                     --lane-dir "$RUN_DIR/repeats/$rcls/iter-$iteration"; then
-                  simulator_prime
+                  simulator_prime "$rcls-$iteration-retry"
                   if run_lane unit "repeat-$rcls-$iteration-retry" \
                       "$GATE_UNIT_TARGET" "$rcls" "$rpredicted" "$rtimeout" \
                       "$RUN_DIR/repeats/$rcls/iter-$iteration-retry" \
@@ -1087,8 +1099,12 @@ if python3 "$HELPER" summarize --run-dir "$RUN_DIR" \
   VERDICT=0
 fi
 
-printf '%s	%s	%s	%s
-' "$(now_iso)" "$RUN_DIR" "${VERDICT}" "$SHA" >> "$SHA_REGISTRY" 2>/dev/null || true
+# Record the result in the per-SHA registry (exit 2 is how a later run is
+# refused unless it was explicitly requested); a failed append must not be
+# silent, because it re-arms the SHA for another full run.
+printf '%s\t%s\t%s\t%s\n' "$(now_iso)" "$RUN_DIR" "${VERDICT}" "$SHA" \
+  >> "$SHA_REGISTRY" 2>/dev/null \
+  || echo "local-ci-gate: warning: could not record this result in the SHA registry; it lives at $RUN_DIR/gate-result.json" >&2
 
 echo ""
 echo "tested SHA : $SHA"

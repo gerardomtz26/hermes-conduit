@@ -796,6 +796,35 @@ else
 fi
 unset FAKE_UI_BATCH
 
+echo ""
+echo "--- case: the repeat policy runs even when the unit lane failed ---"
+# docs/CI.md: "Runs even when the unit or UI lane failed, so one red lane
+# cannot hide the rest." A regression that nested the repeat block inside the
+# lane-success branch would pass every other case while silently dropping the
+# policy on exactly the runs that matter.
+export FAKE_UNIT_B1_A1=fail
+RUN18="$(new_run_dir)"
+run_gate --ref HEAD --gate-root "$WORK/gate-artifacts" --run-dir "$RUN18"     --repeat-classes AlphaTests --repeat-iterations 1 >/dev/null 2>&1 || true
+GATE18="$RUN18/gate-result.json"
+if needs_extraction; then
+  assert_eq "the repetition still executed despite the failed lane"     "$(json_get "$GATE18" 'len(doc["focused_repeats"]["classes"][0]["iterations"])')" "1"
+else
+  skip "repeat-after-failed-lane (needs a readable result bundle)"
+fi
+assert_eq "the repeat artifacts exist regardless of the lane result"   "$([ -d "$RUN18/repeats" ] && echo yes || echo no)" "yes"
+unset FAKE_UNIT_B1_A1
+
+echo ""
+echo "--- case: the repeat policy is skipped when the build fails ---"
+# docs/CI.md: "skipped when the build failed (no test products)". No plan and
+# no products means there is nothing to repeat against.
+export FAKE_BUILD_FAIL=1
+RUN19="$(new_run_dir)"
+run_gate --ref HEAD --gate-root "$WORK/gate-artifacts" --run-dir "$RUN19"     --repeat-classes AlphaTests --repeat-iterations 1 >/dev/null 2>&1 || true
+assert_eq "no repeat artifacts when there are no test products"   "$([ -d "$RUN19/repeats" ] && echo yes || echo no)" "no"
+assert_eq "the run still produced its three artifacts"   "$([ -f "$RUN19/gate-result.json" ] && echo yes || echo no)" "yes"
+unset FAKE_BUILD_FAIL
+
 echo "--- case: one authoritative full-gate invocation per requested SHA ---"
 # The gate is single-shot: after a verdict, another COMPLETE run for the same
 # SHA must be an explicit caller request. Nothing may restart it into "until

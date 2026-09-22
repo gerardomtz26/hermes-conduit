@@ -1515,6 +1515,15 @@ def _repeat_problems(entry, iterations: int):
                     label, attempt.get("attempt")))
         if not iteration.get("attempts"):
             problems.append("{0}: never executed".format(label))
+        if (str(iteration.get("status")) not in ("pass", "skipped")
+                and not iteration.get("genuine_failure")
+                and not iteration.get("infrastructure_failures")
+                and not iteration.get("timeouts")
+                and not iteration.get("not_executed")
+                and not iteration.get("assertion_failures")):
+            problems.append(
+                "{0}: lane verdict is {1!r} with no classifiable event".format(
+                    label, iteration.get("status")))
         if iteration.get("assertion_retried_until_green"):
             problems.append(
                 "{0}: genuine assertions were retried and then passed".format(label))
@@ -1576,9 +1585,8 @@ def cmd_summarize(args) -> int:
     phases["recovery"] = recovery_doc if recovery_doc else {
         "phase": "recovery", "status": recovery_status, "duration_s": 0,
         "checks": []}
-    recovery_rounds = sum(
-        1 for c in (phases["recovery"].get("checks") or [])
-        if str(c.get("status")) in ("pass", "fail"))
+    # (the number of recovery rounds that actually ran is counted from the
+    # passes themselves - see infrastructure.retries below)
 
     # --- lanes ------------------------------------------------------------
     # UNIT and UI use the same collection: the primary lane, the unit lane's
@@ -1827,6 +1835,17 @@ def cmd_summarize(args) -> int:
             "the bounded recovery round healed {0} simulator test-runner launch "
             "failure(s) after erasing the gate simulator; this run is not an "
             "entirely clean one".format(runner_failures))
+    healed_repeats = [
+        "{0}#{1}".format(entry["class"], iteration["iteration"])
+        for entry in (repeat_entries or [])
+        for iteration in entry.get("iterations") or []
+        if iteration.get("satisfied") and
+        _int_or_zero(iteration.get("attempts_count")) > 1]
+    if healed_repeats:
+        caveats.append(
+            "the repeat policy used its one retry on {0} repetition(s) lost to "
+            "the simulator launch wedge ({1})".format(
+                len(healed_repeats), _csv(healed_repeats)))
     if unit_summary.get("reread_classes") or ui_summary.get("reread_classes"):
         reread = sorted(set(unit_summary.get("reread_classes") or []) |
                         set(ui_summary.get("reread_classes") or []))
