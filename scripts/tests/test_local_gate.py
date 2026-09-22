@@ -590,6 +590,170 @@ class RecoveryVerdictTests(unittest.TestCase):
         self.assertEqual(doc["simulator"]["udid"], "GATE-DEVICE")
 
 
+class UIRecoveryVerdictTests(unittest.TestCase):
+    """UI recovery is judged exactly like unit recovery.
+
+    The shell writes a UI retry's evidence to lanes/ui-recovery; if the
+    summarizer ignored it, recovered classes would be reported as never
+    executed while the run's own recovery record claimed the opposite.
+    """
+
+    SHA = "1" * 40
+    WEDGE_FAILURE = [{"class": "System Failures",
+                      "test": "Conduit encountered an error", "attempts": []}]
+    BUSY_LOG = ("Simulator device failed to launch com.milim.relay "
+                "(BSErrorCodeDescription=Busy)")
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.run_dir = Path(self.tmp.name)
+        # Two UI classes so a partial recovery is expressible.
+        write_json(self.run_dir / "lanes.json", {
+            "schema_version": 1,
+            "unit": {"classes": ["AlphaTests", "BetaTests", "GammaTests"]},
+            "ui": {"classes": ["LaunchUITests", "SettingsUITests"]},
+        })
+        write_json(self.run_dir / "meta.json", {
+            "schema_version": 1, "requested_ref": "origin/main",
+            "tested_sha": self.SHA, "xcode_version": "Xcode 27.0",
+            "simulator": {"name": "Conduit CI Gate", "runtime": "iOS 26.5",
+                          "udid": "6D08B063-B890-4D18-893B-D1E89E119919"},
+            "started_at": "2026-09-22T00:00:00Z",
+            "finished_at": "2026-09-22T01:00:00Z", "wall_s": 3600,
+            "allowed_recovered_infrastructure": False,
+            "static_checks_enabled": True, "repeat_policy_enabled": False,
+            "run_flags": {"lock_used": True, "simulator_prep": True},
+            "expected": {"unit_classes": 3, "unit_batches": 1, "ui_classes": 2,
+                         "repeat_classes": [], "repeat_iterations": 0},
+        })
+        write_json(self.run_dir / "static" / "phase.json", {
+            "schema_version": 1, "phase": "static", "status": "pass",
+            "duration_s": 5, "checks": [{"name": "plan-validate",
+                                         "status": "pass", "duration_s": 1}]})
+        write_json(self.run_dir / "build" / "phase.json", {
+            "schema_version": 1, "phase": "build", "status": "pass",
+            "duration_s": 30, "details": {"xctestrun": "/tmp/x.xctestrun"}})
+        # A clean unit lane so only the UI suite decides the verdict.
+        lane_artifacts(self.run_dir / "lanes" / "unit",
+                       classes=("AlphaTests", "BetaTests", "GammaTests"),
+                       cases=3, batches=[{"batch": 1,
+                                          "classes": ["AlphaTests", "BetaTests",
+                                                      "GammaTests"],
+                                          "timeout_s": 600, "status": "pass",
+                                          "attempts": [{"attempt": 1,
+                                                        "status": "passed",
+                                                        "seconds": 1.0,
+                                                        "failures": 0}]}])
+        # A round that did not run: the two recovery tests upgrade it below,
+        # and a genuine failure must leave retries at 0.
+        write_json(self.run_dir / "recovery" / "phase.json", {
+            "schema_version": 1, "phase": "recovery", "status": "skipped",
+            "duration_s": 0, "checks": []})
+
+    def _wedge_lane(self, lane_dir, classes=None):
+        lane_artifacts(lane_dir, status="fail", classes=(), cases=0,
+                       failures=self.WEDGE_FAILURE, batches=[],
+                       attempts=[{"mode": "class", "n": 1, "class": "any",
+                                  "status": "test-failures"}])
+        logs = Path(lane_dir) / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        (logs / "batch-a1.log").write_text(self.BUSY_LOG + chr(10),
+                                           encoding="utf-8")
+
+    def _round_ran(self):
+        write_json(self.run_dir / "recovery" / "phase.json", {
+            "schema_version": 1, "phase": "recovery", "status": "pass",
+            "duration_s": 0, "checks": [{"name": "round-1", "status": "pass",
+                                         "duration_s": 0}]})
+
+    def _summarize(self):
+        out = self.run_dir / "gate-result.json"
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = local_gate.main(["summarize", "--run-dir", str(self.run_dir),
+                                    "--out", str(out),
+                                    "--markdown", str(self.run_dir / "summary.md")])
+        self.human = buffer.getvalue()
+        return code, json.loads(out.read_text(encoding="utf-8"))
+
+    def test_ui_infrastructure_failure_recovered_by_the_round_passes(self):
+        self._round_ran()
+        self._wedge_lane(self.run_dir / "lanes" / "ui")
+        lane_artifacts(self.run_dir / "lanes" / "ui-recovery", status="pass",
+                       classes=("LaunchUITests", "SettingsUITests"), cases=4)
+        code, doc = self._summarize()
+        self.assertEqual(code, 0, doc["problems"])
+        self.assertEqual(doc["verdict"], "PASS")
+        ui = doc["ui"]
+        self.assertEqual(ui["classes_missing"], [],
+                         "recovered classes must count as executed")
+        self.assertEqual(ui["executions"], 4)
+        self.assertTrue(any("recovery" in str(p.get("name"))
+                            for p in ui["passes"]),
+                        "the recovery pass must appear in the UI passes")
+        self.assertEqual(doc["infrastructure"]["retries"], 1)
+        self.assertEqual(ui["failures"], 0)
+
+    def test_ui_recovery_that_recurs_fails_as_infrastructure(self):
+        self._round_ran()
+        self._wedge_lane(self.run_dir / "lanes" / "ui")
+        self._wedge_lane(self.run_dir / "lanes" / "ui-recovery")
+        code, doc = self._summarize()
+        self.assertEqual(code, 1)
+        self.assertEqual(doc["verdict"], "FAIL")
+        self.assertEqual(doc["ui"]["classes_missing"],
+                         ["LaunchUITests", "SettingsUITests"])
+        self.assertGreaterEqual(doc["infrastructure"]["persistent"], 1)
+        self.assertTrue(any("UI recovery round hit the same simulator" in p
+                            for p in doc["problems"]), doc["problems"])
+        self.assertEqual(doc["ui"]["failures"], 0,
+                         "a wedge is never an assertion failure")
+
+    def test_genuine_ui_assertion_is_not_recovered(self):
+        # A product failure: no recovery pass exists, and the assertion stands.
+        lane_artifacts(self.run_dir / "lanes" / "ui", status="fail",
+                       classes=("LaunchUITests",), cases=1,
+                       failures=[{"class": "LaunchUITests",
+                                  "test": "testLaunch", "attempts": []}],
+                       attempts=[{"mode": "class", "n": 1,
+                                  "class": "LaunchUITests",
+                                  "status": "test-failures"}])
+        code, doc = self._summarize()
+        self.assertEqual(code, 1)
+        self.assertEqual(doc["ui"]["failures"], 1)
+        self.assertEqual(len(doc["ui"]["passes"]), 1,
+                         "a genuine failure must not add a recovery pass")
+        self.assertEqual(doc["infrastructure"]["retries"], 0)
+
+    def test_only_the_failed_subset_is_recovered_without_double_counting(self):
+        self._round_ran()
+        # The shard ran LaunchUITests but was refused before SettingsUITests
+        # produced results; the round retries only the incomplete class.
+        lane_artifacts(self.run_dir / "lanes" / "ui", status="fail",
+                       classes=("LaunchUITests",), cases=1, batches=[],
+                       failures=self.WEDGE_FAILURE,
+                       attempts=[{"mode": "class", "n": 1, "class": "any",
+                                  "status": "test-failures"}])
+        logs = self.run_dir / "lanes" / "ui" / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        (logs / "batch-a1.log").write_text(self.BUSY_LOG + chr(10),
+                                           encoding="utf-8")
+        lane_artifacts(self.run_dir / "lanes" / "ui-recovery", status="pass",
+                       classes=("SettingsUITests",), cases=2)
+        code, doc = self._summarize()
+        ui = doc["ui"]
+        self.assertEqual(ui["classes_missing"], [],
+                         "completed only during recovery, so not unexecuted")
+        # 1 case before + 2 after, counted once each: no class twice.
+        self.assertEqual(ui["executions"], 3, ui.get("observed_names"))
+        self.assertEqual(doc["infrastructure"]["retries"], 1)
+        self.assertEqual(ui["failures"], 0)
+        self.assertEqual(code, 0, doc["problems"])
+        self.assertTrue(any("recovery" in c for c in doc.get("caveats", [])),
+                        "the recovered run must carry a caveat")
+
+
 class RecoverySpecTests(unittest.TestCase):
     """The bounded recovery round: what it is allowed for, and what it does."""
 

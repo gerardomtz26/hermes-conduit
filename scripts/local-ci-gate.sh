@@ -281,43 +281,19 @@ done
 
 # --- single-gate-per-Mac lock ------------------------------------------------
 # Two concurrent xcodebuild/test chains on one Mac corrupt each other's
-# Simulator state; a gate result from such a run would be meaningless.
+# Simulator state; a gate result from such a run would be meaningless. The
+# acquisition lives in ci-gate-lock.sh and is structural: a temporary lock
+# directory carries the PID before it is renamed into the canonical location,
+# and the acquisition is verified afterwards - so no contender can ever
+# believe it owns the gate when it does not.
 LOCK_DIR="$GATE_ROOT/gate.lock"
-LOCK_HELD=0
-if [ "$USE_LOCK" -eq 1 ]; then
-  mkdir -p "$GATE_ROOT"
-  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    holder="$(cat "$LOCK_DIR/pid" 2>/dev/null || true)"
-    if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
-      echo "local-ci-gate: another gate is running (pid $holder): refusing to run two xcodebuild chains on one Mac" >&2
-      echo "local-ci-gate: if that process is gone, remove $LOCK_DIR" >&2
-      exit 2
-    fi
-    echo "local-ci-gate: taking over a stale gate lock ($(cat "$LOCK_DIR/info" 2>/dev/null || echo 'no info'))" >&2
-    # Atomic steal: rename the stale lock aside in ONE step, so of two
-    # processes that both saw the dead pid exactly one wins - a
-    # remove-then-mkdir sequence would let the loser delete the winner's live
-    # lock, which is how two gates end up on one Mac.
-    if ! mv "$LOCK_DIR" "$LOCK_DIR.stale.$$" 2>/dev/null; then
-      echo "local-ci-gate: lost the stale-lock takeover race; rerun" >&2
-      exit 2
-    fi
-    rm -rf "$LOCK_DIR.stale.$$"
-    if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-      echo "local-ci-gate: could not acquire the gate lock at $LOCK_DIR" >&2
-      exit 2
-    fi
-  fi
-  LOCK_HELD=1
-  echo "$$" > "$LOCK_DIR/pid"
-  printf 'ref=%s\nstarted=%s\n' "$REF" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCK_DIR/info"
-fi
+. "$SCRIPT_DIR/ci-gate-lock.sh"
 
 cleanup() {
   local status=$?
-  if [ "$LOCK_HELD" -eq 1 ]; then
-    rm -rf "$LOCK_DIR"
-  fi
+  # Removes the canonical lock ONLY if its pid is still this process, and
+  # clears an in-flight temporary lock (an interrupt mid-acquisition).
+  gate_lock_release
   # An interrupt (Ctrl-C, closed SSH session) must not leave a registered
   # worktree behind: the next run for the same commit would then fail at
   # `git worktree add`, and the operator would have to clean up by hand.
@@ -333,9 +309,34 @@ cleanup() {
 # STOP: a handler that only returns (the same function on one trap) cleans up
 # and then lets the run continue against a deleted worktree, with the lock
 # released while the run is still going.
+# These traps are installed BEFORE the acquisition sequence can run, so an
+# interrupt during acquisition cannot leak the temporary lock directory.
 trap cleanup EXIT
 trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
+
+if [ "$USE_LOCK" -eq 1 ]; then
+  mkdir -p "$GATE_ROOT"
+  LOCK_STATUS=0
+  acquire_gate_lock "$LOCK_DIR" || LOCK_STATUS=$?
+  case "$LOCK_STATUS" in
+    0) ;;
+    2)
+      if [ -n "${GATE_LOCK_OWNER:-}" ]; then
+        echo "local-ci-gate: another gate is running (pid $GATE_LOCK_OWNER): refusing to run two xcodebuild chains on one Mac" >&2
+        echo "local-ci-gate: if that process is gone, remove $LOCK_DIR" >&2
+      else
+        echo "local-ci-gate: the gate lock at $LOCK_DIR exists with no readable owner, so it is BUSY - not provably stale" >&2
+        echo "local-ci-gate: if you are certain no gate is running, remove $LOCK_DIR" >&2
+      fi
+      exit 2
+      ;;
+    *)
+      echo "local-ci-gate: could not acquire the gate lock at $LOCK_DIR" >&2
+      exit 2
+      ;;
+  esac
+fi
 
 now_iso() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
@@ -629,6 +630,9 @@ else
   echo "== static checks (planner inventory, CI tooling, localization) =="
   STATIC_START=$(date +%s)
   STATIC_OK=1
+  # "${arr[@]}" on an EMPTY array is a fatal unbound-variable error under
+  # Bash 3.2 + set -u (macOS /bin/bash), so every expansion below uses the
+  # `${arr[@]+"${arr[@]}"}` form instead.
   STATIC_CHECKS=()
   run_static_check() { # $1=name, rest=command
     local name="$1"; shift
@@ -658,7 +662,7 @@ else
     --duration "$(( $(date +%s) - STATIC_START ))" \
     --exit-code "$([ "$STATIC_OK" -eq 1 ] && echo 0 || echo 1)" \
     --note "planner inventory + CI-tooling regression suites + localization coverage" \
-    "${STATIC_CHECKS[@]}"
+    "${STATIC_CHECKS[@]+"${STATIC_CHECKS[@]}"}"
 fi
 
 # --- phase: build-for-testing (exactly once) ---------------------------------
@@ -1056,7 +1060,7 @@ python3 "$HELPER" phase --out "$RUN_DIR/sim-prep/phase.json" \
   --status "$([ "$SIM_PREP_FAILED" -eq 1 ] && echo fail || echo pass)" \
   --duration 0 --exit-code "$SIM_PREP_FAILED" \
   --note "bounded shutdown/erase/boot/wait-for-boot before each lane" \
-  "${SIM_PREP_CHECKS[@]}" >/dev/null 2>&1 || true
+  "${SIM_PREP_CHECKS[@]+"${SIM_PREP_CHECKS[@]}"}" >/dev/null 2>&1 || true
 
 python3 "$HELPER" phase --out "$RUN_DIR/recovery/phase.json" \
   --phase recovery \

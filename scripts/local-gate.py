@@ -1131,6 +1131,54 @@ def _read_lane(lane_dir: str) -> dict:
     return out
 
 
+def _lane_pass_dirs(lanes_root, primary, extra, recovery_prefix):
+    """The primary lane dir, an optional follow-up dir (the unit lane's
+    continuation), and every recovery-pass dir - in execution order.
+
+    UNIT and UI recovery are collected the same way on purpose: a recovery
+    pass is evidence about the suite it recovers, whichever suite it is, and
+    a UI recovery that the summarizer ignored would leave recovered work
+    reported as never executed.
+    """
+    dirs = []
+    primary_dir = os.path.join(lanes_root, primary)
+    if os.path.isdir(primary_dir):
+        dirs.append(primary_dir)
+    if extra:
+        extra_dir = os.path.join(lanes_root, extra)
+        if os.path.isdir(extra_dir):
+            dirs.append(extra_dir)
+    try:
+        names = sorted(os.listdir(lanes_root))
+    except OSError:
+        names = []
+    for name in names:
+        if name.startswith(recovery_prefix):
+            candidate = os.path.join(lanes_root, name)
+            if os.path.isdir(candidate):
+                dirs.append(candidate)
+    return dirs
+
+
+def _summarize_lane_group(lane_dirs, expected_classes, expected_batches=None):
+    """Read, summarize and merge a suite's passes (primary [+ continuation]
+    [+ recovery]). Coverage is judged on the merged aggregate; only the
+    primary pass carries the plan's expected class list and batch count,
+    because a follow-up pass runs a subset of it on purpose."""
+    if not lane_dirs:
+        return None
+    summaries = []
+    for index, lane_dir in enumerate(lane_dirs):
+        lane = _read_lane(lane_dir)
+        summaries.append(_summarize_lane(
+            lane,
+            expected_classes if index == 0 else None,
+            expected_batches if index == 0 else None))
+    if len(summaries) == 1:
+        return summaries[0]
+    return _merge_lane_summaries(summaries, expected_classes)
+
+
 def _summarize_lane(lane: dict, expected_classes, expected_batches=None) -> dict:
     problems = []
     # The lane runner's own verdict is a problem in its own right. Every path
@@ -1172,9 +1220,23 @@ def _summarize_lane(lane: dict, expected_classes, expected_batches=None) -> dict
             "genuine assertions were retried and then passed (not validation): "
             + _csv(sorted({e["name"] for e in lane["assertion_retried_until_green"]})))
 
+    observed_sorted = sorted(observed)
     return {
         "dir": lane["dir"],
         "status": lane["status"],
+        # A single pass is reported in the same shape as a merged group, so a
+        # consumer never has to special-case "there was no recovery".
+        "passes": [{
+            "name": lane["dir"],
+            "status": lane["status"],
+            "classes_observed": len(observed_sorted),
+            "observed_names": observed_sorted,
+            "executions": lane.get("executions"),
+            "failures": len(lane["real_failures"] or []),
+            "synthetic_failures": len(lane.get("synthetic_failures") or []),
+            "launch_signature_hits": lane.get("launch_signature_hits") or 0,
+            "is_launch_wedge": bool(lane.get("is_launch_wedge")),
+        }],
         "executions": lane["executions"],
         "failures": len(lane["failures"]),
         "failure_detail": lane["failures"],
@@ -1502,40 +1564,26 @@ def cmd_summarize(args) -> int:
         if str(c.get("status")) in ("pass", "fail"))
 
     # --- lanes ------------------------------------------------------------
-    unit = _read_lane(os.path.join(run_dir, "lanes", "unit"))
-    if not os.path.isdir(os.path.join(run_dir, "lanes", "unit")):
+    # UNIT and UI use the same collection: the primary lane, the unit lane's
+    # continuation, and every recovery pass. Coverage is judged on the
+    # aggregate, so work recovered in a later pass counts as executed and is
+    # never reported unexecuted.
+    lanes_root = os.path.join(run_dir, "lanes")
+    unit_passes = _lane_pass_dirs(lanes_root, "unit", "unit-continuation",
+                                  "unit-recovery")
+    if not unit_passes:
         gate_problems.append("unit lane results are missing")
     unit_expected, unit_expect_problems = _expected_classes(run_dir, "unit", expected)
     gate_problems.extend(unit_expect_problems)
-    unit_summary = _summarize_lane(unit, unit_expected,
-                                   _int_or_zero(expected.get("unit_batches")) or None)
-    # A unit lane stops at the batch that failed; the shell then runs the
-    # batches that never executed as a continuation so one failure cannot hide
-    # the rest of the suite. Its evidence is folded in here, and the coverage
-    # that matters is the aggregate against the plan's full class list.
-    continuation_dir = os.path.join(run_dir, "lanes", "unit-continuation")
-    unit_lanes = [unit]
-    if os.path.isdir(continuation_dir):
-        unit_lanes.append(_read_lane(continuation_dir))
-    # The recovery round runs one invocation per class (a lane stops at the
-    # batch that fails, so one multi-class invocation would let a wedged class
-    # eat the rest of the round), so its evidence lives in per-class dirs.
-    lanes_root = os.path.join(run_dir, "lanes")
-    try:
-        recovery_dirs = sorted(os.path.join(lanes_root, name)
-                               for name in os.listdir(lanes_root)
-                               if name.startswith("unit-recovery"))
-    except OSError:
-        recovery_dirs = []
-    for directory in recovery_dirs:
-        if os.path.isdir(directory):
-            unit_lanes.append(_read_lane(directory))
-    unit_summary = _merge_lane_summaries(
-        [_summarize_lane(l, unit_expected if l is unit else None,
-                         _int_or_zero(expected.get("unit_batches")) or None if l is unit else None)
-         for l in unit_lanes],
-        unit_expected)
-    gate_problems.extend("unit: " + p for p in unit_summary["problems"])
+    unit_summary = _summarize_lane_group(
+        unit_passes, unit_expected,
+        _int_or_zero(expected.get("unit_batches")) or None)
+    if unit_summary is None:
+        unit_summary = {"status": "missing", "executions": None, "failures": 0,
+                        "synthetic_failures": 0, "classes_expected": 0,
+                        "classes_observed": 0, "classes_missing": [],
+                        "observed_names": [], "problems": [], "passes": []}
+    gate_problems.extend("unit: " + p for p in unit_summary.get("problems") or [])
     # The recovery round is allowed once. If the pass it produced shows the
     # same infrastructure class again, the run fails as infrastructure and no
     # third attempt is made - the gate does not loop until green.
@@ -1544,20 +1592,26 @@ def cmd_summarize(args) -> int:
             gate_problems.append(
                 "the recovery round hit the same simulator launch-refusal class "
                 "again; no further recovery is attempted")
-    # Nothing was re-run by accident: every pass runs only work no earlier pass
-    # completed, so a class reported by two passes is evidence of a re-run and
-    # is recorded (and the aggregate count already counts it once). It is a
-    # caveat rather than a problem: the counts are truthful, but a pass that
-    # re-ran completed work means the projection was wrong.
 
     ui_expected, ui_expect_problems = _expected_classes(run_dir, "ui", expected)
     if ui_expected:
         gate_problems.extend(ui_expect_problems)
-        ui = _read_lane(os.path.join(run_dir, "lanes", "ui"))
-        if not os.path.isdir(os.path.join(run_dir, "lanes", "ui")):
+        ui_passes = _lane_pass_dirs(lanes_root, "ui", None, "ui-recovery")
+        if not any("ui" == os.path.basename(d) for d in ui_passes):
             gate_problems.append("UI lane results are missing")
-        ui_summary = _summarize_lane(ui, ui_expected)
-        gate_problems.extend("ui: " + p for p in ui_summary["problems"])
+        ui_summary = _summarize_lane_group(ui_passes, ui_expected)
+        if ui_summary is None:
+            ui_summary = {"status": "missing", "executions": None, "failures": 0,
+                          "synthetic_failures": 0, "classes_expected": 0,
+                          "classes_observed": 0, "classes_missing": [],
+                          "observed_names": [], "problems": [], "passes": []}
+        gate_problems.extend("ui: " + p for p in ui_summary.get("problems") or [])
+        # Same recurrence rule as unit: one recovery round, then FAIL.
+        for entry in ui_summary.get("passes") or []:
+            if entry.get("is_launch_wedge") and "recovery" in str(entry.get("name")):
+                gate_problems.append(
+                    "the UI recovery round hit the same simulator launch-refusal "
+                    "class again; no further recovery is attempted")
     else:
         # No UI lane in the plan is legitimate (a repo with no UI classes), but
         # uiclasses recorded in meta.json with no lane means the run skipped

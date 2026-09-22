@@ -252,7 +252,7 @@ final class LaunchUITests: XCTestCase {
     func testSomething() {}
 }
 SWIFT
-  for script in local-ci-gate.sh local-gate.py plan-tests.py ci-test-lane.sh \
+  for script in local-ci-gate.sh local-gate.py ci-gate-lock.sh plan-tests.py ci-test-lane.sh \
                 ci-lib.sh extract-test-timings.py test-timings.json; do
     cp "$SCRIPTS/$script" "$repo/scripts/$script"
   done
@@ -288,6 +288,13 @@ PY
 # Fixture stand-in for CI v2's build job: produce a .xctestrun where the gate
 # expects one and record the build metadata the gate moves into its run dir.
 set -u
+# FAKE_BUILD_FAIL models a build that fails before producing a .xctestrun:
+# the gate must still finish and write its three artifacts, reporting FAIL.
+if [ -n "${FAKE_BUILD_FAIL:-}" ]; then
+  mkdir -p ci-lane/build
+  echo "fixture build-for-testing failed (stub)" > ci-lane/build/build.log
+  exit 1
+fi
 mkdir -p "$DERIVED_DATA_PATH/Build/Products"
 : > "$DERIVED_DATA_PATH/Build/Products/Conduit_stub.xctestrun"
 mkdir -p ci-lane/build
@@ -322,6 +329,13 @@ run_gate() { # extra args...
 }
 
 new_run_dir() { printf '%s\n' "$WORK/run-$RANDOM-$RANDOM"; }
+
+assert_three_artifacts() { # $1 = run dir, $2 = label
+  assert_eq "$2: meta.json was written"     "$([ -f "$1/meta.json" ] && echo yes || echo no)" "yes"
+  assert_eq "$2: gate-result.json was written"     "$([ -f "$1/gate-result.json" ] && echo yes || echo no)" "yes"
+  assert_eq "$2: summary.md was written"     "$([ -f "$1/summary.md" ] && echo yes || echo no)" "yes"
+}
+
 
 echo "=== local-ci-gate integration suite ==="
 write_stubs
@@ -708,6 +722,47 @@ unset FAKE_NO_GATE_DEVICE
 # ---------------------------------------------------------------------------
 echo ""
 # ---------------------------------------------------------------------------
+echo ""
+echo "--- case: a failed build still writes all three artifacts ---"
+# Regression for the Bash 3.2 empty-array fatal: `set -u` with an empty array
+# expansion used to abort /bin/bash 3.2 during argument expansion, BEFORE the
+# gate could write its result. Whatever fails, meta.json + gate-result.json +
+# summary.md must exist and the verdict must be FAIL.
+export FAKE_BUILD_FAIL=1
+RUN15="$(new_run_dir)"
+BUILD_EXIT=0
+run_gate --ref HEAD --gate-root "$WORK/gate-artifacts" --run-dir "$RUN15"     --repeat-classes "" >/dev/null 2>&1 || BUILD_EXIT=$?
+if [ "$BUILD_EXIT" -eq 0 ]; then
+  bad "a failed build passed the gate"
+else
+  ok "a failed build fails the gate (exit $BUILD_EXIT)"
+fi
+assert_three_artifacts "$RUN15" "a failed build"
+assert_eq "the failed build's verdict is FAIL"   "$(json_get "$RUN15/gate-result.json" 'doc["verdict"]')" "FAIL"
+unset FAKE_BUILD_FAIL
+
+echo ""
+echo "--- case: --no-simulator-prep still writes all three artifacts ---"
+# The SIM_PREP_CHECKS array is EMPTY on this path, which is exactly the
+# expansion that used to be fatal under Bash 3.2. Combined with a genuine
+# assertion failure so the verdict is FAIL on every platform (without one, a
+# host that can read result bundles would legitimately pass).
+export FAKE_UNIT_B1_A1=fail
+RUN16="$(new_run_dir)"
+NOPREP_EXIT=0
+run_gate --ref HEAD --gate-root "$WORK/gate-artifacts" --run-dir "$RUN16"     --repeat-classes "" --no-simulator-prep >/dev/null 2>&1 || NOPREP_EXIT=$?
+if [ "$NOPREP_EXIT" -eq 0 ]; then
+  bad "the run with --no-simulator-prep passed despite a genuine failure"
+else
+  ok "the run with --no-simulator-prep fails (exit $NOPREP_EXIT)"
+fi
+assert_three_artifacts "$RUN16" "--no-simulator-prep"
+assert_eq "its verdict is FAIL"   "$(json_get "$RUN16/gate-result.json" 'doc["verdict"]')" "FAIL"
+assert_eq "the run records that preparation was off" \
+  "$(json_get "$RUN16/gate-result.json" 'doc["run_flags"]["simulator_prep"] is False')" "True"
+unset FAKE_UNIT_B1_A1
+
+echo ""
 echo ""
 echo "--- case: one authoritative full-gate invocation per requested SHA ---"
 # The gate is single-shot: after a verdict, another COMPLETE run for the same
