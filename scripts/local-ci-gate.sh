@@ -542,18 +542,25 @@ ensure_gate_simulator() {
   # Created from the newest available iPhone device type on the newest runtime,
   # so the gate's device targets the same iOS versions the tests do.
   # run_bounded captures the command's output into a log file, so the new
-  # device's UDID is read back from there.
+  # device's UDID is read back from there. `simctl create` also prints a
+  # "No runtime specified..." notice before the UDID, so the UDID is matched
+  # as a UUID token rather than taken as the whole output.
   local created=""
   run_bounded 180 "$RUN_DIR/simctl-create.log" "$RUN_DIR" \
     sh -c 'xcrun simctl create "$1" "iPhone 17 Pro" 2>&1' _ "$SIMULATOR_NAME" || true
   if [ -s "$RUN_DIR/simctl-create.log" ]; then
-    created="$(tr -d ' \t\r\n' < "$RUN_DIR/simctl-create.log" | head -c 64)"
+    created="$(grep -o -E '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}' \
+      "$RUN_DIR/simctl-create.log" | head -n 1)"
   fi
   # A UDID is a 36-character hyphenated form; anything else (an error message,
   # empty output) is a failure to create.
   case "$created" in
     ????????-????-????-????-????????????)
       SIMULATOR_UDID="$created"
+      # Re-list so the recorded device/runtime reflects the new device (and so
+      # a second run resolves it instead of creating a twin).
+      run_bounded 60 "$DEVICES_JSON" "$RUN_DIR" \
+        sh -c 'xcrun simctl list devices available -j 2>/dev/null' || true
       python3 "$HELPER" simulator --devices "$DEVICES_JSON" \
         --name "$SIMULATOR_NAME" --udid "$SIMULATOR_UDID" \
         --out "$RUN_DIR/simulator.json" >/dev/null 2>&1 || true

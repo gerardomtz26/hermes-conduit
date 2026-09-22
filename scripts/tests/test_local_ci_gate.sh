@@ -174,9 +174,12 @@ if [ "$1" = "xcresulttool" ]; then
 fi
   if [ "$1" = "simctl" ]; then
     if [ "$2" = "create" ]; then
-      # Model `simctl create`: print the new device's UDID. A test can remove
-      # the gate device from the listing below to exercise this path.
-      echo "GATE-DEVICE-0000-1111-2222-333333333333"
+      # Model `simctl create`: it prints a runtime notice BEFORE the UDID, so
+      # the gate has to match the UUID rather than take the whole output. A
+      # test can remove the gate device from the listing below to exercise
+      # this path.
+      echo "No runtime specified, using 'iOS 26.5 (26.5 - 23F77) - com.apple.CoreSimulator.SimRuntime.iOS-26-5'"
+      echo "6D08B063-B890-4D18-893B-D1E89E119919"
       exit 0
     fi
     if [ "$2 $3 $4" = "list devices available" ]; then
@@ -191,7 +194,7 @@ DEV
 {"devices" : {"com.apple.CoreSimulator.SimRuntime.iOS-26-0" : [
   { "udid" : "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
     "name" : "iPhone 17 Pro", "state" : "Booted" },
-  { "udid" : "GATE-DEVICE-0000-1111-2222-333333333333",
+  { "udid" : "6D08B063-B890-4D18-893B-D1E89E119919",
     "name" : "Conduit CI Gate", "state" : "Shutdown" }]}}
 DEV
       fi
@@ -677,6 +680,24 @@ assert_eq "no worktree was left behind" \
   "$(ls -A "$WORK/gate/worktrees" 2>/dev/null | wc -l | tr -d ' ')" "0"
 assert_eq "the caller's repository is unchanged by the interrupted run" \
   "$(git -C "$WORK/repo" status --porcelain)" "$STATUS_BEFORE_INTERRUPT"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: the gate simulator is created when it does not exist ---"
+export FAKE_NO_GATE_DEVICE=1
+RUN11="$(new_run_dir)"
+if run_gate --ref HEAD --gate-root "$WORK/gate" --run-dir "$RUN11" \
+    --repeat-classes "" >/dev/null 2>&1; then
+  ok "a run without the gate device still runs (it creates it)"
+else
+  bad "a missing gate simulator stopped the run (see $RUN11/summary.md)"
+fi
+assert_contains "the creation is visible in the log" "$(cat "$RUN_LOG")" \
+  "gate simulator 'Conduit CI Gate' created"
+assert_eq "the created device is recorded" \
+  "$(json_get "$RUN11/gate-result.json" 'doc["simulator"]["udid"]')" \
+  "6D08B063-B890-4D18-893B-D1E89E119919"
+unset FAKE_NO_GATE_DEVICE
 
 # ---------------------------------------------------------------------------
 echo ""
