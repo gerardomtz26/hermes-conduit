@@ -741,7 +741,7 @@ def _phase_status(container, name):
     return str(doc["status"]), doc
 
 
-def _work_items(attempts, batches):
+def _work_items(attempts, batches, lane_classes=None):
     """Fold the runner's attempt chain into WORK ITEMS (the unit of retry).
 
     A unit lane retries a BATCH and a UI lane retries a CLASS, so a work item
@@ -785,7 +785,14 @@ def _work_items(attempts, batches):
         status = str(item.get("status") or "")
         if mode.startswith("batch"):
             key = ("batch", str(n))
-            name = _csv(batch_classes.get(str(n)) or []) or "batch-{0}".format(n)
+            # A UI lane runs per-class invocations and writes NO `batches`
+            # array, so its shard-level item must be named by the lane's own
+            # declared classes: the synthetic "batch-<n>" fallback names no
+            # work any recovery could observe, and the healing evidence rule
+            # (`_round_reran`) would then never be satisfiable for it.
+            name = _csv(batch_classes.get(str(n)) or []) \
+                or _csv(lane_classes or []) \
+                or "batch-{0}".format(n)
             # "batch-<n>" is the unit naming; a UI shard has one batch-level
             # invocation whose part is named without the index. A UI shard's
             # targeted retry arrives as batch-retry with n=2 even though the
@@ -903,7 +910,8 @@ def scan_launch_signatures(lane_dir: str):
     return hits, sample
 
 
-def _classify_attempts(attempts, batches, parts=None, lane_has_real_failures=True):
+def _classify_attempts(attempts, batches, parts=None, lane_has_real_failures=True,
+                       lane_classes=None):
     """Split lane evidence into assertion failures, infrastructure events,
     timeouts and never-executed work, using the runner's own status tokens.
 
@@ -917,10 +925,13 @@ def _classify_attempts(attempts, batches, parts=None, lane_has_real_failures=Tru
 
     `parts` is the per-invocation failure attribution from _read_parts;
     `lane_has_real_failures` is the lane-level fallback for when the parts
-    could not be read.
+    could not be read; `lane_classes` is the lane's DECLARED class list
+    (lane-result `classes`), which names a batch-level work item when the lane
+    carries no `batches` array of its own - production UI lanes run per-class
+    invocations and write exactly that shape.
     """
     parts = parts or {}
-    order, items = _work_items(attempts, batches)
+    order, items = _work_items(attempts, batches, lane_classes)
     assertion = []
     infrastructure = []
     timeouts = []
@@ -1062,6 +1073,11 @@ def _read_lane(lane_dir: str) -> dict:
             "timeout_s": lane_result.get("timeout_s"),
             "attempts": lane_result.get("attempts") or [],
             "batches": lane_result.get("batches") or [],
+            # The lane's own declared class list. It is the only identity a
+            # batch-level work item has on a UI lane (per-class invocations,
+            # no `batches` array), and healing evidence is matched by name.
+            "classes_declared": [str(c) for c in
+                                 (lane_result.get("classes") or [])],
         })
         if not out["failures"]:
             out["failures"] = list(lane_result.get("failures") or [])
@@ -1122,7 +1138,8 @@ def _read_lane(lane_dir: str) -> dict:
     else:
         out["class_shares"] = {}
     out.update(_classify_attempts(out["attempts"], out["batches"], out["parts"],
-                                 bool(out["real_failures"])))
+                                  bool(out["real_failures"]),
+                                  out.get("classes_declared") or []))
     return out
 
 
@@ -2208,8 +2225,11 @@ def _print_human(result: dict) -> None:
                                     repeats["executions"], repeats["failures"]))
     infra = result["infrastructure"]
     print("infra      : {0} failure(s), {1} recovered, {2} timeout(s), "
-          "{3} retry attempt(s)".format(infra["failures"], infra["recovered"],
-                                        infra["timeouts"], infra["retries"]))
+          "{3} persistent, {4} retry attempt(s), {5} simulator "
+          "reset(s)/{6} erase(s)".format(
+              infra["failures"], infra["recovered"], infra["timeouts"],
+              infra["persistent"], infra["retries"],
+              infra["simulator_resets"], infra["simulator_erases"]))
     if result.get("partial"):
         print("PARTIAL    : {0}".format("; ".join(result.get("partial_reasons") or [])))
     for caveat in result.get("caveats") or []:

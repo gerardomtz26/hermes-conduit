@@ -76,7 +76,8 @@ def write_json(path, doc):
 def lane_artifacts(lane_dir, *, status="pass", classes=("AlphaTests",),
                    cases=4, failures=(), attempts=None, batches=None,
                    retried=(), infra_recovered=(), persistent_infra=(),
-                   observations=True, detail=True, lane_result=True):
+                   observations=True, detail=True, lane_result=True,
+                   lane_classes=None):
     """Write the three artifacts ci-test-lane.sh leaves behind.
 
     An artifact that the caller disabled is DELETED, not left over from an
@@ -104,7 +105,13 @@ def lane_artifacts(lane_dir, *, status="pass", classes=("AlphaTests",),
             "lane": "unit-1",
             "kind": "unit",
             "target": "ConduitTests",
-            "classes": list(classes),
+            # lane_classes models the production UI shape: the runner writes
+            # its DECLARED class list even when the invocation produced no
+            # results, and a lane with per-class invocations carries no
+            # `batches` array - the declared list is the only name the
+            # shard-level work item has.
+            "classes": list(lane_classes if lane_classes is not None
+                            else classes),
             "status": status,
             "predicted_s": 15.0,
             "timeout_s": 1100,
@@ -868,6 +875,32 @@ class RecoveryVerdictTests(unittest.TestCase):
             "the downgrade must be recorded as a caveat: {0}".format(
                 doc["caveats"]))
 
+    def test_an_incomplete_suite_heals_nothing_even_when_it_observed_the_work(self):
+        """The round must leave its suite COMPLETE before it heals anything.
+
+        Here the round re-ran exactly the batch its event names (coverage
+        holds), yet a third class never executed anywhere: the suite is
+        incomplete, so the event stays persistent and the run FAILS. This is
+        what the per-suite `complete` conjunct is for - observation alone is
+        not enough.
+        """
+        self._primary(observed=(), cases=0)
+        lane_artifacts(self.run_dir / "lanes" / "unit-recovery", status="pass",
+                       classes=("AlphaTests", "BetaTests"), cases=2)
+        self._recovery_phase("pass")
+        code, doc = self._summarize()
+        unit_infra = [
+            e for e in doc["infrastructure"]["events"]["infrastructure_failures"]
+            if e.get("lane") == "unit"]
+        self.assertTrue(unit_infra, doc["infrastructure"]["events"])
+        self.assertFalse(
+            any(e.get("recovered_by") == "gate recovery round"
+                for e in unit_infra),
+            "an incomplete suite may not heal even the work it observed")
+        self.assertIn("GammaTests", doc["unit"]["classes_missing"])
+        self.assertEqual(code, 1, doc["problems"])
+        self.assertEqual(doc["verdict"], "FAIL")
+
     def test_recurrence_after_recovery_fails_as_infrastructure(self):
         """The same class comes back after the round -> FAIL (infrastructure),
         and no third attempt is made."""
@@ -1136,6 +1169,42 @@ class UIRecoveryVerdictTests(unittest.TestCase):
         logs.mkdir(parents=True, exist_ok=True)
         (logs / "batch-a1.log").write_text(self.BUSY_LOG + chr(10),
                                            encoding="utf-8")
+
+    def test_a_ui_shard_without_batches_is_named_by_its_declared_classes(self):
+        """Production UI lanes write per-class invocations and an EMPTY
+        `batches` array, so the shard-level item must be named by the lane's
+        own declared classes: a synthetic "batch-1" name can never be covered
+        by the round's evidence, and a healed UI run would then fail as
+        persistent (the regression the Mac shell suite caught).
+        """
+        self._round_ran()
+        lane_artifacts(self.run_dir / "lanes" / "ui", status="fail",
+                       classes=(), cases=0, batches=[],
+                       lane_classes=("LaunchUITests", "SettingsUITests"),
+                       failures=self.WEDGE_FAILURE,
+                       attempts=[{"mode": "batch", "n": 1, "class": "all",
+                                  "status": "incomplete"},
+                                 {"mode": "class", "n": 1,
+                                  "class": "LaunchUITests",
+                                  "status": "test-failures"}])
+        logs = self.run_dir / "lanes" / "ui" / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        (logs / "batch-a1.log").write_text(self.BUSY_LOG + chr(10),
+                                           encoding="utf-8")
+        lane_artifacts(self.run_dir / "lanes" / "ui-recovery", status="pass",
+                       classes=("LaunchUITests", "SettingsUITests"), cases=4)
+        code, doc = self._summarize()
+        ui_infra = [
+            e for e in doc["infrastructure"]["events"]["infrastructure_failures"]
+            if e.get("lane") == "ui"]
+        self.assertTrue(ui_infra, doc["infrastructure"]["events"])
+        self.assertTrue(
+            all(e.get("recovered_by") == "gate recovery round"
+                for e in ui_infra),
+            "every UI event must name work the round re-ran: {0}".format(
+                [(e.get("name"), e.get("recovered_by")) for e in ui_infra]))
+        self.assertEqual(code, 0, doc["problems"])
+        self.assertEqual(doc["verdict"], "PASS")
 
     def _round_ran(self):
         write_json(self.run_dir / "recovery" / "phase.json", {

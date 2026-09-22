@@ -532,9 +532,10 @@ round is allowed for exactly one infrastructure class:
   performs its own erase);
 * the round heals evidence only where its OWN pass re-ran the work: an
   infrastructure event (or hang) counts as recovered by the round only when
-  that event's suite ran a recovery pass **and** that pass observed every
-  class the event names — a unit round never heals UI evidence, a UI round
-  never heals unit evidence, and work the round never re-ran stays
+  that event's suite ran a recovery pass, **that round left the suite
+  complete (no planned class without a result)**, and that pass observed
+  every class the event names — a unit round never heals UI evidence, a UI
+  round never heals unit evidence, and work the round never re-ran stays
   **persistent** and fails the run (repeat-lane events are never healed by
   it: their own bounded retry decides them);
 * **a genuine assertion anywhere disqualifies the round entirely** — the
