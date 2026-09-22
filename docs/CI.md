@@ -498,36 +498,42 @@ simulator/runtime recorded in the result is the one the tests actually ran on.
 | build | `ci-build-for-testing.sh` once, into a gate-specific DerivedData | The same build-once contract as hosted CI, without the artifact round trip |
 | prepare | before each lane: ci-lib.sh's own bounded shutdown/**erase**/boot/wait-for-boot | Environment preparation, never a retry — it re-runs nothing and a lane that fails afterwards still fails. Without it, the host app's install/launch is refused (`Simulator device failed to launch com.milim.relay … Application failed preflight checks … reason: Busy`) and the batch is lost. An A/B probe on our Mac settled that the erase is the part that matters (shutdown+boot alone still refused the next lane; erase+boot passed it), but it is a **partial** mitigation: on a full run the refusal returned a batch or two into a lane, so it accumulates over successive launches of the same bundle on one device. Costs ~40 s per lane. `--no-simulator-erase` keeps the cheaper mode for observing the raw behavior; `--no-simulator-prep` skips preparation entirely. |
 
-### Known open issue: the launch-refusal wedge
+| unit | the **complete** `ConduitTests` suite | One exhaustive lane: the planner is forced to `--min-lanes 1 --max-lanes 1` so it still owns the sequential batches and every per-batch watchdog |
+| ui | the **complete** `ConduitUITests` suite | One batched invocation over every UI class, with the planner's per-class watchdogs |
+| repeats | the repeat policy below | Runs even when the unit or UI lane failed, so one red lane cannot hide the rest; skipped when the build failed (no test products), and left failing when the plan could not be produced (there is nothing to project the repeat tasks from) |
 
-Four full runs against `main` all ended in FAIL for the same environment
-reason, and it is worth being precise about what the gate does and does not
-do about it:
+### The bounded recovery round (and the wedge it is for)
+
+The gate runs on a dedicated simulator device ("Conduit CI Gate", created on
+demand) precisely so it can erase that device freely: on our Mac the host
+app's install/launch is periodically refused (`Simulator device failed to
+launch com.milim.relay … Application failed preflight checks … reason: Busy`),
+and the A/B probe that diagnosed it showed only `simctl erase` clears the
+condition reliably.
+
+Because the wedge accumulates again over successive launches, a one-time
+pre-run erase is not enough. The gate therefore has exactly one bounded
+recovery round, and it is allowed for exactly one infrastructure class:
 
 * the refusal is reported as **infrastructure**, never as an assertion
   failure, with the affected batch named and the classes it hid listed as
   `not executed`;
-* the **continuation pass** runs the batches the stopped lane never reached,
-  so a refusal costs coverage only for its own batch;
-* the UI shard and the repeat lanes ran to completion in those runs (29 UI
-  tests, 21 repeat executions, zero failures), so the wedge is specific to
-  long unit-lane batch sequences.
+* the **continuation pass** runs the batches the stopped lane never reached;
+* if work is still incomplete and the evidence is the verified launch class
+  (XCTest's synthetic `System Failures` entry and/or the Busy signature in the
+  lane log), the gate erases its own simulator once (shutdown/erase/boot/wait,
+  via ci-lib.sh) and retries exactly the incomplete work **once**;
+* **a genuine assertion anywhere disqualifies the round entirely** — the
+  projection refuses, so a product failure is never retried around;
+* if the same class comes back after the round, the gate fails as
+  infrastructure and makes **no third attempt**.
 
-What would clear it in-band, in increasing order of preference:
-
-1. a bounded, reported **recovery round** in the gate for a batch whose
-   failure evidence is synthetic-only (erase, re-run that batch once), mirroring
-   the lane runner's own `infra-error` policy;
-2. teaching `ci-test-lane.sh` itself that a batch whose only failing entries
-   are XCTest's synthetic ones is an infrastructure wedge — which is where the
-   classification belongs, but which changes hosted lanes too, so it is
-   deliberately not part of this change.
-
-Until then the gate refuses to certify such a run, which is the intended
-behavior for an exhaustive gate.
-| unit | the **complete** `ConduitTests` suite | One exhaustive lane: the planner is forced to `--min-lanes 1 --max-lanes 1` so it still owns the sequential batches and every per-batch watchdog |
-| ui | the **complete** `ConduitUITests` suite | One batched invocation over every UI class, with the planner's per-class watchdogs |
-| repeats | the repeat policy below | Runs even when the unit or UI lane failed, so one red lane cannot hide the rest; skipped when the build failed (no test products), and left failing when the plan could not be produced (there is nothing to project the repeat tasks from) |
+A run the round recovered is a PASS with the retry recorded
+(`infrastructure.retries`, `recovered`, and a caveat naming the healed
+wedge) — never a silently green run. A run that needed no recovery is the
+normal case. Work that produced a result is never re-executed across passes,
+so the aggregate execution counts are exact; a class that somehow did appear
+in two passes is counted once and reported in `reread_classes`.
 
 The lane runner, the planner and the timing extractor come from the **tested
 commit's own tree**, so the policy that decides the verdict is the policy of
@@ -580,14 +586,16 @@ vocabulary came up empty.
   back onto the shard's work item for exactly this reason.)
 * **infrastructure failures** — nonzero exit with a known zero failing-test
   count, or a result that could not be classified. Fails the gate. A
-  *persistent* one (the environment never recovered) is always fatal; a
-  *recovered* one (a bounded retry rescued it) is fatal too, because the run
-  is not trustworthy evidence — the operator reruns the gate. The only way to
-  downgrade a recovered one is the explicit
-  `--allow-recovered-infrastructure` flag, which is then recorded as a
-  **caveat** in `gate-result.json` and `summary.md`, the two documents a
-  result is cited from. `--no-lock` and `--no-simulator-prep`, and a failed
-  Simulator preparation, are recorded the same way.
+  *persistent* one (the environment never recovered) is always fatal. A
+  *recovered* one is split by what recovered it: healed by the gate's own
+  bounded recovery round (below) the run may PASS with the retry recorded and
+  a caveat naming the healed wedge; healed by the lane runner's own retry
+  inside one lane it is still fatal by default, because the run is not
+  trustworthy evidence — the operator reruns the gate. That default is the
+  only thing `--allow-recovered-infrastructure` downgrades, and it is then
+  recorded as a **caveat** in `gate-result.json` and `summary.md`, the two
+  documents a result is cited from. `--no-lock` and `--no-simulator-prep`, and
+  a failed Simulator preparation, are recorded the same way.
 * **watchdog timeouts (hangs)** — classified as timeouts, with the hung class
   or batch named by the runner.
 * **not executed / not diagnosed** — work that never ran. Fails the gate:
@@ -609,7 +617,7 @@ which is one batched invocation rather than a batch layout), per-phase
 `assertion_failures`/`infrastructure_failures`/`timeouts`/`not_executed`,
 `synthetic_failures` (XCTest reporting the run itself),
 `focused_repeats` (per class and per iteration), an `infrastructure` roll-up
-(`persistent`, `recovered`, `retries`, `simulator_resets`/`erases`), a
+(`persistent`, `recovered`, `retries` = recovery rounds the gate used, `retry_detail`, `simulator_resets`/`erases`), a
 `partial`/`partial_reasons` pair, `caveats` and `run_flags` (the operating
 flags a run was given), `problems[]`, and the final `verdict`
 (`PASS`/`FAIL`). The human `summary.md` next to it carries the same numbers.
