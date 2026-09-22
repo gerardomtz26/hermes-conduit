@@ -581,6 +581,99 @@ class RecoveryVerdictTests(unittest.TestCase):
             "the flag downgraded nothing here, so it must not claim to have: "
             "{0}".format(doc["caveats"]))
 
+    def test_a_double_wedged_repetition_stays_fatal_after_a_healed_round(self):
+        """The round never re-runs a repetition: a repeat iteration AND its
+        one retry both lost to the launch wedge must stay PERSISTENT and fail
+        the run. Stamping them 'gate recovery round' would launder a
+        repetition that never executed into a PASS.
+        """
+        self._primary(observed=("AlphaTests", "BetaTests"), cases=2)
+        lane_artifacts(self.run_dir / "lanes" / "unit-recovery",
+                       status="pass", classes=("GammaTests",), cases=1)
+        self._recovery_phase("pass")
+        meta = json.loads(
+            (self.run_dir / "meta.json").read_text(encoding="utf-8"))
+        meta["expected"]["repeat_classes"] = ["AlphaTests"]
+        meta["expected"]["repeat_iterations"] = 1
+        write_json(self.run_dir / "meta.json", meta)
+        base = self.run_dir / "repeats" / "AlphaTests"
+        for name in ("iter-1", "iter-1-retry"):
+            lane_artifacts(base / name, status="fail",
+                           classes=("AlphaTests",), cases=1,
+                           failures=self.WEDGE_FAILURE,
+                           attempts=[{"mode": "batch", "n": 1,
+                                      "class": "all",
+                                      "status": "test-failures"}],
+                           # The batch chain must carry the wedge too: the
+                           # default (passing) batch would chain a `passed`
+                           # onto the attempt and classify the work item as
+                           # recovered - the exact laundering under test.
+                           batches=[{"batch": 1,
+                                     "classes": ["AlphaTests"],
+                                     "timeout_s": 600,
+                                     "status": "test-failures",
+                                     "attempts": [{"attempt": 1,
+                                                   "status": "test-failures",
+                                                   "seconds": 1.0,
+                                                   "failures": 1}]}])
+            logs = base / name / "logs"
+            logs.mkdir(parents=True, exist_ok=True)
+            (logs / "batch-1-a1.log").write_text(self.BUSY_LOG + chr(10),
+                                                 encoding="utf-8")
+        code, doc = self._summarize()
+        # The unit wedge WAS healed by the round; the repeat was not touched
+        # by it - exactly one persistent event may remain, and it is the
+        # repetition's.
+        self.assertEqual(doc["unit"]["classes_missing"], [])
+        repeat_infra = [
+            e for e in doc["infrastructure"]["events"]["infrastructure_failures"]
+            if str(e.get("lane") or "").startswith("repeat:")]
+        self.assertTrue(repeat_infra, doc["infrastructure"]["events"])
+        self.assertFalse(
+            any(e.get("recovered_by") == "gate recovery round"
+                for e in repeat_infra),
+            "the round may not claim a repetition it never ran")
+        self.assertEqual(doc["infrastructure"]["persistent"], 1)
+        self.assertEqual(code, 1, doc["problems"])
+        self.assertEqual(doc["verdict"], "FAIL")
+        self.assertTrue(
+            any("persistent infrastructure" in p for p in doc["problems"]),
+            doc["problems"])
+
+    def test_a_timeout_the_lane_retry_healed_is_still_fatal(self):
+        """A hang the LANE's own retry passed is recovered evidence with the
+        lane as its healer: fatal by default, exactly like infrastructure -
+        never a silent PASS with nothing recorded anywhere.
+        """
+        lane_artifacts(self.run_dir / "lanes" / "unit", status="pass",
+                       classes=("AlphaTests", "BetaTests", "GammaTests"),
+                       cases=3,
+                       attempts=[{"mode": "batch", "n": 1, "class": "all",
+                                  "status": "timeout"},
+                                 {"mode": "batch-retry", "n": 1,
+                                  "class": "all", "status": "passed"},
+                                 {"mode": "batch", "n": 2, "class": "all",
+                                  "status": "passed"}],
+                       batches=[
+                           {"batch": 1, "classes": ["AlphaTests", "BetaTests"],
+                            "timeout_s": 600, "status": "pass",
+                            "attempts": [{"attempt": 1, "status": "timeout",
+                                          "seconds": 600.0, "failures": 0},
+                                         {"attempt": 2, "status": "passed",
+                                          "seconds": 1.0, "failures": 0}]},
+                           {"batch": 2, "classes": ["GammaTests"],
+                            "timeout_s": 500, "status": "pass",
+                            "attempts": [{"attempt": 1, "status": "passed",
+                                          "seconds": 1.0, "failures": 0}]},
+                       ])
+        code, doc = self._summarize()
+        retry_msgs = [p for p in doc["problems"] if "bounded retry" in p]
+        self.assertEqual(len(retry_msgs), 1, doc["problems"])
+        self.assertIn("(0 infra, 1 timeout: AlphaTests,BetaTests)",
+                      retry_msgs[0])
+        self.assertEqual(code, 1, doc["problems"])
+        self.assertEqual(doc["verdict"], "FAIL")
+
     def test_recurrence_after_recovery_fails_as_infrastructure(self):
         """The same class comes back after the round -> FAIL (infrastructure),
         and no third attempt is made."""

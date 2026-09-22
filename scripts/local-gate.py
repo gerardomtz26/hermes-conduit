@@ -1735,6 +1735,12 @@ def cmd_summarize(args) -> int:
         for entry in events["infrastructure_failures"]:
             if entry.get("recovered"):
                 continue
+            if str(entry.get("lane") or "") not in ("unit", "ui"):
+                # The round never re-runs a repetition (the repeat policy
+                # owns its one bounded retry), so repeat provenance must not
+                # be stolen: a double-wedged repetition stays PERSISTENT and
+                # fails the run instead of being stamped "healed".
+                continue
             entry["recovered"] = True
             entry["recovered_by"] = "gate recovery round"
         # A timeout is healed only when the round's own passes observed every
@@ -1774,8 +1780,16 @@ def cmd_summarize(args) -> int:
     # recovery round healed are the intended, recorded outcome.
     healed_by_round = [e for e in recovered_infra
                        if e.get("recovered_by") == "gate recovery round"]
-    recovered_without_healing = [e for e in recovered_infra
-                                 if e.get("recovered_by") != "gate recovery round"]
+    # Recovered evidence split by HEALER (docs/CI.md): what the gate's round
+    # healed is the recorded, intended outcome; what the LANE's own retry
+    # healed is never trustworthy evidence - the operator reruns, and only
+    # --allow-recovered-infrastructure downgrades it. Hangs follow the same
+    # split.
+    recovered_by_lane_retry = [e for e in recovered_infra
+                               if e.get("recovered_by") != "gate recovery round"]
+    lane_retry_timeouts = [
+        e for e in recovered_timeouts
+        if e.get("recovered_by") != "gate recovery round"]
     events["infrastructure_recovered_by_round"] = healed_by_round
     if events["assertion_failures"] or repeat_failures or unit_summary.get("failures") \
             or ui_summary.get("failures"):
@@ -1795,21 +1809,19 @@ def cmd_summarize(args) -> int:
             "persistent infrastructure failure(s)/hang(s) present "
             "({0} infra, {1} timeout)".format(len(persistent_infra),
                                               len(persistent_timeouts)))
-    if recovered_without_healing and not allow_recovered:
-        # Only a timeout the LANE's own retry healed belongs in this message:
-        # one the gate's round healed was healed by the round, and telling the
-        # operator to rerun evidence the round already recovered is a
-        # misattribution.
-        lane_retry_timeouts = [
-            e for e in recovered_timeouts
-            if e.get("recovered_by") != "gate recovery round"]
+    # Both healers count (not just infrastructure): a hang the LANE's own
+    # retry passed is recovered evidence too - without it the run would pass
+    # silently with nothing recorded. Round-healed hangs are excluded by the
+    # lists above: they are the recorded, intended outcome.
+    if (recovered_by_lane_retry or lane_retry_timeouts) \
+            and not allow_recovered:
         gate_problems.append(
             "infrastructure failures were recovered by a bounded retry"
             " ({0} infra, {1} timeout: {2}); the run is not trustworthy "
             "evidence - rerun the gate".format(
-                len(recovered_without_healing), len(lane_retry_timeouts),
+                len(recovered_by_lane_retry), len(lane_retry_timeouts),
                 _csv(sorted({e["name"] for e in
-                             recovered_without_healing +
+                             recovered_by_lane_retry +
                              lane_retry_timeouts}))))
     # The lane runner also labels recovered classes directly. That label is
     # the same recovery seen through a second lens, so it is never ADDED to
@@ -1849,7 +1861,8 @@ def cmd_summarize(args) -> int:
     # caveat would describe a downgrade that never happened. The flag flips
     # exactly two problems - the lane-retry one above and an unaccounted
     # runner label - so those are the conditions.
-    if allow_recovered and (recovered_without_healing or unaccounted):
+    if allow_recovered and (recovered_by_lane_retry or lane_retry_timeouts
+                            or unaccounted):
         caveats.append("--allow-recovered-infrastructure downgraded recovered "
                        "infrastructure from FAIL to this verdict")
     sim_record = meta.get("simulator") or {}
@@ -1872,10 +1885,13 @@ def cmd_summarize(args) -> int:
             caveats.append("Simulator preparation failed before {0}".format(
                 entry.get("name")))
     if round_healed:
+        healed_by_round_n = len(healed_by_round) + sum(
+            1 for e in recovered_timeouts
+            if e.get("recovered_by") == "gate recovery round")
         caveats.append(
-            "the bounded recovery round healed {0} simulator test-runner launch "
-            "failure(s) after erasing the gate simulator; this run is not an "
-            "entirely clean one".format(runner_failures))
+            "the bounded recovery round healed {0} infrastructure "
+            "failure(s)/hang(s) after erasing the gate simulator; this run "
+            "is not an entirely clean one".format(healed_by_round_n))
     healed_repeats = [
         "{0}#{1}".format(entry["class"], iteration["iteration"])
         for entry in (repeat_entries or [])

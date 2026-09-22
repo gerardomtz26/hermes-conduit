@@ -615,7 +615,10 @@ vocabulary came up empty.
   documents a result is cited from. `--no-lock` and `--no-simulator-prep`, and
   a failed Simulator preparation, are recorded the same way.
 * **watchdog timeouts (hangs)** — classified as timeouts, with the hung class
-  or batch named by the runner.
+  or batch named by the runner. They follow the same split by healer as
+  infrastructure failures: healed by the gate's round the run may pass with
+  the caveat; healed by the lane runner's own retry they are fatal by
+  default (the same `--allow-recovered-infrastructure` downgrade applies).
 * **not executed / not diagnosed** — work that never ran. Fails the gate:
   unexecuted tests may never masquerade as passed. Because a unit lane stops
   at the batch that failed, the gate then runs the batches it never reached as
