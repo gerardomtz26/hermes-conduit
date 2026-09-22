@@ -518,6 +518,12 @@ class RecoveryVerdictTests(unittest.TestCase):
             any(e.get("recovered_by") == "gate recovery round"
                 for e in ui_infra),
             "a unit recovery must never heal UI evidence")
+        self.assertEqual(
+            [e["lane"] for e in
+             doc["infrastructure"]["events"]["infrastructure_persistent"]],
+            ["ui"],
+            "the persistent event is the UI one - not a unit event healed "
+            "or lost along the way")
         self.assertTrue(any("persistent infrastructure" in p
                             for p in doc["problems"]), doc["problems"])
         self.assertEqual(code, 1, doc["problems"])
@@ -526,7 +532,9 @@ class RecoveryVerdictTests(unittest.TestCase):
     def test_a_ui_recovery_never_heals_unit_infrastructure(self):
         """Cross-suite, the mirror: a UI round that healed the UI wedge must
         not touch an unrelated unit event - that event stays persistent."""
-        # The unit wedge's classes all had results; no unit round ran at all.
+        # Observations say every unit class has results while WEDGE_BATCHES
+        # still carries the refusal: that divergence IS the cross-suite trap
+        # under test - coverage is complete, yet nothing re-ran the event.
         self._primary(observed=("AlphaTests", "BetaTests", "GammaTests"), cases=3)
         # The UI shard was refused with no results, and the UI round re-ran it.
         lane_artifacts(self.run_dir / "lanes" / "ui", status="fail",
@@ -560,8 +568,47 @@ class RecoveryVerdictTests(unittest.TestCase):
             all(e.get("recovered_by") == "gate recovery round"
                 for e in ui_infra),
             "the UI round healed its OWN wedge - that much is legitimate")
+        self.assertEqual(
+            [e["lane"] for e in
+             doc["infrastructure"]["events"]["infrastructure_persistent"]],
+            ["unit"],
+            "the persistent event is the unit one - not a UI event healed "
+            "or lost along the way")
         self.assertTrue(any("persistent infrastructure" in p
                             for p in doc["problems"]), doc["problems"])
+        self.assertEqual(code, 1, doc["problems"])
+        self.assertEqual(doc["verdict"], "FAIL")
+
+    def test_an_incomplete_other_suite_does_not_blank_a_real_recovery(self):
+        """Per-suite gates: the unit round ran and left the unit suite
+        complete, so its healed event stays recorded as recovered even though
+        the UI suite is incomplete for its own unrelated reason. The run still
+        FAILS - on the UI suite's missing class, not on a blanked recovery
+        record."""
+        self._faithful_unit_round()
+        # The UI shard was refused with no results and NO UI round ran.
+        lane_artifacts(self.run_dir / "lanes" / "ui", status="fail",
+                       classes=(), cases=0, failures=self.WEDGE_FAILURE,
+                       attempts=[{"mode": "batch", "n": 1, "class": "all",
+                                  "status": "test-failures"}],
+                       batches=[{"batch": 1, "classes": ["LaunchUITests"],
+                                 "timeout_s": 600, "status": "test-failures",
+                                 "attempts": [{"attempt": 1,
+                                               "status": "test-failures",
+                                               "seconds": 1.0,
+                                               "failures": 1}]}])
+        self._wedge_log(self.run_dir / "lanes" / "ui")
+        code, doc = self._summarize()
+        unit_infra = [
+            e for e in doc["infrastructure"]["events"]["infrastructure_failures"]
+            if e.get("lane") == "unit"]
+        self.assertTrue(unit_infra, doc["infrastructure"]["events"])
+        self.assertTrue(
+            all(e.get("recovered_by") == "gate recovery round"
+                for e in unit_infra),
+            "the unit round really did re-run this work - its record must "
+            "say so even while the other suite fails for its own reason")
+        self.assertIn("LaunchUITests", doc["ui"]["classes_missing"])
         self.assertEqual(code, 1, doc["problems"])
         self.assertEqual(doc["verdict"], "FAIL")
 
