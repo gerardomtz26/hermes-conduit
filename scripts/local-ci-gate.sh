@@ -704,6 +704,20 @@ run_lane() { # $1=kind $2=lane $3=target $4=classes $5=predicted $6=timeout
       --iterations 1 --xctestrun "$XCTESTRUN" --result-dir "$result_dir" "$@"
 }
 
+# Settle the device between launches WITHOUT resetting it: terminate any
+# instance of the app still shutting down and give SpringBoard a beat. The
+# refusal's exact text ("Application failed preflight checks ... reason:
+# Busy") is the install racing a dying instance of the same bundle, and the
+# gate saw it return after the round's first couple of launches - so a
+# one-time settle before the round is not enough. This is hygiene, not
+# recovery: it erases nothing and re-runs nothing.
+simulator_settle() {
+  local udid="${SIMULATOR_UDID:-}"
+  [ -z "$udid" ] && return 0
+  xcrun simctl terminate "$udid" com.milim.relay >/dev/null 2>&1 || true
+  sleep 2
+}
+
 # Bounded Simulator preparation before a lane starts: shut the devices down,
 # erase the destination, boot it, and WAIT for a complete boot, using
 # ci-lib.sh's own recovery primitive rather than a new one.
@@ -855,6 +869,7 @@ else
             rtimeout="${rtimeout%$'\r'}"
             rpredicted="${rpredicted%$'\r'}"
             rbatches="${rbatches%$'\r'}"
+            simulator_settle
             if run_lane unit "$GATE_UNIT_LANE-recovery-$rcls" "$GATE_UNIT_TARGET" \
                 "$rclasses" "$rpredicted" "$rtimeout" \
                 "$RUN_DIR/lanes/unit-recovery-$rcls" \
@@ -897,6 +912,7 @@ else
           if [ "${GATE_RECOVERY_PRESENT:-0}" -eq 1 ]; then
             echo "== recovery round 1 of 1 (UI): erasing the gate simulator and retrying ${GATE_RECOVERY_CLASS_COUNT} class(es) once =="
             simulator_prep ui-recovery
+            simulator_settle
             if run_lane ui "$GATE_UI_LANE-recovery" "$GATE_UI_TARGET" \
                 "$GATE_RECOVERY_CLASSES" 0 "$GATE_RECOVERY_TIMEOUT" \
                 "$RUN_DIR/lanes/ui-recovery" \
