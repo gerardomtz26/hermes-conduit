@@ -502,9 +502,9 @@ if needs_extraction; then
     bad "the wedged run was not recovered (see $RUN4/summary.md)"
     tail -n 20 "$RUN4/summary.md" 2>/dev/null
   fi
+GATE4="$RUN4/gate-result.json"
 assert_eq "no assertion failure claimed" \
   "$(json_get "$GATE4" 'doc["unit"]["failures"]')" "0"
-GATE4="$RUN4/gate-result.json"
 assert_eq "the synthetic failure is counted separately" \
   "$(json_get "$GATE4" 'doc["unit"]["synthetic_failures"] > 0')" "True"
 assert_eq "the recovery round was used exactly once" \

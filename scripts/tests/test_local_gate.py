@@ -496,6 +496,35 @@ class RecoveryVerdictTests(unittest.TestCase):
         self.assertTrue(any("more than one pass" in c for c in doc["caveats"]),
                         "the re-run is reported as a caveat, not hidden")
 
+    def test_stale_not_executed_for_a_whole_batch_is_dropped(self):
+        """A "not executed" entry names work as a batch ("A,B"), so it is only
+        stale when BOTH classes have results - and the coverage check has to
+        split the name to see that (a whole-string match never would)."""
+        lane_artifacts(self.run_dir / "lanes" / "unit", status="fail",
+                       classes=("AlphaTests",), cases=1,
+                       failures=self.WEDGE_FAILURE,
+                       attempts=[{"mode": "batch", "n": 1, "class": "all",
+                                  "status": "test-failures"},
+                                 {"mode": "batch", "n": 2, "class": "all",
+                                  "status": "not_run"}],
+                       batches=[
+                           {"batch": 1, "classes": ["AlphaTests"],
+                            "timeout_s": 600, "status": "test-failures",
+                            "attempts": [{"attempt": 1, "status": "test-failures",
+                                          "seconds": 1.0, "failures": 1}]},
+                           {"batch": 2, "classes": ["BetaTests", "GammaTests"],
+                            "timeout_s": 500, "status": "not_run",
+                            "attempts": []}])
+        self._wedge_log(self.run_dir / "lanes" / "unit")
+        lane_artifacts(self.run_dir / "lanes" / "unit-recovery", status="pass",
+                       classes=("BetaTests", "GammaTests"), cases=2)
+        self._recovery_phase("pass")
+        code, doc = self._summarize()
+        self.assertEqual(code, 0, doc["problems"])
+        self.assertEqual(doc["unit"]["not_executed"], [],
+                         "both classes of the batch have results now")
+        self.assertFalse(any("not executed" in p for p in doc["problems"]))
+
     def test_gate_simulator_is_recorded(self):
         self._primary(observed=("AlphaTests", "BetaTests"), cases=2)
         lane_artifacts(self.run_dir / "lanes" / "unit-recovery", status="pass",

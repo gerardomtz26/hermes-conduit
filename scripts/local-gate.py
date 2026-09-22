@@ -1248,8 +1248,8 @@ def _merge_lane_summaries(passes, expected_classes) -> dict:
     not_exec = [entry for summary in passes
                 for entry in (summary.get("not_executed") or [])]
     merged["not_executed"] = [entry for entry in not_exec
-                              if not _covers_names(sorted(observed),
-                                                   str(entry.get("name") or ""))]
+                              if not _classes_have_results(
+                                  observed, str(entry.get("name") or ""))]
 
     merged["reread_classes"] = reread
     merged["passes"] = [{
@@ -1799,6 +1799,17 @@ def _covers_names(names, candidate: str) -> bool:
         if candidate in [part for part in str(name).split(",") if part]:
             return True
     return False
+
+
+def _classes_have_results(observed, name: str) -> bool:
+    """True when every class named by `name` has a result.
+
+    The counterpart of _covers_names: a "not executed" entry names work as a
+    batch ("AlphaTests,BetaTests"), so it is only stale when ALL of its
+    classes produced a result in some pass.
+    """
+    parts = [part for part in str(name or "").split(",") if part]
+    return bool(parts) and all(part in observed for part in parts)
 
 
 def _write_markdown(path: str, result: dict) -> None:
