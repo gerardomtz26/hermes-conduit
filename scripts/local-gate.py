@@ -397,6 +397,159 @@ def _num_or_zero(value) -> float:
         return 0.0
 
 
+def cmd_recovery_spec(args) -> int:
+    """Project the bounded recovery round's retry list.
+
+    The recovery is allowed for exactly one infrastructure class: the
+    simulator/host-app launch refusal (XCTest's synthetic "System Failures"
+    entry, and/or the verified Busy signature in the lane's log). A genuine
+    assertion anywhere in the run disqualifies the round entirely - a real
+    failure is never retried.
+
+    The retry list is "every class the plan promised that no pass has produced
+    a result for". Rework that already reported a result (passing or genuinely
+    failed) is never re-executed, which is what makes the aggregate execution
+    count exact across passes.
+    """
+    plan = load_json(args.plan)
+    if not isinstance(plan, dict):
+        fail("plan not readable: {0}".format(args.plan))
+        return 3
+    kind = "ui" if args.kind == "ui" else "unit"
+    ui = kind == "ui"
+    lane = _single_lane(plan, "ui_lanes" if ui else "unit_lanes")
+    if not lane or not lane.get("classes"):
+        fail("plan must carry exactly one {0} lane with classes".format(kind))
+        return 3
+    if ui and not lane.get("batches"):
+        # The UI lane runs one batched invocation; its per-class watchdogs are
+        # the planner's table, which travels with the lane.
+        if not lane.get("class_timeouts"):
+            fail("plan's UI lane carries no per-class watchdog table")
+            return 3
+    elif not lane.get("batches"):
+        fail("plan must carry exactly one unit lane with a batch layout")
+        return 3
+
+    batches = lane.get("batches") or []
+    planned = list(lane.get("classes") or [])
+    class_timeouts = {}
+    for pair in (lane.get("class_timeouts") or "").split(","):
+        if "=" in pair:
+            name, value = pair.split("=", 1)
+            class_timeouts[name] = _int_or_zero(value)
+
+    seen = set()
+    genuine_failures = []
+    wedge_hits = 0
+    for lane_dir in [p for p in args.lane.split(",") if p]:
+        read = _read_lane(lane_dir)
+        seen.update(read.get("classes_observed") or [])
+        genuine_failures.extend(read.get("real_failures") or [])
+        wedge_hits += _int_or_zero(read.get("launch_signature_hits"))
+
+    if genuine_failures or real_failures_in_parts(args.lane):
+        # A product failure is present anywhere: the round is disqualified and
+        # the gate must fail on it rather than retry around it.
+        fail("recovery round refused: genuine test failures are present")
+        return 3
+    if wedge_hits <= 0 and not synthetic_in_parts(args.lane):
+        fail("recovery round refused: no launch-refusal evidence in the "
+             "given lane results")
+        return 3
+
+    # Synthetic entries name the RUN, never a planned class, so they never
+    # count as coverage.
+    missing = [c for c in planned if c not in seen]
+    if not missing:
+        write_env(args.out, {"GATE_RECOVERY_PRESENT": 0})
+        print("recovery round: nothing left to retry (0 classes)")
+        return 0
+
+    tasks = []
+    for name in missing:
+        found = None
+        for batch in batches:
+            if name in (batch.get("classes") or []):
+                found = batch
+                break
+        budget = 0
+        if ui:
+            budget = class_timeouts.get(name, 0)
+        elif found:
+            budget = int(found.get("timeout_s") or 0)
+        capped = min(budget, args.timeout_cap) if args.timeout_cap > 0 else budget
+        tasks.append({
+            "class": name,
+            "target": lane.get("target") or ("ConduitUITests" if ui else "ConduitTests"),
+            "predicted_s": (found.get("predicted_s") or 0) if found else 0,
+            "timeout_s": capped if capped > 0 else (budget or 600),
+        })
+    timeout_csv = ",".join("{0}={1}".format(t["class"], t["timeout_s"]) for t in tasks)
+    env = {
+        "GATE_RECOVERY_PRESENT": 1,
+        "GATE_RECOVERY_KIND": "ui" if ui else "unit",
+        "GATE_RECOVERY_CLASS_COUNT": len(tasks),
+        "GATE_RECOVERY_CLASSES": _csv(t["class"] for t in tasks),
+        # One batches-json for a single recovery pass: the planner's own batch
+        # objects (unit) or one batch per class (UI), so the watchdogs keep the
+        # planner's policy.
+        "GATE_RECOVERY_BATCHES_JSON": json.dumps(
+            [{"classes": [t["class"]],
+              "predicted_s": t["predicted_s"],
+              "timeout_s": t["timeout_s"]} for t in tasks],
+            separators=(",", ":")),
+        "GATE_RECOVERY_CLASS_TIMEOUTS": timeout_csv,
+        "GATE_RECOVERY_TIMEOUT": int(sum(t["timeout_s"] for t in tasks)),
+    }
+    write_env(args.out, env)
+    print("recovery round ({0}): retrying {1} class(es) once".format(
+        kind, len(tasks)))
+    return 0
+
+
+def real_failures_in_parts(lane_dirs) -> bool:
+    """Best-effort check across the lane directories' per-invocation parts:
+    a genuine failing test anywhere disqualifies the recovery round."""
+    for lane_dir in [p for p in (lane_dirs or "").split(",") if p]:
+        parts_dir = os.path.join(lane_dir, "parts")
+        try:
+            names = sorted(os.listdir(parts_dir))
+        except OSError:
+            continue
+        for name in names:
+            match = PART_NAME.match(name)
+            if not match:
+                continue
+            doc = load_json(os.path.join(parts_dir, name))
+            if not isinstance(doc, dict):
+                continue
+            real, _ = split_failures(doc.get("failures"))
+            if real:
+                return True
+    return False
+
+
+def synthetic_in_parts(lane_dirs) -> bool:
+    for lane_dir in [p for p in (lane_dirs or "").split(",") if p]:
+        parts_dir = os.path.join(lane_dir, "parts")
+        try:
+            names = sorted(os.listdir(parts_dir))
+        except OSError:
+            continue
+        for name in names:
+            match = PART_NAME.match(name)
+            if not match:
+                continue
+            doc = load_json(os.path.join(parts_dir, name))
+            if not isinstance(doc, dict):
+                continue
+            _, synthetic = split_failures(doc.get("failures"))
+            if synthetic:
+                return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # meta / phase / simulator
 # ---------------------------------------------------------------------------
@@ -642,8 +795,8 @@ def _work_items(attempts, batches):
 
 def _read_parts(lane_dir: str):
     """Per-invocation extraction parts, keyed as the lane runner names them:
-    `detail-batch-<n>-a<k>.json` for a unit batch, `detail-class-<Cls>-a<k>.json`
-    for a UI class, `detail-batch-a<k>.json` for a UI shard. Only the failure
+    `detail-batch-<n>-a<k>.json` for a unit batch, `detail-<Cls>-a<k>.json` for
+    a UI class, `detail-batch-a<k>.json` for a UI shard. Only the failure
     lists are used, and only to attribute a failure to the invocation that
     produced it (the merged detail document cannot).
     """
@@ -665,6 +818,53 @@ def _read_parts(lane_dir: str):
         entry["real"] += len(real)
         entry["synthetic"] += len(synthetic)
     return parts
+
+
+# The verified signature of the infrastructure class the bounded recovery is
+# allowed for. It is the simulator refusing to install/launch the host app, as
+# observed on this machine:
+#
+#   Simulator device failed to launch com.milim.relay.
+#   Application failed preflight checks ... reason: Busy
+#
+# Anything else - a crash with no synthetic entry, a watchdog timeout, a build
+# error - is NOT this class and must never be recovered.
+LAUNCH_SIGNATURES = (
+    "Application failed preflight checks",
+    "Simulator device failed to launch",
+    "Failed to launch app with identifier",
+    "BSErrorCodeDescription=Busy",
+    "reason: Busy",
+)
+
+
+def scan_launch_signatures(lane_dir: str):
+    """Best-effort scan of a lane's own logs for the verified launch-refusal
+    signature. Returns (hit_count, sample) so the decision is auditable from
+    the result document rather than being a bare boolean."""
+    hits = 0
+    sample = ""
+    logs_dir = os.path.join(lane_dir, "logs")
+    try:
+        names = sorted(os.listdir(logs_dir))
+    except OSError:
+        return 0, ""
+    for name in names:
+        if not name.endswith(".log"):
+            continue
+        try:
+            with open(os.path.join(logs_dir, name), encoding="utf-8",
+                      errors="replace") as fh:
+                for line in fh:
+                    for signature in LAUNCH_SIGNATURES:
+                        if signature in line:
+                            hits += 1
+                            if not sample:
+                                sample = "{0}: {1}".format(name, line.strip()[:160])
+                            break
+        except OSError:
+            continue
+    return hits, sample
 
 
 def _classify_attempts(attempts, batches, parts=None, lane_has_real_failures=True):
@@ -861,6 +1061,30 @@ def _read_lane(lane_dir: str) -> dict:
     out["real_failures"] = [f for f in out["failures"] if not is_synthetic_failure(f)]
     out["failures"] = out["real_failures"]
     out["parts"] = _read_parts(lane_dir)
+    signature_hits, signature_sample = scan_launch_signatures(lane_dir)
+    out["launch_signature_hits"] = signature_hits
+    out["launch_signature_sample"] = signature_sample
+    # The verified infrastructure class the bounded recovery is allowed for:
+    # the host/test-runner launch refusal. It is confirmed either by XCTest's
+    # synthetic "it was the run, not a test" entry, or by the signature in the
+    # lane's own log - never by a timeout or an unreadable bundle.
+    out["is_launch_wedge"] = bool(
+        (synthetic and not out["real_failures"]) or
+        (signature_hits > 0 and not out["real_failures"]))
+    # Per-class execution shares, so several passes over the same lane can be
+    # merged per class instead of summed (a class re-run in a later pass must
+    # not be counted twice). extract-test-timings.py splits a part's case
+    # count across the classes that part contributed; with one class per
+    # invocation (repeats, recovery) the share is exact.
+    observed_classes = dict(observations.get("classes") or {}) \
+        if isinstance(observations, dict) else {}
+    cases = _int_or_zero((observations.get("counts") or {}).get("cases")) \
+        if isinstance(observations, dict) else 0
+    if observed_classes:
+        share = float(cases) / float(len(observed_classes))
+        out["class_shares"] = {c: share for c in observed_classes}
+    else:
+        out["class_shares"] = {}
     out.update(_classify_attempts(out["attempts"], out["batches"], out["parts"],
                                  bool(out["real_failures"])))
     return out
@@ -908,6 +1132,7 @@ def _summarize_lane(lane: dict, expected_classes, expected_batches=None) -> dict
             + _csv(sorted({e["name"] for e in lane["assertion_retried_until_green"]})))
 
     return {
+        "dir": lane["dir"],
         "status": lane["status"],
         "executions": lane["executions"],
         "failures": len(lane["failures"]),
@@ -921,6 +1146,12 @@ def _summarize_lane(lane: dict, expected_classes, expected_batches=None) -> dict
         "classes_observed": len(observed),
         "classes_missing": missing,
         "observed_names": sorted(observed),
+        # Per-class execution shares, used by the multi-pass merge so a class
+        # is counted once across passes instead of once per pass.
+        "class_shares": lane.get("class_shares") or {},
+        "launch_signature_hits": lane.get("launch_signature_hits") or 0,
+        "launch_signature_sample": lane.get("launch_signature_sample") or "",
+        "is_launch_wedge": bool(lane.get("is_launch_wedge")),
         "batch_count": len(lane["batches"] or []) or None,
         "batches_expected": expected_batches,
         "assertion_failures": lane["assertion_failures"],
@@ -955,63 +1186,100 @@ _MERGE_LIST_FIELDS = ("failure_detail", "assertion_failures",
                       "persistent_infra_classes", "flaky")
 
 
-def _merge_lane_summaries(primary: dict, extra: dict, expected_classes) -> dict:
-    """Fold a continuation pass into the lane it continues.
+def _merge_lane_summaries(passes, expected_classes) -> dict:
+    """Fold a lane's follow-up passes (continuation, recovery) into its result.
 
-    The continuation's own coverage check is deliberately not applied here:
-    what must hold is the AGGREGATE one (every class the plan promised was
-    executed by the lane or by its continuation), which is computed against
-    `expected_classes`. Its result-directory checks and its failure/event
-    evidence are kept.
+    Two invariants earn their keep here:
+
+    * a class is counted ONCE, from the LAST pass that produced a result for
+      it. Passes only ever run work no earlier pass completed, so this is a
+      no-op on a well-behaved run - and on a run where a class WAS re-run, the
+      aggregate count stays truthful instead of double counting it, with the
+      class recorded in `reread_classes` so the re-run is visible.
+    * the follow-up passes' own coverage checks are not applied: what must hold
+      is the AGGREGATE one (every class the plan promised was executed by some
+      pass), computed against `expected_classes`.
     """
+    passes = [p for p in passes if p]
+    if not passes:
+        return {}
+    primary = passes[0]
     merged = dict(primary)
-    merged["status"] = "fail" if "fail" in (str(primary["status"]), str(extra["status"])) \
+    merged["status"] = "fail" if any(str(p.get("status")) == "fail" for p in passes) \
         else primary["status"]
-    for field in ("executions", "batch_count", "duration_s", "predicted_s",
-                  "timeout_s"):
-        left, right = primary.get(field), extra.get(field)
-        if left is None or right is None:
-            merged[field] = left if right is None else right
-        else:
-            merged[field] = left + right
+
     for field in ("failures", "synthetic_failures"):
-        merged[field] = _int_or_zero(primary.get(field)) + _int_or_zero(extra.get(field))
-    merged["simulator_reset"] = bool(primary.get("simulator_reset")) or \
-        bool(extra.get("simulator_reset"))
-    merged["simulator_erase"] = bool(primary.get("simulator_erase")) or \
-        bool(extra.get("simulator_erase"))
-    for field in _MERGE_LIST_FIELDS:
-        merged[field] = list(primary.get(field) or []) + list(extra.get(field) or [])
-    expected = list(expected_classes or [])
-    observed = set()
-    for summary in (primary, extra):
-        observed.update(summary.get("observed_names") or [])
-    missing = sorted(set(expected) - observed)
-    merged["classes_expected"] = len(expected)
+        merged[field] = _int_or_zero(primary.get(field)) + \
+            sum(_int_or_zero(p.get(field)) for p in passes[1:])
+
+    # Per-class execution shares: last pass wins for a class more than one
+    # pass reported, which is exactly what the runner's own part merge does.
+    shares = {}
+    share_pass = {}
+    for index, summary in enumerate(passes):
+        for name, value in (summary.get("class_shares") or {}).items():
+            shares[name] = value
+            share_pass[name] = index
+    merged["executions"] = int(round(sum(shares.values()))) if shares else None
+    observed = set(shares)
+    seen_in = {}
+    for name in observed:
+        seen_in[name] = sum(
+            1 for summary in passes
+            if name in (summary.get("observed_names") or []))
+    reread = sorted(name for name in observed if seen_in[name] > 1)
+    merged["classes_expected"] = len(list(expected_classes or []))
     merged["classes_observed"] = len(observed)
+    missing = sorted(set(expected_classes or []) - observed)
     merged["classes_missing"] = missing
-    merged["continuation"] = {
-        "batches": extra.get("batch_count"),
-        "classes": extra.get("classes_observed"),
-        "executions": extra.get("executions"),
-        "failures": extra.get("failures"),
-        "problems": list(extra.get("problems") or []),
-    }
+
+    for field in ("batch_count", "duration_s", "predicted_s", "timeout_s"):
+        values = [p.get(field) for p in passes if p.get(field) is not None]
+        merged[field] = sum(values) if values else None
+    merged["simulator_reset"] = any(p.get("simulator_reset") for p in passes)
+    merged["simulator_erase"] = any(p.get("simulator_erase") for p in passes)
+    for field in _MERGE_LIST_FIELDS:
+        merged[field] = [entry for summary in passes
+                         for entry in (summary.get(field) or [])]
+    # "Work recorded as not executed" is the stopped lane's evidence that a
+    # later pass may have since executed; recomputing it from the aggregate is
+    # what keeps a red report from claiming a class never ran when it did.
+    merged["not_executed"] = [entry for summary in passes[1:]
+                              for entry in (summary.get("not_executed") or [])]
+
+    merged["reread_classes"] = reread
+    merged["passes"] = [{
+        "name": p.get("dir"),
+        "status": p.get("status"),
+        "classes_observed": p.get("classes_observed"),
+        "observed_names": p.get("observed_names") or [],
+        "executions": p.get("executions"),
+        "failures": p.get("failures"),
+        "synthetic_failures": p.get("synthetic_failures"),
+        "launch_signature_hits": p.get("launch_signature_hits"),
+        "is_launch_wedge": p.get("is_launch_wedge"),
+    } for p in passes]
+
+    # A lane that stopped on the launch wedge and whose work the gate's
+    # bounded recovery round then completed is not a problem in itself: its
+    # failure is exactly what the round exists for, and it is recorded as
+    # infrastructure.retries. Any other lane verdict stands as a problem.
+    healed_verdicts = [str(p.get("dir") or "") for p in passes
+                       if "recovery" in str(p.get("dir") or "")]
+    if healed_verdicts and not merged.get("classes_missing"):
+        primary["problems"] = [p for p in (primary.get("problems") or [])
+                               if not p.startswith("lane runner verdict is")]
+
     problems = list(primary.get("problems") or [])
     problems = [p for p in problems
                 if not p.startswith("classes never executed")
                 and not p.startswith("work recorded as not executed")]
     if missing:
         problems.append("classes never executed: {0}".format(_csv(missing)))
-    # "Work recorded as not executed" is primary-lane evidence that the
-    # continuation may have since executed: recomputing it from the aggregate
-    # (instead of carrying the primary's list forward) is what keeps a red
-    # report from telling the operator a class never ran when it did.
-    merged["not_executed"] = [entry for entry in (extra.get("not_executed") or [])]
     if merged["not_executed"]:
         problems.append("work recorded as not executed: {0}".format(
             _csv(sorted({e["name"] for e in merged["not_executed"]}))))
-    problems.extend(extra.get("problems") or [])
+    problems.extend(p for summary in passes[1:] for p in (summary.get("problems") or []))
     merged["problems"] = _dedupe(problems)
     return merged
 
@@ -1136,6 +1404,16 @@ def cmd_summarize(args) -> int:
     phases["sim-prep"] = sim_prep_doc if sim_prep_doc else {
         "phase": "sim-prep", "status": sim_prep_status, "duration_s": 0,
         "checks": []}
+    # The bounded recovery round. Its outcome is evidence, not a verdict: what
+    # decides the gate is whether the classes it retried now have results, and
+    # whether the same infrastructure class came back.
+    recovery_status, recovery_doc = _phase_status(run_dir, "recovery")
+    phases["recovery"] = recovery_doc if recovery_doc else {
+        "phase": "recovery", "status": recovery_status, "duration_s": 0,
+        "checks": []}
+    recovery_rounds = sum(
+        1 for c in (phases["recovery"].get("checks") or [])
+        if str(c.get("status")) in ("pass", "fail"))
 
     # --- lanes ------------------------------------------------------------
     unit = _read_lane(os.path.join(run_dir, "lanes", "unit"))
@@ -1150,12 +1428,31 @@ def cmd_summarize(args) -> int:
     # the rest of the suite. Its evidence is folded in here, and the coverage
     # that matters is the aggregate against the plan's full class list.
     continuation_dir = os.path.join(run_dir, "lanes", "unit-continuation")
+    recovery_dir = os.path.join(run_dir, "lanes", "unit-recovery")
+    unit_lanes = [unit]
     if os.path.isdir(continuation_dir):
-        continuation = _read_lane(continuation_dir)
-        continuation_summary = _summarize_lane(continuation, None)
-        unit_summary = _merge_lane_summaries(unit_summary, continuation_summary,
-                                            unit_expected)
+        unit_lanes.append(_read_lane(continuation_dir))
+    if os.path.isdir(recovery_dir):
+        unit_lanes.append(_read_lane(recovery_dir))
+    unit_summary = _merge_lane_summaries(
+        [_summarize_lane(l, unit_expected if l is unit else None,
+                         _int_or_zero(expected.get("unit_batches")) or None if l is unit else None)
+         for l in unit_lanes],
+        unit_expected)
     gate_problems.extend("unit: " + p for p in unit_summary["problems"])
+    # The recovery round is allowed once. If the pass it produced shows the
+    # same infrastructure class again, the run fails as infrastructure and no
+    # third attempt is made - the gate does not loop until green.
+    for entry in unit_summary.get("passes") or []:
+        if entry.get("is_launch_wedge") and "recovery" in str(entry.get("name")):
+            gate_problems.append(
+                "the recovery round hit the same simulator launch-refusal class "
+                "again; no further recovery is attempted")
+    # Nothing was re-run by accident: every pass runs only work no earlier pass
+    # completed, so a class reported by two passes is evidence of a re-run and
+    # is recorded (and the aggregate count already counts it once). It is a
+    # caveat rather than a problem: the counts are truthful, but a pass that
+    # re-ran completed work means the projection was wrong.
 
     ui_expected, ui_expect_problems = _expected_classes(run_dir, "ui", expected)
     if ui_expected:
@@ -1201,6 +1498,18 @@ def cmd_summarize(args) -> int:
         "retries": [],
         "assertion_retried_until_green": [],
     }
+    # Classes the gate's OWN bounded recovery round ran. Whether an
+    # infrastructure event was healed is decided by the outcome of the round,
+    # not by name matching: the round either left the run complete (then the
+    # wedge it was invoked for was healed) or it did not (then the infrastructure
+    # is persistent and the gate fails).
+    recovery_ran = any(
+        "recovery" in str(entry.get("name") or "")
+        for entry in (unit_summary.get("passes") or []) +
+                    (ui_summary.get("passes") or []))
+    incomplete_after_round = (unit_summary.get("classes_missing") or
+                              ui_summary.get("classes_missing") or [])
+    round_healed = bool(recovery_ran and not incomplete_after_round)
     for label, summary in (("unit", unit_summary), ("ui", ui_summary)):
         for key in ("assertion_failures", "infrastructure_failures", "timeouts",
                     "not_executed", "retries",
@@ -1229,6 +1538,16 @@ def cmd_summarize(args) -> int:
     # evidence either (the operator reruns it) unless the caller explicitly
     # downgraded it. Assertions that were re-run until they passed are not
     # validation in any mode.
+    #
+    # The gate's bounded recovery round heals exactly one class of event -
+    # `test-runner-failure`, the simulator/host-app launch refusal - and only
+    # when it actually left the run complete. A hang or an unreadable bundle
+    # is a different class and is never healed by it.
+    if round_healed:
+        for entry in events["infrastructure_failures"]:
+            if str(entry.get("status")) == "test-runner-failure":
+                entry["recovered"] = True
+                entry["recovered_by"] = "gate recovery round"
     persistent_infra = [e for e in events["infrastructure_failures"]
                         if not e.get("recovered")]
     recovered_infra = [e for e in events["infrastructure_failures"]
@@ -1237,14 +1556,16 @@ def cmd_summarize(args) -> int:
     recovered_timeouts = [e for e in events["timeouts"] if e.get("recovered")]
     events["infrastructure_persistent"] = persistent_infra
     events["infrastructure_recovered"] = recovered_infra + recovered_timeouts
-    # The lane runner also labels recovered classes directly. That label is
-    # the same recovery seen through a second lens, so it is never ADDED to
-    # the count - but a label the attempt chain cannot account for means the
-    # evidence is incomplete, and that must not slip through as a clean run.
-    recovered_names = sorted({e["name"] for e in
-                              recovered_infra + recovered_timeouts})
-    unaccounted = [entry for entry in events["infrastructure_recovered_classes"]
-                   if not _covers_names(recovered_names, entry["name"])]
+    # Only wedges healed by the lane runner's own retry (or an unaccounted
+    # recovered label) keep the default failure: wedges the gate's bounded
+    # recovery round healed are the intended, recorded outcome.
+    healed_by_round = [e for e in recovered_infra
+                       if e.get("recovered_by") == "gate recovery round"]
+    recovered_without_healing = [e for e in recovered_infra
+                                 if e.get("recovered_by") != "gate recovery round"]
+    events["infrastructure_recovered_by_round"] = healed_by_round
+    recovered_evidence = (recovered_without_healing + recovered_timeouts +
+                         events["infrastructure_recovered_classes"])
 
     if events["assertion_failures"] or repeat_failures or unit_summary.get("failures") \
             or ui_summary.get("failures"):
@@ -1253,7 +1574,7 @@ def cmd_summarize(args) -> int:
             unit_summary.get("failures") or ui_summary.get("failures")))
     runner_failures = int(unit_summary.get("synthetic_failures") or 0) + \
         int(ui_summary.get("synthetic_failures") or 0)
-    if runner_failures:
+    if runner_failures and not round_healed:
         gate_problems.append(
             "the test runner never started the app under test ({0} XCTest "
             "'System Failures' entr{1}); the affected invocation is an "
@@ -1264,13 +1585,22 @@ def cmd_summarize(args) -> int:
             "persistent infrastructure failure(s)/hang(s) present "
             "({0} infra, {1} timeout)".format(len(persistent_infra),
                                               len(persistent_timeouts)))
-    if (recovered_infra or recovered_timeouts) and not allow_recovered:
+    if recovered_without_healing and not allow_recovered:
         gate_problems.append(
-            "infrastructure failures were recovered by a bounded retry "
-            "({0} infra, {1} timeout: {2}); the run is not trustworthy "
+            "infrastructure failures were recovered by a bounded retry"
+            " ({0} infra, {1} timeout: {2}); the run is not trustworthy "
             "evidence - rerun the gate".format(
-                len(recovered_infra), len(recovered_timeouts),
-                _csv(recovered_names)))
+                len(recovered_without_healing), len(recovered_timeouts),
+                _csv(sorted({e["name"] for e in
+                             recovered_without_healing + recovered_timeouts}))))
+    # The lane runner also labels recovered classes directly. That label is
+    # the same recovery seen through a second lens, so it is never ADDED to
+    # the count - but a label the attempt chain cannot account for means the
+    # evidence is incomplete, and that must not slip through as a clean run.
+    recovered_names = sorted({e["name"] for e in
+                             recovered_infra + recovered_timeouts})
+    unaccounted = [entry for entry in events["infrastructure_recovered_classes"]
+                   if not _covers_names(recovered_names, entry["name"])]
     if unaccounted and not allow_recovered:
         gate_problems.append(
             "lane result reports recovered infrastructure the attempt chain "
@@ -1296,8 +1626,7 @@ def cmd_summarize(args) -> int:
     # result is cited from, not only in meta.json: a PASS whose environment
     # was degraded is not the same evidence as a clean one.
     caveats = []
-    if allow_recovered and (recovered_infra or recovered_timeouts or
-                            events["infrastructure_recovered_classes"]):
+    if allow_recovered and recovered_evidence:
         caveats.append("--allow-recovered-infrastructure downgraded recovered "
                        "infrastructure from FAIL to this verdict")
     if run_flags.get("lock_used") is False:
@@ -1310,6 +1639,18 @@ def cmd_summarize(args) -> int:
         if str(entry.get("status")) != "pass":
             caveats.append("Simulator preparation failed before {0}".format(
                 entry.get("name")))
+    if round_healed:
+        caveats.append(
+            "the bounded recovery round healed {0} simulator test-runner launch "
+            "failure(s) after erasing the gate simulator; this run is not an "
+            "entirely clean one".format(runner_failures))
+    if unit_summary.get("reread_classes") or ui_summary.get("reread_classes"):
+        reread = sorted(set(unit_summary.get("reread_classes") or []) |
+                        set(ui_summary.get("reread_classes") or []))
+        caveats.append(
+            "classes produced results in more than one pass ({0}); counted once "
+            "in the aggregate, but no pass should have re-run them".format(
+                _csv(reread)))
 
     result = {
         "schema_version": SCHEMA_VERSION,
@@ -1355,8 +1696,11 @@ def cmd_summarize(args) -> int:
             "failures": len(events["infrastructure_failures"]),
             "persistent": len(persistent_infra) + len(persistent_timeouts),
             "recovered": len(events["infrastructure_recovered"]),
+            # The gate's one bounded recovery round: whether it was used, and
+            # what it recovered. A recurrence after it is persistent.
+            "retries": recovery_rounds,
+            "retry_detail": phases["recovery"].get("checks") or [],
             "timeouts": len(events["timeouts"]),
-            "retries": len(events["retries"]),
             "not_executed": len(events["not_executed"]),
             "simulator_resets": int(bool(unit_summary.get("simulator_reset"))) +
                                 int(bool(ui_summary.get("simulator_reset"))),
@@ -1633,6 +1977,17 @@ def main(argv=None) -> int:
     p.add_argument("--detail", action="append", default=[],
                    help="KEY=VALUE phase detail (repeatable)")
     p.set_defaults(func=cmd_phase)
+
+    p = sub.add_parser("recovery-spec")
+    p.add_argument("--plan", required=True)
+    p.add_argument("--kind", default="unit", choices=["unit", "ui"])
+    p.add_argument("--lane", required=True,
+                   help="comma-separated lane result directories so far")
+    p.add_argument("--timeout-cap", type=int, default=REPEAT_BATCH_TIMEOUT_CAP_DEFAULT)
+    p.add_argument("--out", required=True, help="shell-sourceable env file")
+    p.add_argument("--tsv-out", default="",
+                   help="TSV of per-class retry tasks (read by the gate shell)")
+    p.set_defaults(func=cmd_recovery_spec)
 
     p = sub.add_parser("summarize")
     p.add_argument("--run-dir", required=True)

@@ -119,6 +119,7 @@ stem="$(basename "$bundle" .xcresult)"
 mode="pass"
 case "$bundle" in
   *unit-continuation*) mode="${FAKE_CONTINUATION_MODE:-pass}" ;;
+  *unit-recovery*|*ui-recovery*) mode="${FAKE_RECOVERY_MODE:-pass}" ;;
   *)
     case "$stem" in
       batch-*) idx="${stem#batch-}"; idx="${idx%%-*}"; attempt="${stem##*-a}"
@@ -171,15 +172,31 @@ if [ "$1" = "xcresulttool" ]; then
   cat "$FAKE_CANNED" 2>/dev/null || exit 0
   exit 0
 fi
-if [ "$1" = "simctl" ]; then
-  if [ "$2 $3 $4" = "list devices available" ]; then
-    cat <<'DEV'
+  if [ "$1" = "simctl" ]; then
+    if [ "$2" = "create" ]; then
+      # Model `simctl create`: print the new device's UDID. A test can remove
+      # the gate device from the listing below to exercise this path.
+      echo "GATE-DEVICE-0000-1111-2222-333333333333"
+      exit 0
+    fi
+    if [ "$2 $3 $4" = "list devices available" ]; then
+      if [ -n "${FAKE_NO_GATE_DEVICE:-}" ]; then
+        cat <<'DEV'
 {"devices" : {"com.apple.CoreSimulator.SimRuntime.iOS-26-0" : [
   { "udid" : "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
     "name" : "iPhone 17 Pro", "state" : "Booted" }]}}
 DEV
-    exit 0
-  fi
+      else
+        cat <<'DEV'
+{"devices" : {"com.apple.CoreSimulator.SimRuntime.iOS-26-0" : [
+  { "udid" : "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
+    "name" : "iPhone 17 Pro", "state" : "Booted" },
+  { "udid" : "GATE-DEVICE-0000-1111-2222-333333333333",
+    "name" : "Conduit CI Gate", "state" : "Shutdown" }]}}
+DEV
+      fi
+      exit 0
+    fi
   exit 0
 fi
 exit 0
@@ -238,9 +255,17 @@ SWIFT
   done
   # The localization checker is CI infrastructure, not the gate's subject; a
   # passing stand-in keeps the static phase's contract (exit code) under test.
+  # FAKE_STATIC_SLEEP makes it hang, so an interrupt can be tested against a
+  # gate that is mid-run rather than against a finished one.
   cat > "$repo/scripts/check-l10n-coverage.py" <<'PY'
 #!/usr/bin/env python3
+import os
 import sys
+import time
+
+delay = int(os.environ.get("FAKE_STATIC_SLEEP") or 0)
+if delay:
+    time.sleep(delay)
 sys.exit(0)
 PY
   cat > "$repo/scripts/tests/test_fixture_ok.py" <<'PY'
@@ -379,6 +404,8 @@ assert_eq "xcode version recorded" \
   "$(json_get "$GATE_JSON" 'doc["xcode_version"].strip()')" "Xcode 27.0 Build version 27A0stub"
 assert_eq "simulator runtime recorded" \
   "$(json_get "$GATE_JSON" 'doc["simulator"]["runtime"]')" "iOS 26.0"
+assert_eq "the gate ran on its OWN simulator device, not the default" \
+  "$(json_get "$GATE_JSON" 'doc["simulator"]["name"]')" "Conduit CI Gate"
 assert_eq "static checks ran" \
   "$(json_get "$GATE_JSON" 'len(doc["static_checks"])')" "3"
 assert_contains "human summary names the tested commit" \
@@ -523,6 +550,123 @@ if run_gate --ref HEAD --gate-root "$WORK/gate" --run-dir "$(new_run_dir)" \
 else
   ok "a non-numeric --repeat-iterations is refused"
 fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: a genuine assertion never enters the recovery round ---"
+export FAKE_UNIT_B1_A1=fail
+RUN7="$(new_run_dir)"
+if run_gate --ref HEAD --gate-root "$WORK/gate" --run-dir "$RUN7" \
+    --repeat-classes "" >/dev/null 2>&1; then
+  bad "a genuine assertion failure did not fail the gate"
+else
+  ok "a genuine assertion failure fails the gate"
+fi
+GATE7="$RUN7/gate-result.json"
+assert_eq "no recovery pass was created" \
+  "$([ -d "$RUN7/lanes/unit-recovery" ] && echo yes || echo no)" "no"
+if needs_extraction; then
+assert_eq "no recovery retry was recorded" \
+  "$(json_get "$GATE7" 'doc["infrastructure"]["retries"]')" "0"
+assert_contains "the failure is named as an assertion" \
+  "$(cat "$RUN7/summary.md")" "genuine XCTest assertion failures"
+else
+  skip "assertion failure blocks the recovery round"
+fi
+unset FAKE_UNIT_B1_A1
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: the launch-refusal wedge gets exactly one recovery round ---"
+# Both the primary lane and its continuation pass are refused (the
+# continuation renumbers its batches, so each is keyed independently), which
+# is what leaves work incomplete - and that is the only shape the recovery
+# round is allowed for.
+export FAKE_UNIT_B1_A1=crash FAKE_CONTINUATION_MODE=crash
+RUN8="$(new_run_dir)"
+CLEAN8_EXIT=0
+run_gate --ref HEAD --gate-root "$WORK/gate" --run-dir "$RUN8" \
+    --repeat-classes "" >/dev/null 2>&1 || CLEAN8_EXIT=$?
+if needs_extraction; then
+  if [ "$CLEAN8_EXIT" -eq 0 ]; then
+    ok "a recovered run passes the gate"
+  else
+    bad "the recovered run still failed (see $RUN8/summary.md)"
+    tail -n 20 "$RUN8/summary.md" 2>/dev/null
+  fi
+else
+  skip "the recovered run's verdict"
+fi
+GATE8="$RUN8/gate-result.json"
+if needs_extraction; then
+assert_eq "one recovery retry was recorded" \
+  "$(json_get "$GATE8" 'doc["infrastructure"]["retries"]')" "1"
+assert_eq "the recovered work is recorded as recovered" \
+  "$(json_get "$GATE8" 'doc["infrastructure"]["recovered"] > 0')" "True"
+assert_eq "nothing stayed persistent" \
+  "$(json_get "$GATE8" 'doc["infrastructure"]["persistent"]')" "0"
+assert_eq "no class is left without a result" \
+  "$(json_get "$GATE8" 'doc["unit"]["classes_missing"]')" "[]"
+else
+  skip "wedge recovery outcome (verdict and classification)"
+fi
+assert_eq "the recovery pass exists" \
+  "$([ -d "$RUN8/lanes/unit-recovery" ] && echo yes || echo no)" "yes"
+assert_eq "the gate ran on its own simulator device" \
+  "$(json_get "$GATE8" 'doc["simulator"]["name"]')" "Conduit CI Gate"
+assert_contains "the recovery is recorded, not hidden" \
+  "$(cat "$RUN8/summary.md")" "recovery"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: a recurrence after the recovery round fails as infrastructure ---"
+export FAKE_UNIT_B1_A1=crash FAKE_CONTINUATION_MODE=crash FAKE_RECOVERY_MODE=crash
+RUN9="$(new_run_dir)"
+if run_gate --ref HEAD --gate-root "$WORK/gate" --run-dir "$RUN9" \
+    --repeat-classes "" >/dev/null 2>&1; then
+  bad "a recurring wedge did not fail the gate"
+else
+  ok "a recurring wedge fails the gate"
+fi
+GATE9="$RUN9/gate-result.json"
+if needs_extraction; then
+assert_eq "only one retry was attempted" \
+  "$(json_get "$GATE9" 'doc["infrastructure"]["retries"]')" "1"
+assert_eq "the recurrence is persistent infrastructure" \
+  "$(json_get "$GATE9" 'doc["infrastructure"]["persistent"] > 0')" "True"
+assert_contains "the report names the recurrence" \
+  "$(cat "$RUN9/summary.md")" "launch-refusal class"
+else
+  skip "recurrence verdict and classification"
+fi
+unset FAKE_UNIT_B1_A1 FAKE_CONTINUATION_MODE FAKE_RECOVERY_MODE
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: an interrupt releases the lock and the worktree ---"
+# Interrupt the gate mid-run (during the static phase, which the fixture can
+# make hang) and require the same cleanup the end of a run performs.
+export FAKE_STATIC_SLEEP=30
+RUN10="$(new_run_dir)"
+STATUS_BEFORE_INTERRUPT="$(git -C "$WORK/repo" status --porcelain)"
+PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 \
+  bash "$GATE" --ref HEAD --gate-root "$WORK/gate" --run-dir "$RUN10" \
+    --repeat-classes "" >"$WORK/interrupt.log" 2>&1 &
+INTERRUPTED_PID=$!
+sleep 3
+kill -TERM "$INTERRUPTED_PID" 2>/dev/null
+INTERRUPT_EXIT=0
+wait "$INTERRUPTED_PID" || INTERRUPT_EXIT=$?
+unset FAKE_STATIC_SLEEP
+# SIGTERM is the signal sent, so the gate reports 143 (128 + SIGTERM); an
+# INT would report 130.
+assert_eq "the interrupted run exits 143 (SIGTERM)" "$INTERRUPT_EXIT" "143"
+assert_eq "the lock was released" \
+  "$([ -d "$WORK/gate/gate.lock" ] && echo yes || echo no)" "no"
+assert_eq "no worktree was left behind" \
+  "$(ls -A "$WORK/gate/worktrees" 2>/dev/null | wc -l | tr -d ' ')" "0"
+assert_eq "the caller's repository is unchanged by the interrupted run" \
+  "$(git -C "$WORK/repo" status --porcelain)" "$STATUS_BEFORE_INTERRUPT"
 
 # ---------------------------------------------------------------------------
 echo ""

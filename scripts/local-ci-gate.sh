@@ -69,8 +69,10 @@ Options:
                              Default: <gate-root>/runs/<sha12>-<UTC stamp>
   --worktree-root DIR        Parent directory for the throwaway worktree.
                              Default: <gate-root>/worktrees
-  --simulator NAME           Simulator device name (default: $SIMULATOR_NAME
-                             or "iPhone 17 Pro").
+  --simulator NAME           Simulator device the gate runs on (default:
+                             $GATE_SIMULATOR_NAME or "Conduit CI Gate" - the
+                             gate's OWN device, created if it does not exist,
+                             which is what makes erasing it safe).
   --no-simulator-prep        Skip the bounded Simulator preparation (shutdown,
                              erase, boot, wait for boot) that runs before each
                              lane. Preparation only: it never re-runs
@@ -110,7 +112,11 @@ USAGE
 
 REF=""; REMOTE="origin"; DO_FETCH=0
 GATE_ROOT=""; RUN_DIR=""; WORKTREE_ROOT=""
-SIMULATOR_NAME="${SIMULATOR_NAME:-iPhone 17 Pro}"
+# The gate runs on its OWN simulator device, so that erasing it (part of both
+# the preparation and the bounded recovery round) can never touch a device a
+# developer is using. GATE_SIMULATOR_NAME picks the device name; --simulator
+# still overrides it for an operator who wants a specific one.
+SIMULATOR_NAME="${SIMULATOR_NAME:-${GATE_SIMULATOR_NAME:-Conduit CI Gate}}"
 REPEAT_CLASSES="$DEFAULT_REPEAT_CLASSES"
 REPEAT_ITERATIONS=3
 REPEAT_TIMEOUT_CAP=900
@@ -525,6 +531,54 @@ except Exception:
     print("")
 ' "$RUN_DIR/simulator.json" 2>/dev/null || true)"
 
+# The gate's own device: resolve it (newest iOS runtime carrying the name), and
+# create it when it does not exist yet, so erasing it - both in the preparation
+# and in the bounded recovery round - is always safe for a developer's devices.
+ensure_gate_simulator() {
+  if [ -n "$SIMULATOR_UDID" ]; then
+    return 0
+  fi
+  echo "gate simulator '$SIMULATOR_NAME' does not exist yet - creating it"
+  # Created from the newest available iPhone device type on the newest runtime,
+  # so the gate's device targets the same iOS versions the tests do.
+  # run_bounded captures the command's output into a log file, so the new
+  # device's UDID is read back from there.
+  local created=""
+  run_bounded 180 "$RUN_DIR/simctl-create.log" "$RUN_DIR" \
+    sh -c 'xcrun simctl create "$1" "iPhone 17 Pro" 2>&1' _ "$SIMULATOR_NAME" || true
+  if [ -s "$RUN_DIR/simctl-create.log" ]; then
+    created="$(tr -d ' \t\r\n' < "$RUN_DIR/simctl-create.log" | head -c 64)"
+  fi
+  # A UDID is a 36-character hyphenated form; anything else (an error message,
+  # empty output) is a failure to create.
+  case "$created" in
+    ????????-????-????-????-????????????)
+      SIMULATOR_UDID="$created"
+      python3 "$HELPER" simulator --devices "$DEVICES_JSON" \
+        --name "$SIMULATOR_NAME" --udid "$SIMULATOR_UDID" \
+        --out "$RUN_DIR/simulator.json" >/dev/null 2>&1 || true
+      SIMULATOR_RUNTIME="$(python3 -c '
+import json, sys
+try:
+    print(json.load(open(sys.argv[1])).get("runtime", ""))
+except Exception:
+    print("")
+' "$RUN_DIR/simulator.json" 2>/dev/null || true)"
+      echo "gate simulator '$SIMULATOR_NAME' created: $SIMULATOR_UDID"
+      return 0
+      ;;
+    *) ;;
+  esac
+  echo "local-ci-gate: could not create the gate simulator '$SIMULATOR_NAME'; see $RUN_DIR/simctl-create.log" >&2
+  cat "$RUN_DIR/simctl-create.log" >&2 || true
+  return 1
+}
+
+if ! ensure_gate_simulator; then
+  remove_worktree
+  exit 2
+fi
+
 # --- phase: static checks ----------------------------------------------------
 if [ "$SKIP_STATIC" -eq 1 ]; then
   echo ""
@@ -762,6 +816,45 @@ else
         fi
       fi
 
+      # --- ONE bounded recovery round ------------------------------------
+      # Allowed for exactly one infrastructure class: the simulator/host-app
+      # launch refusal (XCTest's synthetic "System Failures" entry, and/or the
+      # verified Busy signature in the lane log). A genuine assertion anywhere
+      # disqualifies the round - the helper refuses to project it, because a
+      # product failure is never retried around.
+      echo ""
+      echo "== bounded recovery round check =="
+      if python3 "$HELPER" recovery-spec --plan "$RUN_DIR/plan/plan.json" \
+          --lane "$RUN_DIR/lanes/unit,$RUN_DIR/lanes/unit-continuation" \
+          --timeout-cap "$REPEAT_TIMEOUT_CAP" \
+          --out "$RUN_DIR/recovery.env" --tsv-out "$RUN_DIR/recovery.tsv"; then
+        # shellcheck disable=SC1090
+        . "$RUN_DIR/recovery.env"
+        if [ "${GATE_RECOVERY_PRESENT:-0}" -eq 1 ]; then
+          echo "== recovery round 1 of 1: erasing the gate simulator and retrying ${GATE_RECOVERY_CLASS_COUNT} class(es) once =="
+          # The whole round is ONE lane invocation whose batches are the
+          # planner's own per-class batches: only work no earlier pass
+          # completed is in it, so nothing is re-run by accident.
+          simulator_prep recovery
+          if run_lane unit "$GATE_UNIT_LANE-recovery" "$GATE_UNIT_TARGET" \
+              "$GATE_RECOVERY_CLASSES" 0 "$GATE_RECOVERY_TIMEOUT" \
+              "$RUN_DIR/lanes/unit-recovery" \
+              --batches-json "$GATE_RECOVERY_BATCHES_JSON"; then
+            echo "recovery round: the retried work passed"
+          else
+            echo "recovery round: the retried work still reports failures (classified in the result document)"
+          fi
+          # No third attempt: whether the round worked - and whether the same
+          # infrastructure class came back - is decided by the summarizer from
+          # this pass's evidence.
+        else
+          echo "== recovery round: nothing to retry (no launch-refusal evidence, or nothing incomplete) =="
+        fi
+      else
+        echo "local-ci-gate: the bounded recovery round refused to project"
+        echo "local-ci-gate: correct when a genuine test failure is present - assertions are never retried"
+      fi
+
       # --- complete UI suite ---------------------------------------------
       if [ "${GATE_UI_PRESENT:-0}" -eq 1 ]; then
         simulator_prep ui
@@ -772,10 +865,35 @@ else
         else
           echo "ui lane: the shard reported failures (classified in the result)"
         fi
+        # The same bounded recovery round, for the UI lane: one erase of the
+        # gate simulator and one retry of the UI classes that never completed.
+        if python3 "$HELPER" recovery-spec --plan "$RUN_DIR/plan/plan.json" \
+            --kind ui \
+            --lane "$RUN_DIR/lanes/ui" \
+            --timeout-cap "$REPEAT_TIMEOUT_CAP" \
+            --out "$RUN_DIR/ui-recovery.env"; then
+          # shellcheck disable=SC1090
+          . "$RUN_DIR/ui-recovery.env"
+          if [ "${GATE_RECOVERY_PRESENT:-0}" -eq 1 ]; then
+            echo "== recovery round 1 of 1 (UI): erasing the gate simulator and retrying ${GATE_RECOVERY_CLASS_COUNT} class(es) once =="
+            simulator_prep ui-recovery
+            if run_lane ui "$GATE_UI_LANE-recovery" "$GATE_UI_TARGET" \
+                "$GATE_RECOVERY_CLASSES" 0 "$GATE_RECOVERY_TIMEOUT" \
+                "$RUN_DIR/lanes/ui-recovery" \
+                --class-timeouts "$GATE_RECOVERY_CLASS_TIMEOUTS"; then
+              echo "ui recovery round: the retried UI classes passed"
+            else
+              echo "ui recovery round: the retried UI classes still report failures (classified in the result document)"
+            fi
+          else
+            echo "ui recovery round: nothing to retry"
+          fi
+        else
+          echo "ui recovery round: refused to project (correct when a genuine UI failure is present)"
+        fi
       else
         echo "ui lane: the plan carries no UI classes"
       fi
-
       # --- explicit repeat policy ----------------------------------------
       if [ -z "$REPEAT_CLASSES" ] || [ "$REPEAT_ITERATIONS" -le 0 ]; then
         echo ""
@@ -822,14 +940,26 @@ else
 fi
 
 # --- summarize ---------------------------------------------------------------
-# The preparation checks are written before the summary so a degraded
-# environment shows up as a caveat on the result rather than only in the log.
+# The recovery round and the preparation checks are written before the summary
+# so a degraded environment shows up as a caveat on the result rather than only
+# in the log. The recovery round is recorded whether it ran or not (status
+# skipped), so the result can distinguish "no recovery needed" from "silently
+# missing".
 python3 "$HELPER" phase --out "$RUN_DIR/sim-prep/phase.json" \
   --phase sim-prep \
   --status "$([ "$SIM_PREP_FAILED" -eq 1 ] && echo fail || echo pass)" \
   --duration 0 --exit-code "$SIM_PREP_FAILED" \
-  --note "bounded shutdown/boot/wait-for-boot before each lane" \
+  --note "bounded shutdown/erase/boot/wait-for-boot before each lane" \
   "${SIM_PREP_CHECKS[@]}" >/dev/null 2>&1 || true
+
+python3 "$HELPER" phase --out "$RUN_DIR/recovery/phase.json" \
+  --phase recovery \
+  --status "$( [ -d "$RUN_DIR/lanes/unit-recovery" ] && echo pass || echo skipped )" \
+  --duration 0 --exit-code 0 \
+  --note "one bounded recovery round for the simulator launch-refusal class" \
+  --detail "unit_recovery_dir=$([ -d "$RUN_DIR/lanes/unit-recovery" ] && echo "$RUN_DIR/lanes/unit-recovery" || echo none)" \
+  --detail "ui_recovery_dir=$([ -d "$RUN_DIR/lanes/ui-recovery" ] && echo "$RUN_DIR/lanes/ui-recovery" || echo none)" \
+  --check "round-1:$([ -d "$RUN_DIR/lanes/unit-recovery" ] || [ -d "$RUN_DIR/lanes/ui-recovery" ] && echo pass || echo skipped):0"
 
 GATE_FINISHED_AT="$(now_iso)"
 GATE_ELAPSED=$(( $(date +%s) - GATE_START_EPOCH ))

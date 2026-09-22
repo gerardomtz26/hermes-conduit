@@ -316,6 +316,308 @@ class NotRunBatchesTests(unittest.TestCase):
         self.assertFalse(out.exists())
 
 
+class RecoveryVerdictTests(unittest.TestCase):
+    """End-to-end verdicts for the bounded recovery round.
+
+    Builds run directories that model the three outcomes a recovery round can
+    have: it recovered the work, it hit the same infrastructure class again, or
+    it never ran because a genuine assertion was present.
+    """
+
+    SHA = "1" * 40
+    WEDGE_FAILURE = [{"class": "System Failures",
+                      "test": "Conduit encountered an error", "attempts": []}]
+    BUSY_LOG = 'iOSSimulator: Failed to launch app with identifier: com.milim.relay ' \
+               '(BSErrorCodeDescription=Busy)'
+    WEDGE_ATTEMPTS = [{"mode": "batch", "n": 1, "class": "all",
+                       "status": "test-failures"},
+                      {"mode": "batch", "n": 2, "class": "all",
+                       "status": "not_run"}]
+    WEDGE_BATCHES = [
+        {"batch": 1, "classes": ["AlphaTests", "BetaTests"], "timeout_s": 600,
+         "status": "test-failures",
+         "attempts": [{"attempt": 1, "status": "test-failures",
+                       "seconds": 1.0, "failures": 1}]},
+        {"batch": 2, "classes": ["GammaTests"], "timeout_s": 500,
+         "status": "not_run", "attempts": []},
+    ]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.run_dir = Path(self.tmp.name)
+        write_json(self.run_dir / "lanes.json", {
+            "schema_version": 1,
+            "unit": {"classes": ["AlphaTests", "BetaTests", "GammaTests"]},
+            "ui": {"classes": ["LaunchUITests"]},
+        })
+        write_json(self.run_dir / "meta.json", {
+            "schema_version": 1, "requested_ref": "origin/main",
+            "tested_sha": self.SHA, "xcode_version": "Xcode 27.0",
+            "simulator": {"name": "Conduit CI Gate", "runtime": "iOS 26.5",
+                          "udid": "GATE-DEVICE"},
+            "started_at": "2026-09-21T00:00:00Z",
+            "finished_at": "2026-09-21T01:00:00Z", "wall_s": 3600,
+            "allowed_recovered_infrastructure": False,
+            "static_checks_enabled": True,
+            "repeat_policy_enabled": True,
+            "run_flags": {"lock_used": True, "simulator_prep": True},
+            "expected": {"unit_classes": 3, "unit_batches": 2, "ui_classes": 1,
+                         "repeat_classes": [], "repeat_iterations": 0},
+        })
+        write_json(self.run_dir / "static" / "phase.json", {
+            "schema_version": 1, "phase": "static", "status": "pass",
+            "duration_s": 5, "checks": [
+                {"name": "plan-validate", "status": "pass", "duration_s": 1},
+                {"name": "ci-tooling-regression", "status": "pass", "duration_s": 1},
+                {"name": "localization-coverage", "status": "pass", "duration_s": 1},
+            ]})
+        write_json(self.run_dir / "build" / "phase.json", {
+            "schema_version": 1, "phase": "build", "status": "pass",
+            "duration_s": 60, "details": {"xctestrun": "/tmp/x.xctestrun"}})
+        lane_artifacts(self.run_dir / "lanes" / "ui", status="pass",
+                      classes=("LaunchUITests",), cases=3)
+
+    def _wedge_log(self, lane_dir):
+        logs = lane_dir / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        (logs / "batch-1-a1.log").write_text(self.BUSY_LOG + "\n", encoding="utf-8")
+
+    def _recovery_phase(self, status="pass"):
+        write_json(self.run_dir / "recovery" / "phase.json", {
+            "schema_version": 1, "phase": "recovery", "status": status,
+            "duration_s": 0, "checks": [
+                {"name": "round-1", "status": status, "duration_s": 0}]})
+
+    def _summarize(self):
+        out = self.run_dir / "gate-result.json"
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = local_gate.main(["summarize", "--run-dir", str(self.run_dir),
+                                    "--out", str(out),
+                                    "--markdown", str(self.run_dir / "summary.md")])
+        self.human = buffer.getvalue()
+        return code, json.loads(out.read_text(encoding="utf-8"))
+
+    def _primary(self, *, observed, cases):
+        lane_artifacts(self.run_dir / "lanes" / "unit", status="fail",
+                       classes=observed, cases=cases,
+                       failures=self.WEDGE_FAILURE, attempts=self.WEDGE_ATTEMPTS,
+                       batches=self.WEDGE_BATCHES)
+        self._wedge_log(self.run_dir / "lanes" / "unit")
+
+    def test_recovered_retry_passes_overall(self):
+        """The wedge is recovered by one bounded round -> PASS, with the retry
+        recorded in the result document."""
+        self._primary(observed=("AlphaTests", "BetaTests"), cases=2)
+        lane_artifacts(self.run_dir / "lanes" / "unit-recovery", status="pass",
+                       classes=("GammaTests",), cases=1)
+        self._recovery_phase("pass")
+        code, doc = self._summarize()
+        self.assertEqual(code, 0, doc["problems"])
+        self.assertEqual(doc["verdict"], "PASS")
+        self.assertEqual(doc["unit"]["classes_missing"], [])
+        self.assertEqual(doc["unit"]["executions"], 3,
+                         "one execution per class across all passes")
+        infra = doc["infrastructure"]
+        self.assertEqual(infra["failures"], 1)
+        self.assertEqual(infra["retries"], 1)
+        # The wedge event is healed by the round: reported as recovered, with
+        # the round recorded as its healer - not as a bare "it got better".
+        self.assertEqual(infra["recovered"], 1)
+        self.assertEqual(infra["persistent"], 0)
+        self.assertEqual(
+            infra["events"]["infrastructure_failures"][0]["recovered_by"],
+            "gate recovery round")
+        self.assertEqual(infra["retry_detail"][0]["name"], "round-1")
+        self.assertEqual(len(doc["unit"]["passes"]), 2)
+        # The round is recorded, never hidden: both the machine-readable
+        # document and the human summary carry it.
+        self.assertIn("recovered", self.human)
+        self.assertIn("recovery", json.dumps(doc))
+
+    def test_recurrence_after_recovery_fails_as_infrastructure(self):
+        """The same class comes back after the round -> FAIL (infrastructure),
+        and no third attempt is made."""
+        self._primary(observed=("AlphaTests", "BetaTests"), cases=2)
+        lane_artifacts(self.run_dir / "lanes" / "unit-recovery", status="fail",
+                       classes=(), cases=0, failures=self.WEDGE_FAILURE,
+                       attempts=[{"mode": "batch", "n": 1, "class": "all",
+                                  "status": "test-failures"}],
+                       batches=[{"batch": 1, "classes": ["GammaTests"],
+                                 "timeout_s": 500, "status": "test-failures",
+                                 "attempts": [{"attempt": 1,
+                                               "status": "test-failures",
+                                               "seconds": 1.0, "failures": 1}]}])
+        self._wedge_log(self.run_dir / "lanes" / "unit-recovery")
+        self._recovery_phase("pass")
+        code, doc = self._summarize()
+        self.assertEqual(code, 1)
+        self.assertEqual(doc["verdict"], "FAIL")
+        self.assertTrue(any("same simulator launch-refusal class" in p
+                            for p in doc["problems"]), doc["problems"])
+        self.assertIn("GammaTests", doc["unit"]["classes_missing"])
+        self.assertEqual(doc["infrastructure"]["retries"], 1)
+        self.assertTrue(doc["infrastructure"]["persistent"] >= 1)
+
+    def test_genuine_assertion_never_enters_recovery(self):
+        """With a real assertion present the round is not even projected, and
+        the gate fails on the assertion."""
+        lane_artifacts(self.run_dir / "lanes" / "unit", status="fail",
+                       classes=("AlphaTests", "BetaTests", "GammaTests"),
+                       cases=3,
+                       failures=[{"class": "BetaTests", "test": "testBoom",
+                                  "attempts": []}],
+                       attempts=[{"mode": "batch", "n": 1, "class": "all",
+                                  "status": "test-failures"}])
+        self._wedge_log(self.run_dir / "lanes" / "unit")
+        code, doc = self._summarize()
+        self.assertEqual(code, 1)
+        self.assertEqual(doc["unit"]["failures"], 1)
+        self.assertEqual(doc["infrastructure"]["retries"], 0)
+        self.assertFalse(os.path.isdir(self.run_dir / "lanes" / "unit-recovery"))
+
+    def test_counts_are_not_double_counted_across_passes(self):
+        """A class that a later pass re-reported is counted once, and the
+        re-run is visible rather than silently buried."""
+        self._primary(observed=("AlphaTests", "BetaTests", "GammaTests"), cases=3)
+        # A recovery pass that re-ran everything (which the gate never does:
+        # only uncompleted work is retried) must not inflate the total.
+        lane_artifacts(self.run_dir / "lanes" / "unit-recovery", status="pass",
+                       classes=("AlphaTests", "BetaTests", "GammaTests"),
+                       cases=3)
+        self._recovery_phase("pass")
+        code, doc = self._summarize()
+        self.assertEqual(code, 0, doc["problems"])
+        self.assertEqual(doc["unit"]["executions"], 3,
+                         "3 executions, not 6, across two passes")
+        self.assertEqual(sorted(doc["unit"]["reread_classes"]),
+                         ["AlphaTests", "BetaTests", "GammaTests"])
+        self.assertTrue(any("more than one pass" in c for c in doc["caveats"]),
+                        "the re-run is reported as a caveat, not hidden")
+
+    def test_gate_simulator_is_recorded(self):
+        self._primary(observed=("AlphaTests", "BetaTests"), cases=2)
+        lane_artifacts(self.run_dir / "lanes" / "unit-recovery", status="pass",
+                       classes=("GammaTests",), cases=1)
+        self._recovery_phase("pass")
+        _, doc = self._summarize()
+        self.assertEqual(doc["simulator"]["name"], "Conduit CI Gate")
+        self.assertEqual(doc["simulator"]["udid"], "GATE-DEVICE")
+
+
+class RecoverySpecTests(unittest.TestCase):
+    """The bounded recovery round: what it is allowed for, and what it does."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.plan_path = self.root / "plan.json"
+        write_json(self.plan_path, make_plan())
+        self.lane_dir = self.root / "lanes" / "unit"
+        self.lane_dir.mkdir(parents=True, exist_ok=True)
+
+    def _lane(self, *, status="fail", classes=("AlphaTests",), cases=4,
+              failures=(), attempts=None, batches=None, log_lines=None):
+        lane_artifacts(self.lane_dir, status=status, classes=classes,
+                       cases=cases, failures=failures, attempts=attempts,
+                       batches=batches)
+        logs = self.lane_dir / "logs"
+        logs.mkdir(exist_ok=True)
+        for index, line in enumerate(log_lines or [], start=1):
+            (logs / "batch-{0}-a1.log".format(index)).write_text(
+                line + "\n", encoding="utf-8")
+
+    WEDGE_FAILURE = [{"class": "System Failures",
+                      "test": "Conduit encountered an error", "attempts": []}]
+    BUSY_LOG = ['iOSSimulator: 6930ECCE: Failed to launch app with identifier: '
+                'com.milim.relay (error = ... BSErrorCodeDescription=Busy)']
+    WEDGE_ATTEMPTS = [{"mode": "batch", "n": 1, "class": "all",
+                       "status": "test-failures"},
+                      {"mode": "batch", "n": 2, "class": "all",
+                       "status": "not_run"}]
+    WEDGE_BATCHES = [
+        {"batch": 1, "classes": ["AlphaTests", "BetaTests"],
+         "timeout_s": 600, "status": "test-failures",
+         "attempts": [{"attempt": 1, "status": "test-failures",
+                       "seconds": 1.0, "failures": 1}]},
+        {"batch": 2, "classes": ["GammaTests"], "timeout_s": 500,
+         "status": "not_run", "attempts": []},
+    ]
+
+    def _spec(self, **overrides):
+        args = {"plan": str(self.plan_path), "lane": str(self.lane_dir),
+                "out": str(self.root / "recovery.env")}
+        args.update(overrides)
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = local_gate.main(["recovery-spec"] + [
+                item for key, value in args.items() for item in ("--" + key, value)])
+        values = {}
+        env = self.root / "recovery.env"
+        if env.exists():
+            for line in env.read_text(encoding="utf-8").splitlines():
+                key, _, value = line.partition("=")
+                values[key] = shlex.split(value)[0] if value.strip() else ""
+        return code, values
+
+    def test_refused_when_a_genuine_assertion_is_present(self):
+        """A product failure must never be retried around - the round is not
+        even projected."""
+        self._lane(classes=("AlphaTests", "BetaTests"), cases=7,
+                   failures=[{"class": "BetaTests", "test": "testBoom",
+                              "attempts": []}],
+                   attempts=[{"mode": "batch", "n": 1, "class": "all",
+                              "status": "test-failures"}],
+                   log_lines=self.BUSY_LOG)
+        code, _ = self._spec()
+        self.assertEqual(code, 3)
+        self.assertFalse((self.root / "recovery.env").exists())
+
+    def test_refused_without_launch_refusal_evidence(self):
+        """Infrastructure that is not the verified launch-refusal class is not
+        recoverable: no synthetic entry, no Busy signature."""
+        self._lane(status="fail", classes=("AlphaTests",), cases=1,
+                   attempts=[{"mode": "batch", "n": 1, "class": "all",
+                              "status": "unclassified"}])
+        code, _ = self._spec()
+        self.assertEqual(code, 3)
+
+    def test_projects_the_incomplete_classes_for_the_wedge(self):
+        self._lane(classes=("AlphaTests", "BetaTests"), cases=2,
+                   failures=self.WEDGE_FAILURE, attempts=self.WEDGE_ATTEMPTS,
+                   batches=self.WEDGE_BATCHES, log_lines=self.BUSY_LOG)
+        code, values = self._spec()
+        self.assertEqual(code, 0)
+        self.assertEqual(values["GATE_RECOVERY_PRESENT"], "1")
+        # Only work no pass completed: GammaTests (batch 2 never ran).
+        self.assertEqual(values["GATE_RECOVERY_CLASSES"], "GammaTests")
+        # The planner's own batch object, so the watchdog keeps its policy.
+        self.assertIn('"timeout_s":500', values["GATE_RECOVERY_BATCHES_JSON"])
+
+    def test_nothing_to_retry_when_everything_ran(self):
+        self._lane(status="pass", classes=("AlphaTests", "BetaTests", "GammaTests"),
+                   cases=3, log_lines=self.BUSY_LOG)
+        code, values = self._spec()
+        self.assertEqual(code, 0)
+        self.assertEqual(values["GATE_RECOVERY_PRESENT"], "0")
+
+    def test_ui_kind_projects_the_ui_classes(self):
+        write_json(self.plan_path, make_plan())
+        # The UI shard never launched, so no class has a result yet.
+        self._lane(status="fail", classes=(), cases=0,
+                   failures=self.WEDGE_FAILURE, batches=[],
+                   attempts=[{"mode": "class", "n": 1, "class": "LaunchUITests",
+                              "status": "test-failures"}],
+                   log_lines=self.BUSY_LOG)
+        code, values = self._spec(kind="ui")
+        self.assertEqual(code, 0)
+        self.assertEqual(values["GATE_RECOVERY_CLASSES"], "LaunchUITests")
+        # The UI class's own watchdog travels with the retried class.
+        self.assertIn("LaunchUITests=420", values["GATE_RECOVERY_CLASS_TIMEOUTS"])
+
+
 class SimulatorTests(unittest.TestCase):
     def test_picks_newest_ios_runtime(self):
         tmp = tempfile.TemporaryDirectory()
@@ -522,7 +824,10 @@ class SummarizeTests(unittest.TestCase):
         code, doc, _ = self._summarize()
         self.assertEqual(code, 1)
         self.assertEqual(doc["infrastructure"]["recovered"], 1)
-        self.assertEqual(doc["infrastructure"]["retries"], 1)
+        # `infrastructure.retries` counts the GATE's bounded recovery round; the
+        # lane runner's own retry attempts are reported in events.
+        self.assertEqual(doc["infrastructure"]["retries"], 0)
+        self.assertEqual(len(doc["infrastructure"]["events"]["retries"]), 1)
 
     def test_recovered_infrastructure_may_be_allowed_explicitly(self):
         self._layout(repeat_classes=(), allow_recovered=True)
@@ -684,7 +989,10 @@ class SummarizeTests(unittest.TestCase):
         self.assertEqual(doc["unit"]["classes_observed"], 3)
         self.assertEqual(doc["unit"]["executions"], 7)
         self.assertEqual(doc["unit"]["failures"], 1)
-        self.assertEqual(doc["unit"]["continuation"]["executions"], 3)
+        # The continuation is pass 1 of the merged passes, and it executed the
+        # class the primary lane never reached.
+        self.assertEqual(doc["unit"]["passes"][1]["executions"], 3)
+        self.assertEqual(doc["unit"]["reread_classes"], [])
         self.assertFalse(any("classes never executed" in p
                              for p in doc["unit"]["problems"]))
 
