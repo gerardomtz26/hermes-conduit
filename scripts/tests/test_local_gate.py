@@ -627,7 +627,7 @@ class RecoverySpecTests(unittest.TestCase):
         # planner's own batch budgets.
         tsv = (self.root / "recovery.tsv").read_text(encoding="utf-8").strip()
         self.assertEqual(tsv.count("\n") + 1, 1)
-        self.assertTrue(tsv.startswith("chunk-1\t"))
+        self.assertTrue(tsv.startswith("retry-set\t"))
         self.assertIn('"timeout_s":500', tsv)
 
     def test_nothing_to_retry_when_everything_ran(self):

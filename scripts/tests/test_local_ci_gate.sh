@@ -623,8 +623,8 @@ assert_eq "no class is left without a result" \
 else
   skip "wedge recovery outcome (verdict and classification)"
 fi
-assert_eq "the recovery passes exist (one per class)" \
-  "$(ls -d "$RUN8"/lanes/unit-recovery-* 2>/dev/null | wc -l | tr -d ' ')" "3"
+assert_eq "the recovery pass exists (one retry set, one launch)" \
+  "$(ls -d "$RUN8"/lanes/unit-recovery-* 2>/dev/null | wc -l | tr -d ' ')" "1"
 assert_eq "the gate ran on its own simulator device" \
   "$(json_get "$GATE8" 'doc["simulator"]["name"]')" "Conduit CI Gate"
 assert_contains "the recovery is recorded, not hidden" \

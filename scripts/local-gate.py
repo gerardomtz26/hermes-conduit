@@ -509,22 +509,25 @@ def cmd_recovery_spec(args) -> int:
     # class - while one giant invocation would let its first wedged batch eat
     # everything. Chunking keeps the loss at worst one chunk, and the launches
     # few.
-    chunk_size = 7
-    chunks = [tasks[i:i + chunk_size] for i in range(0, len(tasks), chunk_size)]
+    # ONE retry invocation for the whole retry set, in ONE batch. The
+    # verified wedge on this machine alternates across app launches (every
+    # other launch is refused, regardless of terminate/uninstall/erase between
+    # them - see docs/CI.md), so the round minimises the number of launches:
+    # a single launch gives the retry its one chance, and a refusal of it fails
+    # the gate as infrastructure with no third attempt. Chunking into many
+    # launches would make a clean round impossible at the observed rate.
+    batches_json = json.dumps(
+        [{"classes": [t["class"] for t in tasks],
+          "predicted_s": round(sum(t["predicted_s"] for t in tasks), 1),
+          "timeout_s": int(sum(t["timeout_s"] for t in tasks))}],
+        separators=(",", ":"))
     with open(tsv, "w", encoding="utf-8", newline="\n") as fh:
-        for index, chunk in enumerate(chunks, start=1):
-            batches_json = json.dumps(
-                [{"classes": [t["class"] for t in chunk],
-                  "predicted_s": round(sum(t["predicted_s"] for t in chunk), 1),
-                  "timeout_s": int(sum(t["timeout_s"] for t in chunk))}],
-                separators=(",", ":"))
-            fh.write("{0}\t{1}\t{2}\t{3}\t{4}\n".format(
-                "chunk-{0}".format(index),
-                _csv(t["class"] for t in chunk), batches_json,
-                round(sum(t["predicted_s"] for t in chunk), 1),
-                int(sum(t["timeout_s"] for t in chunk))))
-    print("recovery round ({0}): retrying {1} class(es) once in {2} chunk(s)".format(
-        kind, len(tasks), len(chunks)))
+        fh.write("{0}\t{1}\t{2}\t{3}\t{4}\n".format(
+            "retry-set", _csv(t["class"] for t in tasks), batches_json,
+            round(sum(t["predicted_s"] for t in tasks), 1),
+            int(sum(t["timeout_s"] for t in tasks))))
+    print("recovery round ({0}): retrying {1} class(es) once in one invocation".format(
+        kind, len(tasks)))
     return 0
 
 
