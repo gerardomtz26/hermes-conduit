@@ -711,6 +711,24 @@ run_lane() { # $1=kind $2=lane $3=target $4=classes $5=predicted $6=timeout
 # gate saw it return after the round's first couple of launches - so a
 # one-time settle before the round is not enough. This is hygiene, not
 # recovery: it erases nothing and re-runs nothing.
+# Prime the launcher before the round's single retry launch. The verified
+# wedge alternates across app launches (see simulator_prep): a launcher-level
+# launch+terminate pair absorbs a refused slot so the retry launch lands on a
+# good one. It runs NO tests, so nothing is counted twice - the work is still
+# retried exactly once.
+simulator_prime() {
+  local udid="${SIMULATOR_UDID:-}" i
+  [ -z "$udid" ] && return 0
+  i=1
+  while [ "$i" -le 2 ]; do
+    xcrun simctl launch "$udid" com.milim.relay >/dev/null 2>&1 || true
+    sleep 2
+    xcrun simctl terminate "$udid" com.milim.relay >/dev/null 2>&1 || true
+    sleep 2
+    i=$(( i + 1 ))
+  done
+}
+
 simulator_settle() {
   local udid="${SIMULATOR_UDID:-}"
   [ -z "$udid" ] && return 0
@@ -874,6 +892,7 @@ else
             # simulator_prep), and each piece of work is still retried
             # exactly once.
             simulator_prep "recovery-$rcls"
+            simulator_prime
             if run_lane unit "$GATE_UNIT_LANE-recovery-$rcls" "$GATE_UNIT_TARGET" \
                 "$rclasses" "$rpredicted" "$rtimeout" \
                 "$RUN_DIR/lanes/unit-recovery-$rcls" \
