@@ -57,13 +57,29 @@ assert_eq "release leaves no temporary lock behind" \
 
 echo "--- case 2: two contenders cannot both own the gate ---"
 LOCK2="$WORK/lock-2"
-( . "$MOD"
-  trap 'gate_lock_release' EXIT INT TERM
-  acquire_gate_lock "$LOCK2" || exit 9
-  printf '%s\n' "$BASHPID" > "$WORK/holder"
-  sleep 60 ) &
+# A real child process, not a subshell: `$$` inside a subshell is its
+# parent's pid in bash (which would make the two-contenders test compare one
+# number against itself), and $BASHPID does not exist under /bin/bash 3.2.
+bash -c '
+  . "$1"
+  trap '"'"'gate_lock_release'"'"' EXIT INT TERM
+  acquire_gate_lock "$2" || exit 9
+  printf "%s
+" "$$" > "$3"
+  sleep 60
+' _ "$MOD" "$LOCK2" "$WORK/holder" &
 HOLDER_BG=$!
-while [ ! -f "$WORK/holder" ]; do sleep 0.1; done
+# Bounded wait: if the holder never starts, fail instead of spinning forever.
+_wait=0
+while [ ! -f "$WORK/holder" ] && [ "$_wait" -lt 100 ]; do
+  sleep 0.1
+  _wait=$(( _wait + 1 ))
+done
+if [ ! -f "$WORK/holder" ]; then
+  bad "the holder process never started"
+  kill "$HOLDER_BG" 2>/dev/null
+  exit 1
+fi
 ACQUIRE_RC=0
 acquire_gate_lock "$LOCK2" || ACQUIRE_RC=$?
 assert_eq "the second contender is refused" "$ACQUIRE_RC" "2"
@@ -169,6 +185,47 @@ assert_eq "the in-flight temporary lock was removed by the trap" \
   "$([ -d "$INFLIGHT" ] && echo yes || echo no)" "no"
 assert_eq "and no canonical lock was created" \
   "$([ -e "$LOCK7" ] && echo yes || echo no)" "no"
+
+echo "--- case 8: taking a dead owner over leaves nothing behind ---"
+LOCK8="$WORK/lock-8"
+mkdir -p "$LOCK8"
+printf '999999999
+' > "$LOCK8/pid"
+STEAL_RC=0
+acquire_gate_lock "$LOCK8" || STEAL_RC=$?
+assert_eq "the dead owner's lock is taken over" "$STEAL_RC" "0"
+assert_eq "and carries this process's pid" "$(cat "$LOCK8/pid")" "$$"
+assert_eq "no rename-aside left over from the steal"   "$(ls -d "$LOCK8".stale.* 2>/dev/null | wc -l | tr -d ' ')" "0"
+gate_lock_release
+rm -rf "$LOCK8"
+
+echo "--- case 9: a corrupt pid is BUSY, never stolen ---"
+# Garbage in the pid file is not a "confirmed dead owner": the rule is
+# readable-and-dead, not merely non-live.
+LOCK9="$WORK/lock-9"
+mkdir -p "$LOCK9"
+printf 'not-a-pid
+' > "$LOCK9/pid"
+CORRUPT_RC=0
+acquire_gate_lock "$LOCK9" || CORRUPT_RC=$?
+assert_eq "a corrupt pid refuses acquisition" "$CORRUPT_RC" "2"
+assert_eq "and the lock is left in place"   "$([ -f "$LOCK9/pid" ] && echo yes || echo no)" "yes"
+gate_lock_release
+rm -rf "$LOCK9"
+
+echo "--- case 10: no contender may delete a live owner's lock ---"
+# The stolen-lock path must never run against a live owner: a rival racing a
+# dead lock has to end up BUSY here, with the owner's pid untouched.
+LOCK10="$WORK/lock-10"
+OWN10=0
+acquire_gate_lock "$LOCK10" || OWN10=$?
+assert_eq "setup: the owner acquires" "$OWN10" "0"
+RIVAL_RC=0
+acquire_gate_lock "$LOCK10" || RIVAL_RC=$?
+assert_eq "a rival racing the live lock is refused" "$RIVAL_RC" "2"
+assert_eq "and the owner's pid is intact" "$(cat "$LOCK10/pid")" "$$"
+gate_lock_release
+rm -rf "$LOCK10"
 
 echo ""
 echo "=== $pass_count passed, $fail_count failed ==="

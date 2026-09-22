@@ -500,11 +500,15 @@ done
 
 # --- helpers -----------------------------------------------------------------
 XCODE_VERSION="$(xcodebuild -version 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g; s/ $//')"
+# The gate tooling's own commit (assembler + orchestrator), recorded so
+# release evidence says which tool produced it.
+TOOLING_SHA="$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)"
 
 write_meta() { # $1 = finished_at, $2 = wall_s
   python3 "$HELPER" meta \
     --out "$RUN_DIR/meta.json" \
     --ref "$REF" --sha "$SHA" \
+    --tooling-sha "$TOOLING_SHA" \
     --xcode "$XCODE_VERSION" \
     --simulator "$SIMULATOR_NAME" \
     --runtime "${SIMULATOR_RUNTIME:-}" \
@@ -909,11 +913,11 @@ else
         if [ "${GATE_RECOVERY_PRESENT:-0}" -eq 1 ] && [ -s "$RUN_DIR/recovery.tsv" ]; then
           echo "== recovery round 1 of 1: erasing the gate simulator and retrying ${GATE_RECOVERY_CLASS_COUNT} class(es) once =="
           # ONE erase, then one invocation per CHUNK of at most 7 classes (the
+          # (the per-row prep below is the round's single erase)
           # planner's resilient batch shape): a lane stops at the batch that
           # fails, so one giant invocation would let its first wedged batch eat
           # the round, while one invocation per class multiplies the per-launch
           # wedge risk. Chunking keeps the loss at worst one chunk.
-          simulator_prep recovery
           while IFS=$'\t' read -r rcls rclasses rbatches rpredicted rtimeout; do
             [ -z "$rcls" ] && continue
             rtimeout="${rtimeout%$'\r'}"
@@ -967,7 +971,6 @@ else
           if [ "${GATE_RECOVERY_PRESENT:-0}" -eq 1 ]; then
             echo "== recovery round 1 of 1 (UI): erasing the gate simulator and retrying ${GATE_RECOVERY_CLASS_COUNT} class(es) once =="
             simulator_prep ui-recovery
-            simulator_prep "ui-recovery"
             if run_lane ui "$GATE_UI_LANE-recovery" "$GATE_UI_TARGET" \
                 "$GATE_RECOVERY_CLASSES" 0 "$GATE_RECOVERY_TIMEOUT" \
                 "$RUN_DIR/lanes/ui-recovery" \
@@ -1062,14 +1065,24 @@ python3 "$HELPER" phase --out "$RUN_DIR/sim-prep/phase.json" \
   --note "bounded shutdown/erase/boot/wait-for-boot before each lane" \
   "${SIM_PREP_CHECKS[@]+"${SIM_PREP_CHECKS[@]}"}" >/dev/null 2>&1 || true
 
+# Record whether ANY recovery pass exists - unit or UI, per-class
+# (unit-recovery-<chunk>) or bare (the UI round writes lanes/ui-recovery with
+# no trailing suffix). The old check looked for the bare unit dir (which this
+# script never creates) and a `*-recovery-*` glob that cannot match the UI
+# dir, so a UI-only recovery was recorded as "no recovery ran".
+RECOVERY_EVER_RAN=0
+if ls -d "$RUN_DIR"/lanes/*-recovery* >/dev/null 2>&1 \
+    || [ -d "$RUN_DIR/lanes/ui-recovery" ]; then
+  RECOVERY_EVER_RAN=1
+fi
 python3 "$HELPER" phase --out "$RUN_DIR/recovery/phase.json" \
   --phase recovery \
-  --status "$( [ -d "$RUN_DIR/lanes/unit-recovery" ] && echo pass || echo skipped )" \
+  --status "$([ "$RECOVERY_EVER_RAN" -eq 1 ] && echo pass || echo skipped)" \
   --duration 0 --exit-code 0 \
   --note "one bounded recovery round for the simulator launch-refusal class" \
-  --detail "unit_recovery_dirs=$(ls -d "$RUN_DIR"/lanes/unit-recovery-* 2>/dev/null | tr -d '\n')" \
-  --detail "ui_recovery_dirs=$(ls -d "$RUN_DIR"/lanes/ui-recovery-* 2>/dev/null | tr -d '\n')" \
-  --check "round-1:$(ls -d "$RUN_DIR"/lanes/*-recovery-* >/dev/null 2>&1 && echo pass || echo skipped):0"
+  --detail "unit_recovery_dirs=$(ls -d "$RUN_DIR"/lanes/unit-recovery* 2>/dev/null | tr -d '\n')" \
+  --detail "ui_recovery_dirs=$(ls -d "$RUN_DIR"/lanes/ui-recovery* "$RUN_DIR"/lanes/ui-recovery 2>/dev/null | tr -d '\n')" \
+  --check "round-1:$([ "$RECOVERY_EVER_RAN" -eq 1 ] && echo pass || echo skipped):0"
 
 GATE_FINISHED_AT="$(now_iso)"
 GATE_ELAPSED=$(( $(date +%s) - GATE_START_EPOCH ))

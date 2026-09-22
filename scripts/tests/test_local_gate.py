@@ -1610,6 +1610,36 @@ class ScriptContractTests(unittest.TestCase):
         self.assertIn("exit 0", self.text)
         self.assertIn("exit 1", self.text)
 
+    def test_no_bare_empty_array_expansions_survive(self):
+        """`${arr[@]}` on an empty array is fatal under Bash 3.2 + set -u.
+
+        The safe form is `${arr[@]+"${arr[@]}"}`, whose INNER half looks
+        exactly like a bare expansion - so comments and that inner half are
+        skipped here and only a genuinely unguarded use is reported. Running
+        on a host with bash >= 4.4 cannot catch a regression (4.4 accepts the
+        bare form), so the source itself is the contract.
+        """
+        import re
+        import os as _os
+        bare = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\[@\]\}")
+        for name in ("local-ci-gate.sh", "ci-gate-lock.sh"):
+            path = _os.path.join(SCRIPTS_DIR, name)
+            if not _os.path.exists(path):
+                continue
+            offenders = []
+            with open(path, encoding="utf-8") as fh:
+                for number, line in enumerate(fh, start=1):
+                    if line.lstrip().startswith("#"):
+                        continue
+                    for match in bare.finditer(line):
+                        if line[:match.start()].endswith('+"'):
+                            continue  # the inner half of the safe form
+                        offenders.append("{0}:{1}".format(name, number))
+            self.assertEqual(offenders, [],
+                             name + " has a bare empty-array expansion; "
+                             "use the ${arr[@]+guard} form at " +
+                             ", ".join(offenders))
+
     def test_never_stashes_or_touches_the_invoking_tree(self):
         for forbidden in ("git stash", "git checkout", "git reset",
                           "worktree prune", "git clean"):

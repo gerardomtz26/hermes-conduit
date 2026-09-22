@@ -87,19 +87,45 @@ acquire_gate_lock() { # $1 = canonical lock dir
       GATE_LOCK_OWNER=""
       return 2
     fi
+    case "$holder" in
+      *[!0-9]*)
+        # Corrupt pid content is not a provably dead owner: same rule as a
+        # missing one - BUSY, never stolen.
+        rm -rf "$temp"; GATE_LOCK_TEMP=""
+        GATE_LOCK_OWNER=""
+        return 2
+        ;;
+    esac
     if kill -0 "$holder" 2>/dev/null; then
       rm -rf "$temp"; GATE_LOCK_TEMP=""
       GATE_LOCK_OWNER="$holder"
       return 2
     fi
-    # Confirmed dead owner: remove it, then rename ours in. If a competing
-    # thief wins the window, OUR rename fails (the target is non-empty again)
-    # and the verification below reports BUSY.
-    rm -rf "$canonical" 2>/dev/null || true
-    if [ -e "$canonical" ]; then
+    # Confirmed dead owner: steal it ATOMICALLY by renaming the stale lock
+    # aside, then re-checking what we just moved. A destructive `rm -rf` here
+    # is the classic check-then-act race: a contender can pass the liveness
+    # check above, let the OTHER process complete its claim, and then delete
+    # that live lock - two owners, one Mac, corrupt Simulator state. Exactly
+    # one process can move the canonical directory aside, so the loser of that
+    # rename simply fails, and a moved-away lock that turns out to be LIVE is
+    # put back before we refuse.
+    local aside="$canonical.stale.$$"
+    if ! mv "$canonical" "$aside" 2>/dev/null; then
+      # Another contender moved it first; its claim path decides the outcome.
       rm -rf "$temp"; GATE_LOCK_TEMP=""
+      GATE_LOCK_OWNER=""
       return 2
     fi
+    holder="$(cat "$aside/pid" 2>/dev/null || true)"
+    if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+      # The directory we moved aside holds a LIVE owner (it replaced the
+      # stale lock mid-steal): restore it and refuse.
+      mv "$aside" "$canonical" 2>/dev/null || true
+      rm -rf "$temp"; GATE_LOCK_TEMP=""
+      GATE_LOCK_OWNER="$holder"
+      return 2
+    fi
+    rm -rf "$aside" 2>/dev/null || true
   fi
 
   # Atomic claim: rename onto an absent path succeeds once; onto a path that
@@ -114,19 +140,22 @@ acquire_gate_lock() { # $1 = canonical lock dir
     GATE_LOCK_TEMP=""
     return 2
   fi
-  GATE_LOCK_TEMP=""
 
   # Verify: only the pid readable at the canonical path owns the gate.
+  # GATE_LOCK_TEMP is kept set until ownership is confirmed, so an interrupt
+  # between the rename and GATE_LOCK_HELD=1 still releases this lock instead
+  # of leaking it.
   holder="$(cat "$canonical/pid" 2>/dev/null || true)"
   if [ "$holder" != "$$" ]; then
     # mv nests into an existing directory target (BSD/GNU behavior): if ours
     # ended up inside the canonical lock, it is not ours to keep.
-    rm -rf "$canonical/$(basename "$temp")." 2>/dev/null || true
     rm -rf "$canonical/$(basename "$temp")" 2>/dev/null || true
     rm -rf "$temp" 2>/dev/null || true
+    GATE_LOCK_TEMP=""
     return 2
   fi
   GATE_LOCK_HELD=1
   GATE_LOCK_HELD_DIR="$canonical"
+  GATE_LOCK_TEMP=""
   return 0
 }

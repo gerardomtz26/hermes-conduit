@@ -118,8 +118,10 @@ fi
 stem="$(basename "$bundle" .xcresult)"
 mode="pass"
 case "$bundle" in
+  *ui-recovery*)       mode="${FAKE_UI_RECOVERY:-pass}" ;;
+  *unit-recovery*)     mode="${FAKE_RECOVERY_MODE:-pass}" ;;
   *unit-continuation*) mode="${FAKE_CONTINUATION_MODE:-pass}" ;;
-  *unit-recovery*|*ui-recovery*) mode="${FAKE_RECOVERY_MODE:-pass}" ;;
+  */lanes/ui/*)        mode="${FAKE_UI_BATCH:-pass}" ;;
   *)
     case "$stem" in
       batch-*) idx="${stem#batch-}"; idx="${idx%%-*}"; attempt="${stem##*-a}"
@@ -764,6 +766,35 @@ unset FAKE_UNIT_B1_A1
 
 echo ""
 echo ""
+echo ""
+echo "--- case: a UI-only recovery round is recorded end to end ---"
+# The hole the reviewer found: the shell writes a UI retry to lanes/ui-recovery
+# (no trailing suffix), which the phase accounting's globs could not see - so a
+# UI-only recovery recorded retries: 0 while the verdict said PASS. This case
+# drives the REAL shell lines: clean unit lane, wedged UI shard, healed UI
+# recovery, and then asks the result document whether the round ran.
+export FAKE_UI_BATCH=crash
+RUN17="$(new_run_dir)"
+UIREC_EXIT=0
+run_gate --ref HEAD --gate-root "$WORK/gate-artifacts" --run-dir "$RUN17"     --repeat-classes "" >/dev/null 2>&1 || UIREC_EXIT=$?
+if needs_extraction; then
+  if [ "$UIREC_EXIT" -eq 0 ]; then
+    ok "a UI-only recovery round lets the run pass"
+  else
+    bad "the UI-only recovery run failed (see $RUN17/summary.md)"
+    tail -n 20 "$RUN17/summary.md" 2>/dev/null
+  fi
+  GATE17="$RUN17/gate-result.json"
+  assert_eq "the round is recorded as having run"     "$(json_get "$GATE17" 'doc["infrastructure"]["retries"]')" "1"
+  assert_eq "the UI classes recovered count as executed"     "$(json_get "$GATE17" 'len(doc["ui"]["classes_missing"])')" "0"
+  assert_eq "both UI passes are in the record"     "$(json_get "$GATE17" 'len(doc["ui"]["passes"])')" "2"
+  assert_eq "and the unit suite needed no recovery"     "$(json_get "$GATE17" 'len(doc["unit"]["passes"])')" "1"
+  assert_contains "the healed round is a caveat, not silence"     "$(cat "$RUN17/summary.md")" "recovery"
+else
+  skip "UI-only recovery round (needs a readable result bundle)"
+fi
+unset FAKE_UI_BATCH
+
 echo "--- case: one authoritative full-gate invocation per requested SHA ---"
 # The gate is single-shot: after a verdict, another COMPLETE run for the same
 # SHA must be an explicit caller request. Nothing may restart it into "until

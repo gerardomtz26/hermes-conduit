@@ -600,6 +600,11 @@ def cmd_meta(args) -> int:
         "schema_version": SCHEMA_VERSION,
         "requested_ref": args.ref,
         "tested_sha": args.sha,
+        # The gate tooling's own commit (orchestrator + this assembler come
+        # from the invoking checkout, not the tested tree): two results for
+        # the same tested SHA produced by different gate tooling are then
+        # distinguishable in release evidence.
+        "tooling_sha": args.tooling_sha or "",
         "xcode_version": args.xcode,
         "simulator": {
             "name": args.simulator,
@@ -1131,6 +1136,18 @@ def _read_lane(lane_dir: str) -> dict:
     return out
 
 
+def _is_recovery_pass(name) -> bool:
+    """True when a pass IS a recovery pass, by directory basename.
+
+    Matching `"recovery" in <full path>` would fire for any run directory
+    whose path happens to contain the word (a --run-dir under ~/gate-recovery,
+    a volume named "Recovery"), and would then suppress problems for a run
+    that never recovered anything.
+    """
+    base = os.path.basename(str(name or ""))
+    return base.startswith("unit-recovery") or base.startswith("ui-recovery")
+
+
 def _lane_pass_dirs(lanes_root, primary, extra, recovery_prefix):
     """The primary lane dir, an optional follow-up dir (the unit lane's
     continuation), and every recovery-pass dir - in execution order.
@@ -1372,8 +1389,8 @@ def _merge_lane_summaries(passes, expected_classes) -> dict:
     # recovery round then completed is not a problem in itself: its failure is
     # exactly what the round exists for, and the round is recorded as
     # infrastructure.retries. Any other lane verdict stands as a problem.
-    healed_verdicts = [str(p.get("dir") or "") for p in passes
-                       if "recovery" in str(p.get("dir") or "")]
+    recovery_present = [str(p.get("dir") or "") for p in passes
+                        if _is_recovery_pass(p.get("dir"))]
 
     problems = []
     for summary in passes:
@@ -1392,7 +1409,7 @@ def _merge_lane_summaries(passes, expected_classes) -> dict:
     # recovery round then completed is not a problem in itself: its failure is
     # exactly what the round exists for, and the round is recorded as
     # infrastructure.retries. Any other lane verdict stands.
-    if healed_verdicts and not missing:
+    if recovery_present and not missing:
         problems = [p for p in problems
                     if not p.startswith("lane runner verdict is")]
     merged["problems"] = _dedupe(problems)
@@ -1571,7 +1588,11 @@ def cmd_summarize(args) -> int:
     lanes_root = os.path.join(run_dir, "lanes")
     unit_passes = _lane_pass_dirs(lanes_root, "unit", "unit-continuation",
                                   "unit-recovery")
-    if not unit_passes:
+    if not any(os.path.basename(d) == "unit" for d in unit_passes):
+        # Mirror the UI check: without the primary lane, a recovery pass
+        # would be promoted to index 0 and judged against the whole plan -
+        # a mis-copied run directory could then certify a suite whose primary
+        # lane never ran.
         gate_problems.append("unit lane results are missing")
     unit_expected, unit_expect_problems = _expected_classes(run_dir, "unit", expected)
     gate_problems.extend(unit_expect_problems)
@@ -1588,7 +1609,7 @@ def cmd_summarize(args) -> int:
     # same infrastructure class again, the run fails as infrastructure and no
     # third attempt is made - the gate does not loop until green.
     for entry in unit_summary.get("passes") or []:
-        if entry.get("is_launch_wedge") and "recovery" in str(entry.get("name")):
+        if entry.get("is_launch_wedge") and _is_recovery_pass(entry.get("name")):
             gate_problems.append(
                 "the recovery round hit the same simulator launch-refusal class "
                 "again; no further recovery is attempted")
@@ -1608,7 +1629,7 @@ def cmd_summarize(args) -> int:
         gate_problems.extend("ui: " + p for p in ui_summary.get("problems") or [])
         # Same recurrence rule as unit: one recovery round, then FAIL.
         for entry in ui_summary.get("passes") or []:
-            if entry.get("is_launch_wedge") and "recovery" in str(entry.get("name")):
+            if entry.get("is_launch_wedge") and _is_recovery_pass(entry.get("name")):
                 gate_problems.append(
                     "the UI recovery round hit the same simulator launch-refusal "
                     "class again; no further recovery is attempted")
@@ -1808,6 +1829,7 @@ def cmd_summarize(args) -> int:
         "verdict": verdict,
         "requested_ref": meta.get("requested_ref"),
         "tested_sha": tested_sha,
+        "tooling_sha": meta.get("tooling_sha") or "",
         "tested_sha_short": tested_sha[:12],
         "xcode_version": meta.get("xcode_version"),
         "simulator": meta.get("simulator"),
@@ -2100,6 +2122,7 @@ def main(argv=None) -> int:
     p.add_argument("--out", required=True)
     p.add_argument("--ref", required=True)
     p.add_argument("--sha", required=True)
+    p.add_argument("--tooling-sha", default="")
     p.add_argument("--xcode", default="")
     p.add_argument("--simulator", default="")
     p.add_argument("--runtime", default="")
