@@ -577,7 +577,7 @@ else
 fi
 GATE7="$RUN7/gate-result.json"
 assert_eq "no recovery pass was created" \
-  "$([ -d "$RUN7/lanes/unit-recovery" ] && echo yes || echo no)" "no"
+  "$(ls -d "$RUN7"/lanes/unit-recovery-* 2>/dev/null | wc -l | tr -d ' ')" "0"
 if needs_extraction; then
 assert_eq "no recovery retry was recorded" \
   "$(json_get "$GATE7" 'doc["infrastructure"]["retries"]')" "0"
@@ -623,8 +623,8 @@ assert_eq "no class is left without a result" \
 else
   skip "wedge recovery outcome (verdict and classification)"
 fi
-assert_eq "the recovery pass exists" \
-  "$([ -d "$RUN8/lanes/unit-recovery" ] && echo yes || echo no)" "yes"
+assert_eq "the recovery passes exist (one per class)" \
+  "$(ls -d "$RUN8"/lanes/unit-recovery-* 2>/dev/null | wc -l | tr -d ' ')" "15"
 assert_eq "the gate ran on its own simulator device" \
   "$(json_get "$GATE8" 'doc["simulator"]["name"]')" "Conduit CI Gate"
 assert_contains "the recovery is recorded, not hidden" \

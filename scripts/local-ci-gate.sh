@@ -971,9 +971,9 @@ python3 "$HELPER" phase --out "$RUN_DIR/recovery/phase.json" \
   --status "$( [ -d "$RUN_DIR/lanes/unit-recovery" ] && echo pass || echo skipped )" \
   --duration 0 --exit-code 0 \
   --note "one bounded recovery round for the simulator launch-refusal class" \
-  --detail "unit_recovery_dir=$([ -d "$RUN_DIR/lanes/unit-recovery" ] && echo "$RUN_DIR/lanes/unit-recovery" || echo none)" \
-  --detail "ui_recovery_dir=$([ -d "$RUN_DIR/lanes/ui-recovery" ] && echo "$RUN_DIR/lanes/ui-recovery" || echo none)" \
-  --check "round-1:$([ -d "$RUN_DIR/lanes/unit-recovery" ] || [ -d "$RUN_DIR/lanes/ui-recovery" ] && echo pass || echo skipped):0"
+  --detail "unit_recovery_dirs=$(ls -d "$RUN_DIR"/lanes/unit-recovery-* 2>/dev/null | tr -d '\n')" \
+  --detail "ui_recovery_dirs=$(ls -d "$RUN_DIR"/lanes/ui-recovery-* 2>/dev/null | tr -d '\n')" \
+  --check "round-1:$(ls -d "$RUN_DIR"/lanes/*-recovery-* >/dev/null 2>&1 && echo pass || echo skipped):0"
 
 GATE_FINISHED_AT="$(now_iso)"
 GATE_ELAPSED=$(( $(date +%s) - GATE_START_EPOCH ))
