@@ -314,6 +314,11 @@ cleanup() {
 trap cleanup EXIT
 trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
+# An SSH drop SIGHUPs the session leader: without this the cleanup never
+# runs, the lane runner is reparented and keeps the device busy, and the
+# next invocation legally steals a lock whose owner is dead - two chains
+# on one Mac.
+trap 'cleanup; exit 129' HUP
 
 if [ "$USE_LOCK" -eq 1 ]; then
   mkdir -p "$GATE_ROOT"
@@ -355,13 +360,17 @@ run_bounded() { # $1=budget seconds $2=log path $3=working directory, rest=comma
   deadline=$(( $(date +%s) + budget ))
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$(date +%s)" -ge "$deadline" ]; then
-      kill -TERM "$pid" 2>/dev/null || true
+      # Kill the GROUP, not just the wrapper: the command runs through a
+      # subshell that execs a shell running xcrun, so a TERM to the pid
+      # alone leaves a grandchild holding the simulator after the budget
+      # expired (or after an interrupt).
+      kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
       grace=5
       while [ "$grace" -gt 0 ] && kill -0 "$pid" 2>/dev/null; do
         sleep 1
         grace=$(( grace - 1 ))
       done
-      kill -KILL "$pid" 2>/dev/null || true
+      kill -KILL -- "-$pid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null
       echo "local-ci-gate: '$*' exceeded its ${budget}s budget" >&2
       return 124
@@ -412,7 +421,7 @@ mkdir -p "$WORKTREE_ROOT"
 # The record lives under the gate ROOT (not the run dir), so it holds however
 # the run's artifacts were laid out (--run-dir included).
 SHA_REGISTRY_DIR="$GATE_ROOT/sha-results"
-SHA_REGISTRY="$SHA_REGISTRY_DIR/$SHA12.log"
+SHA_REGISTRY="$SHA_REGISTRY_DIR/$SHA.log"
 if [ -s "$SHA_REGISTRY" ] && [ "$ALLOW_ANOTHER_RUN" -ne 1 ]; then
   echo "local-ci-gate: a full gate result already exists for $SHA:" >&2
   sed 's/^/  /' "$SHA_REGISTRY" >&2
@@ -740,37 +749,22 @@ run_lane() { # $1=kind $2=lane $3=target $4=classes $5=predicted $6=timeout
       --iterations 1 --xctestrun "$XCTESTRUN" --result-dir "$result_dir" "$@"
 }
 
-# Settle the device between launches WITHOUT resetting it: terminate any
-# instance of the app still shutting down and give SpringBoard a beat. The
-# refusal's exact text ("Application failed preflight checks ... reason:
-# Busy") is the install racing a dying instance of the same bundle, and the
-# gate saw it return after the round's first couple of launches - so a
-# one-time settle before the round is not enough. This is hygiene, not
-# recovery: it erases nothing and re-runs nothing.
-# Prime the launcher before the round's single retry launch. The verified
-# wedge alternates across app launches (see simulator_prep): a launcher-level
-# launch+terminate pair absorbs a refused slot so the retry launch lands on a
-# good one. It runs NO tests, so nothing is counted twice - the work is still
-# retried exactly once.
-simulator_prime() {
-  local udid="${SIMULATOR_UDID:-}" i
+simulator_prime() { # $1 = label for the log files
+  local udid="${SIMULATOR_UDID:-}" i label
   [ -z "$udid" ] && return 0
+  label="${1:-x}"
+  # Bounded like every other simctl touchpoint: a wedged CoreSimulatorService
+  # hangs simctl indefinitely, and this runs before every retry and repeat.
   i=1
   while [ "$i" -le 2 ]; do
-    xcrun simctl launch "$udid" com.milim.relay >/dev/null 2>&1 || true
+    run_bounded 60 "$RUN_DIR/sim-prime-$label-$i.launch.log" "$RUN_DIR"       xcrun simctl launch "$udid" com.milim.relay || true
     sleep 2
-    xcrun simctl terminate "$udid" com.milim.relay >/dev/null 2>&1 || true
+    run_bounded 60 "$RUN_DIR/sim-prime-$label-$i.term.log" "$RUN_DIR"       xcrun simctl terminate "$udid" com.milim.relay || true
     sleep 2
     i=$(( i + 1 ))
   done
 }
 
-simulator_settle() {
-  local udid="${SIMULATOR_UDID:-}"
-  [ -z "$udid" ] && return 0
-  xcrun simctl terminate "$udid" com.milim.relay >/dev/null 2>&1 || true
-  sleep 2
-}
 
 # Bounded Simulator preparation before a lane starts: shut the devices down,
 # erase the destination, boot it, and WAIT for a complete boot, using
@@ -912,12 +906,11 @@ else
         . "$RUN_DIR/recovery.env"
         if [ "${GATE_RECOVERY_PRESENT:-0}" -eq 1 ] && [ -s "$RUN_DIR/recovery.tsv" ]; then
           echo "== recovery round 1 of 1: erasing the gate simulator and retrying ${GATE_RECOVERY_CLASS_COUNT} class(es) once =="
-          # ONE erase, then one invocation per CHUNK of at most 7 classes (the
-          # (the per-row prep below is the round's single erase)
-          # planner's resilient batch shape): a lane stops at the batch that
-          # fails, so one giant invocation would let its first wedged batch eat
-          # the round, while one invocation per class multiplies the per-launch
-          # wedge risk. Chunking keeps the loss at worst one chunk.
+          # ONE erase, then ONE invocation for the whole retry set in a single
+          # batch: the wedge alternates across app launches, so one launch
+          # gives the round its single chance (see cmd_recovery_spec, which
+          # emits exactly one row). A refusal of that launch fails the gate as
+          # infrastructure with no third attempt.
           while IFS=$'\t' read -r rcls rclasses rbatches rpredicted rtimeout; do
             [ -z "$rcls" ] && continue
             rtimeout="${rtimeout%$'\r'}"
@@ -928,7 +921,7 @@ else
             # simulator_prep), and each piece of work is still retried
             # exactly once.
             simulator_prep "recovery-$rcls"
-            simulator_prime
+            simulator_prime "retry-set"
             if run_lane unit "$GATE_UNIT_LANE-recovery-$rcls" "$GATE_UNIT_TARGET" \
                 "$rclasses" "$rpredicted" "$rtimeout" \
                 "$RUN_DIR/lanes/unit-recovery-$rcls" \
@@ -1019,7 +1012,7 @@ else
               # Primed like the recovery round's retry: the wedge alternates
               # across app launches, and the prime keeps a repetition from
               # being lost to the launcher rather than to the test.
-              simulator_prime
+              simulator_prime "$rcls-$iteration"
               if run_lane unit "repeat-$rcls-$iteration" "$GATE_UNIT_TARGET" \
                   "$rcls" "$rpredicted" "$rtimeout" \
                   "$RUN_DIR/repeats/$rcls/iter-$iteration" \

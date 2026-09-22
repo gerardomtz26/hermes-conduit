@@ -109,7 +109,11 @@ acquire_gate_lock() { # $1 = canonical lock dir
     # one process can move the canonical directory aside, so the loser of that
     # rename simply fails, and a moved-away lock that turns out to be LIVE is
     # put back before we refuse.
-    local aside="$canonical.stale.$$"
+    # Unique per attempt: a leftover aside from a killed steal must never be
+    # THIS steal's target (mv into an existing directory nests instead of
+    # failing, and the cleanup would then delete a live lock alongside the
+    # stale one).
+    local aside="$canonical.stale.$$.$RANDOM.$(date +%s)"
     if ! mv "$canonical" "$aside" 2>/dev/null; then
       # Another contender moved it first; its claim path decides the outcome.
       rm -rf "$temp"; GATE_LOCK_TEMP=""

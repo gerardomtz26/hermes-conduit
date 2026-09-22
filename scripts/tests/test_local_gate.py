@@ -12,6 +12,7 @@ import io
 import json
 import os
 import shlex
+import shutil
 import sys
 import tempfile
 import unittest
@@ -345,7 +346,10 @@ class RecoveryVerdictTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.run_dir = Path(self.tmp.name)
+        # Under a subdirectory: one test moves this tree into a path whose name
+        # contains "recovery", and a move into its own descendant is invalid.
+        self.run_dir = Path(self.tmp.name) / "fixture"
+        self.run_dir.mkdir(parents=True, exist_ok=True)
         write_json(self.run_dir / "lanes.json", {
             "schema_version": 1,
             "unit": {"classes": ["AlphaTests", "BetaTests", "GammaTests"]},
@@ -579,6 +583,32 @@ class RecoveryVerdictTests(unittest.TestCase):
         self.assertFalse(entry["iterations"][0]["satisfied"])
         self.assertEqual(code, 1)
         self.assertTrue(any("genuine test failure" in p for p in doc["problems"]))
+
+    def test_a_run_dir_named_recovery_cannot_fake_a_healed_round(self):
+        """`_is_recovery_pass` matches a pass's directory BASENAME, never the
+        run-dir path: otherwise --run-dir ~/gate-recovery/... would claim a
+        round ran, let every test-runner failure be marked recovered, and turn
+        a must-FAIL run into a PASS with an erase+retry that never happened.
+        """
+        # The whole fixture moves under a run-dir whose PATH contains the word
+        # "recovery" - that is the mutation under test.
+        target = Path(self.tmp.name) / "gate-recovery" / "run1"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(self.run_dir), str(target))
+        self.run_dir = target
+        # A complete unit lane with a launch-refusal event and NO recovery pass.
+        self._primary(observed=("AlphaTests", "BetaTests", "GammaTests"), cases=3)
+        code, doc = self._summarize()
+        self.assertEqual(code, 1, doc["problems"])
+        self.assertEqual(doc["verdict"], "FAIL")
+        self.assertEqual(doc["infrastructure"]["persistent"], 1,
+                         "an unhealed wedge must stay persistent")
+        self.assertEqual(doc["infrastructure"]["retries"], 0,
+                         "no recovery pass ran")
+        self.assertFalse(any(e.get("recovered_by")
+                             for e in doc["infrastructure"]["events"]
+                             .get("infrastructure_failures", [])),
+                         "nothing may claim the gate healed it")
 
     def test_gate_simulator_is_recorded(self):
         self._primary(observed=("AlphaTests", "BetaTests"), cases=2)

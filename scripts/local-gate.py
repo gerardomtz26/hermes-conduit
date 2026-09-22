@@ -1674,8 +1674,12 @@ def cmd_summarize(args) -> int:
     # not by name matching: the round either left the run complete (then the
     # wedge it was invoked for was healed) or it did not (then the infrastructure
     # is persistent and the gate fails).
+    # Basename match, never the full path: a --run-dir under ~/gate-recovery
+    # would otherwise claim a round ran, let round_healed mark every test-
+    # runner failure as recovered, and turn a must-fail run into a PASS with
+    # an erase+retry that never happened.
     recovery_ran = any(
-        "recovery" in str(entry.get("name") or "")
+        _is_recovery_pass(entry.get("name"))
         for entry in (unit_summary.get("passes") or []) +
                     (ui_summary.get("passes") or []))
     incomplete_after_round = (unit_summary.get("classes_missing") or
@@ -1800,12 +1804,20 @@ def cmd_summarize(args) -> int:
     if allow_recovered and recovered_evidence:
         caveats.append("--allow-recovered-infrastructure downgraded recovered "
                        "infrastructure from FAIL to this verdict")
+    sim_record = meta.get("simulator") or {}
+    if not meta.get("xcode_version") or not sim_record.get("runtime")             or not sim_record.get("udid"):
+        caveats.append("environment identity incomplete: the Xcode version or "
+                       "the simulator runtime/UDID could not be read for this run")
     if run_flags.get("lock_used") is False:
         caveats.append("--no-lock: another gate could have been running "
                        "concurrently on this Mac")
     if run_flags.get("simulator_prep") is False:
         caveats.append("--no-simulator-prep: the Simulator was not prepared "
                        "before the lanes")
+    if str(phases.get("sim-prep", {}).get("status")) == "missing":
+        caveats.append("sim-prep phase record missing; preparation status unknown")
+    if str(phases.get("recovery", {}).get("status")) == "missing":
+        caveats.append("recovery phase record missing; recovery status unknown")
     for entry in phases.get("sim-prep", {}).get("checks") or []:
         if str(entry.get("status")) != "pass":
             caveats.append("Simulator preparation failed before {0}".format(
@@ -1870,7 +1882,10 @@ def cmd_summarize(args) -> int:
             "recovered": len(events["infrastructure_recovered"]),
             # The gate's one bounded recovery round: whether it was used, and
             # what it recovered. A recurrence after it is persistent.
-            "retries": recovery_rounds,
+            "retries": sum(1 for entry in
+                   (unit_summary.get("passes") or []) +
+                   (ui_summary.get("passes") or [])
+                   if _is_recovery_pass(entry.get("name"))),
             "retry_detail": phases["recovery"].get("checks") or [],
             "timeouts": len(events["timeouts"]),
             "not_executed": len(events["not_executed"]),

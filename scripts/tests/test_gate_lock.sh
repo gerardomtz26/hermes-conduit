@@ -227,6 +227,48 @@ assert_eq "and the owner's pid is intact" "$(cat "$LOCK10/pid")" "$$"
 gate_lock_release
 rm -rf "$LOCK10"
 
+echo "--- case 11: contenders racing a dead-owner lock yield one winner ---"
+LOCK11="$WORK/lock-11"
+mkdir -p "$LOCK11"
+printf '999999999
+' > "$LOCK11/pid"
+_racers=0
+while [ "$_racers" -lt 4 ]; do
+  bash -c '
+    . "$1"
+    if acquire_gate_lock "$2"; then
+      printf "%s
+" "$$" > "$2.winner"
+      sleep 1
+    fi' _ "$MOD" "$LOCK11" &
+  _racers=$(( _racers + 1 ))
+done
+wait
+assert_eq "exactly one contender wins the race"   "$(ls "$LOCK11.winner" 2>/dev/null | wc -l | tr -d ' ')" "1"
+assert_eq "and the lock carries the winner's pid"   "$(cat "$LOCK11/pid")" "$(cat "$LOCK11.winner" 2>/dev/null)"
+rm -rf "$LOCK11" "$LOCK11.winner"
+
+echo "--- case 12: a leftover rename-aside is never the steal's target ---"
+# A steal that was SIGKILLed after the rename-aside leaves that directory
+# behind; a later steal must not nest its own rename into it (that would make
+# the cleanup delete a live lock along with the stale one).
+LOCK12="$WORK/lock-12"
+mkdir -p "$LOCK12"
+printf '999999999
+' > "$LOCK12/pid"
+LEFTOVER="$LOCK12.stale.$$"
+mkdir -p "$LEFTOVER"
+printf '424242
+' > "$LEFTOVER/pid"
+STALE2_RC=0
+acquire_gate_lock "$LOCK12" || STALE2_RC=$?
+assert_eq "the steal still succeeds despite the leftover" "$STALE2_RC" "0"
+assert_eq "and this process owns the canonical lock"   "$(cat "$LOCK12/pid")" "$$"
+assert_eq "the leftover aside is untouched (not nested into)"   "$(cat "$LEFTOVER/pid")" "424242"
+assert_eq "and the leftover was not mistaken for the lock"   "$([ -d "$LOCK12" ] && echo yes || echo no)" "yes"
+gate_lock_release
+rm -rf "$LOCK12" "$LEFTOVER"
+
 echo ""
 echo "=== $pass_count passed, $fail_count failed ==="
 [ "$fail_count" -eq 0 ]

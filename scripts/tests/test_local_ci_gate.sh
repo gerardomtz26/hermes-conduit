@@ -425,6 +425,7 @@ assert_eq "simulator runtime recorded" \
   "$(json_get "$GATE_JSON" 'doc["simulator"]["runtime"]')" "iOS 26.0"
 assert_eq "the gate ran on its OWN simulator device, not the default" \
   "$(json_get "$GATE_JSON" 'doc["simulator"]["name"]')" "Conduit CI Gate"
+assert_eq "the gate tooling's own commit is recorded"   "$(json_get "$GATE_JSON" 'doc["tooling_sha"]')"   "$(git -C "$WORK/repo" rev-parse HEAD)"
 assert_eq "static checks ran" \
   "$(json_get "$GATE_JSON" 'len(doc["static_checks"])')" "3"
 assert_contains "human summary names the tested commit" \
@@ -827,7 +828,7 @@ fi
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "--- case: only one gate at a time ---"echo "--- case: only one gate at a time ---"
+echo "--- case: only one gate at a time ---"
 mkdir -p "$WORK/gate/gate.lock"
 echo "$$" > "$WORK/gate/gate.lock/pid"
 RUN6="$(new_run_dir)"
