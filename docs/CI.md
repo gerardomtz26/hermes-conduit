@@ -528,6 +528,17 @@ recovery round, and it is allowed for exactly one infrastructure class:
 * if the same class comes back after the round, the gate fails as
   infrastructure and makes **no third attempt**.
 
+The wedge is worth knowing in detail, because it defeated every per-launch
+mitigation and it shapes the round. Probes on our Mac (all on the gate's own
+device) showed the refusal **alternates across app launches**: every other
+launch is refused, and that held through `simctl terminate` + 5/10/15 s
+settles, `simctl uninstall` between launches, and a fresh `erase` before a
+retry alike - and it appears inside a single lane too (batch 1 passes,
+batch 2 refused). Only an erase reliably clears the condition *once*. The
+round therefore puts the whole retry set back in ONE invocation with one
+batch, so the retry gets its single chance on a single launch instead of
+spreading it across many launches that the alternation would thin out.
+
 A run the round recovered is a PASS with the retry recorded
 (`infrastructure.retries`, `recovered`, and a caveat naming the healed
 wedge) — never a silently green run. A run that needed no recovery is the
