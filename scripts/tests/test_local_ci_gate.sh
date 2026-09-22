@@ -471,9 +471,9 @@ assert_contains "the failing test is identified" \
 # Batches 2 and 3 never ran; the gate runs them as a continuation so one
 # failing batch cannot hide the rest of the suite.
 assert_eq "the never-reached batches were continued" \
-  "$(json_get "$GATE3" '"continuation" in doc["unit"] and doc["unit"]["continuation"] is not None')" "True"
+  "$(json_get "$GATE3" 'len(doc["unit"]["passes"]) > 1')" "True"
 assert_eq "the continuation ran every class the lane never reached" \
-  "$(json_get "$GATE3" 'doc["unit"]["continuation"]["executions"]')" "8"
+  "$(json_get "$GATE3" 'doc["unit"]["passes"][1]["executions"]')" "8"
 assert_eq "every planned class still has a result" \
   "$(json_get "$GATE3" 'doc["unit"]["classes_missing"]')" "[]"
 else
@@ -483,32 +483,42 @@ unset FAKE_UNIT_B1_A1
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "--- case: the test runner never launched the app ---"
+echo "--- case: the test runner never launched the app (wedge -> one recovery round) ---"
 # XCTest reports this under its synthetic "System Failures" class; the gate
 # must call it infrastructure, not an assertion (this is exactly what the
-# gate's first real run on main produced, and it was mislabeled then).
+# gate's first real runs on main produced, and it was mislabeled then). With
+# the bounded recovery round, the class it leaves incomplete is retried once
+# after an erase of the gate simulator - and that is the one case a run may
+# still PASS: the retry is recorded, never hidden.
 export FAKE_UNIT_B2_A1=crash
 RUN4="$(new_run_dir)"
-if run_gate --ref HEAD --gate-root "$WORK/gate" --run-dir "$RUN4" \
-    --repeat-classes "" >/dev/null 2>&1; then
-  bad "a test-runner launch failure did not fail the gate"
-else
-  ok "a test-runner launch failure fails the gate"
-fi
-GATE4="$RUN4/gate-result.json"
+CLEAN4_EXIT=0
+run_gate --ref HEAD --gate-root "$WORK/gate" --run-dir "$RUN4" \
+    --repeat-classes "" >/dev/null 2>&1 || CLEAN4_EXIT=$?
 if needs_extraction; then
+  if [ "$CLEAN4_EXIT" -eq 0 ]; then
+    ok "a wedged run recovered by the bounded round passes the gate"
+  else
+    bad "the wedged run was not recovered (see $RUN4/summary.md)"
+    tail -n 20 "$RUN4/summary.md" 2>/dev/null
+  fi
 assert_eq "no assertion failure claimed" \
   "$(json_get "$GATE4" 'doc["unit"]["failures"]')" "0"
+GATE4="$RUN4/gate-result.json"
 assert_eq "the synthetic failure is counted separately" \
   "$(json_get "$GATE4" 'doc["unit"]["synthetic_failures"] > 0')" "True"
-assert_contains "reported as a launch failure" \
-  "$(cat "$RUN4/summary.md")" "never started the app under test"
-assert_eq "the classes that never ran are named, not hidden" \
-  "$(json_get "$GATE4" 'len(doc["unit"]["classes_missing"])')" "7"
-assert_eq "the batch after the crash was still continued" \
-  "$(json_get "$GATE4" 'doc["unit"]["continuation"]["executions"]')" "1"
+assert_eq "the recovery round was used exactly once" \
+  "$(json_get "$GATE4" 'doc["infrastructure"]["retries"]')" "1"
+assert_eq "the healed wedge is recorded as recovered" \
+  "$(json_get "$GATE4" 'doc["infrastructure"]["recovered"] > 0')" "True"
+assert_eq "nothing stayed persistent" \
+  "$(json_get "$GATE4" 'doc["infrastructure"]["persistent"]')" "0"
+assert_eq "every planned class still has a result" \
+  "$(json_get "$GATE4" 'doc["unit"]["classes_missing"]')" "[]"
+assert_contains "the recovered launch failure is visible in the summary" \
+  "$(cat "$RUN4/summary.md")" "recovery"
 else
-  skip "test-runner-crash classification"
+  skip "test-runner-crash classification and the recovery round"
 fi
 unset FAKE_UNIT_B2_A1
 

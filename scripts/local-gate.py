@@ -1241,11 +1241,15 @@ def _merge_lane_summaries(passes, expected_classes) -> dict:
     for field in _MERGE_LIST_FIELDS:
         merged[field] = [entry for summary in passes
                          for entry in (summary.get(field) or [])]
-    # "Work recorded as not executed" is the stopped lane's evidence that a
-    # later pass may have since executed; recomputing it from the aggregate is
-    # what keeps a red report from claiming a class never ran when it did.
-    merged["not_executed"] = [entry for summary in passes[1:]
-                              for entry in (summary.get("not_executed") or [])]
+    # "Work recorded as not executed" is a stopped lane's evidence that a later
+    # pass may have since executed: entries whose class now has a result are
+    # dropped, which keeps a red report from claiming a class never ran when it
+    # did.
+    not_exec = [entry for summary in passes
+                for entry in (summary.get("not_executed") or [])]
+    merged["not_executed"] = [entry for entry in not_exec
+                              if not _covers_names(sorted(observed),
+                                                   str(entry.get("name") or ""))]
 
     merged["reread_classes"] = reread
     merged["passes"] = [{
@@ -1261,14 +1265,12 @@ def _merge_lane_summaries(passes, expected_classes) -> dict:
     } for p in passes]
 
     # A lane that stopped on the launch wedge and whose work the gate's
-    # bounded recovery round then completed is not a problem in itself: its
-    # failure is exactly what the round exists for, and it is recorded as
+    # A pass that stopped on the launch wedge and whose work the gate's bounded
+    # recovery round then completed is not a problem in itself: its failure is
+    # exactly what the round exists for, and the round is recorded as
     # infrastructure.retries. Any other lane verdict stands as a problem.
     healed_verdicts = [str(p.get("dir") or "") for p in passes
                        if "recovery" in str(p.get("dir") or "")]
-    if healed_verdicts and not merged.get("classes_missing"):
-        primary["problems"] = [p for p in (primary.get("problems") or [])
-                               if not p.startswith("lane runner verdict is")]
 
     problems = list(primary.get("problems") or [])
     problems = [p for p in problems
@@ -1280,6 +1282,13 @@ def _merge_lane_summaries(passes, expected_classes) -> dict:
         problems.append("work recorded as not executed: {0}".format(
             _csv(sorted({e["name"] for e in merged["not_executed"]}))))
     problems.extend(p for summary in passes[1:] for p in (summary.get("problems") or []))
+    # A pass that stopped on the launch wedge and whose work the gate's bounded
+    # recovery round then completed is not a problem in itself: its failure is
+    # exactly what the round exists for, and the round is recorded as
+    # infrastructure.retries. Any other lane verdict stands.
+    if healed_verdicts and not missing:
+        problems = [p for p in problems
+                    if not p.startswith("lane runner verdict is")]
     merged["problems"] = _dedupe(problems)
     return merged
 
