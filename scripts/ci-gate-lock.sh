@@ -130,6 +130,11 @@ acquire_gate_lock() { # $1 = canonical lock dir
       return 2
     fi
     rm -rf "$aside" 2>/dev/null || true
+    # The takeover is an event an operator debugging a lock must SEE: the
+    # docs promise a warning, and a silent steal leaves "why did my lock
+    # disappear" unanswerable. (stderr only: stdout is the caller's report.)
+    printf 'ci-gate-lock: warning: stale lock at %s (owner pid %s is dead); taking it over\n' \
+      "$canonical" "${holder:-?}" >&2
   fi
 
   # Atomic claim: rename onto an absent path succeeds once; onto a path that

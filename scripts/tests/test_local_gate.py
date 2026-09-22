@@ -440,6 +440,77 @@ class RecoveryVerdictTests(unittest.TestCase):
         self.assertIn("recovered", self.human)
         self.assertIn("recovery", json.dumps(doc))
 
+    def _watchdog_lane_with_partial_results(self):
+        """Batch 1 [Alpha, Beta] hit its watchdog with Alpha's results
+        already written; batch 2 never ran. The shape a wedge-induced hang
+        leaves behind when it strikes mid-batch.
+        """
+        lane_artifacts(self.run_dir / "lanes" / "unit", status="fail",
+                       classes=("AlphaTests",), cases=1,
+                       attempts=[{"mode": "batch", "n": 1, "class": "all",
+                                  "status": "timeout"},
+                                 {"mode": "batch", "n": 2, "class": "all",
+                                  "status": "not_run"}],
+                       batches=[
+                           {"batch": 1, "classes": ["AlphaTests", "BetaTests"],
+                            "timeout_s": 600, "status": "timeout",
+                            "attempts": [{"attempt": 1, "status": "timeout",
+                                          "seconds": 600.0, "failures": 0}]},
+                           {"batch": 2, "classes": ["GammaTests"],
+                            "timeout_s": 500, "status": "not_run",
+                            "attempts": []},
+                       ])
+        self._wedge_log(self.run_dir / "lanes" / "unit")
+
+    def test_a_hang_the_round_never_reran_stays_persistent(self):
+        """A hang is healed ONLY when the round re-ran every class it names.
+
+        Here the continuation completed batch 2 and the round re-ran only the
+        class that was missing (Beta): Alpha's remaining cases were never
+        executed again, so healing this hang would flip a must-FAIL run into
+        PASS on coverage the round never produced.
+        """
+        self._watchdog_lane_with_partial_results()
+        lane_artifacts(self.run_dir / "lanes" / "unit-continuation",
+                       status="pass", classes=("GammaTests",), cases=1)
+        lane_artifacts(self.run_dir / "lanes" / "unit-recovery",
+                       status="pass", classes=("BetaTests",), cases=1)
+        self._recovery_phase("pass")
+        code, doc = self._summarize()
+        # Coverage IS complete - only the un-healed hang can fail this run.
+        self.assertEqual(doc["unit"]["classes_missing"], [])
+        timeouts = doc["infrastructure"]["events"]["timeouts"]
+        self.assertEqual(len(timeouts), 1, doc)
+        self.assertFalse(
+            timeouts[0].get("recovered"),
+            "a hang whose classes the round never re-ran must stay persistent")
+        self.assertEqual(code, 1, doc["problems"])
+        self.assertEqual(doc["verdict"], "FAIL")
+        self.assertTrue(
+            any("persistent infrastructure failure(s)/hang(s)" in p
+                for p in doc["problems"]), doc["problems"])
+
+    def test_a_hang_the_round_actually_reran_is_healed(self):
+        """The other direction of the same rule: when the round re-ran EVERY
+        class the hang names, the hang is healed - that retry is exactly what
+        the round exists for.
+        """
+        self._watchdog_lane_with_partial_results()
+        lane_artifacts(self.run_dir / "lanes" / "unit-continuation",
+                       status="pass", classes=("GammaTests",), cases=1)
+        lane_artifacts(self.run_dir / "lanes" / "unit-recovery",
+                       status="pass",
+                       classes=("AlphaTests", "BetaTests"), cases=2)
+        self._recovery_phase("pass")
+        code, doc = self._summarize()
+        timeouts = doc["infrastructure"]["events"]["timeouts"]
+        self.assertEqual(len(timeouts), 1, doc)
+        self.assertTrue(timeouts[0].get("recovered"))
+        self.assertEqual(timeouts[0].get("recovered_by"),
+                         "gate recovery round")
+        self.assertEqual(code, 0, doc["problems"])
+        self.assertEqual(doc["verdict"], "PASS")
+
     def test_recurrence_after_recovery_fails_as_infrastructure(self):
         """The same class comes back after the round -> FAIL (infrastructure),
         and no third attempt is made."""
@@ -871,9 +942,9 @@ class RecoverySpecTests(unittest.TestCase):
         self.assertEqual(values["GATE_RECOVERY_PRESENT"], "1")
         # Only work no pass completed: GammaTests (batch 2 never ran).
         self.assertEqual(values["GATE_RECOVERY_CLASSES"], "GammaTests")
-        # The retry list is a TSV of chunks (one invocation per chunk of at most
-        # 7 classes, so one wedged batch cannot eat the round), carrying the
-        # planner's own batch budgets.
+        # The retry list is ONE TSV row: a single invocation for the whole
+        # retry set (the wedge alternates per launch, so the round minimises
+        # launches), carrying the planner's own batch budgets.
         tsv = (self.root / "recovery.tsv").read_text(encoding="utf-8").strip()
         self.assertEqual(tsv.count("\n") + 1, 1)
         self.assertTrue(tsv.startswith("retry-set\t"))
@@ -919,7 +990,8 @@ class IsInfraOnlyTests(unittest.TestCase):
 
     def _decide(self):
         buffer = io.StringIO()
-        with contextlib.redirect_stdout(buffer),                 contextlib.redirect_stderr(io.StringIO()):
+        with contextlib.redirect_stdout(buffer), \
+                contextlib.redirect_stderr(io.StringIO()):
             return local_gate.main(["is-infra-only",
                                     "--lane-dir", str(self.lane_dir)])
 
@@ -949,6 +1021,27 @@ class IsInfraOnlyTests(unittest.TestCase):
         self.assertEqual(self._decide(), 0,
                          "the verified launch wedge is exactly what may be "
                          "retried once")
+
+    def test_a_genuine_assertion_wins_over_simultaneous_wedge_evidence(self):
+        """A genuine failure AND the Busy signature in the SAME lane: the
+        genuine failure decides (exit 1, final). A mutation that consulted
+        the infrastructure evidence first would hand a real failing test to
+        the retry - the ordering itself is the invariant.
+        """
+        lane_artifacts(self.lane_dir, status="fail",
+                       classes=("AlphaTests",), cases=2,
+                       failures=[{"class": "AlphaTests", "test": "testBoom",
+                                  "attempts": []}],
+                       attempts=[{"mode": "batch", "n": 1, "class": "all",
+                                  "status": "test-failures"}])
+        logs = self.lane_dir / "logs"
+        logs.mkdir(exist_ok=True)
+        (logs / "batch-1-a1.log").write_text(
+            "Simulator device failed to launch com.milim.relay "
+            "(BSErrorCodeDescription=Busy)" + chr(10), encoding="utf-8")
+        self.assertEqual(self._decide(), 1,
+                         "a genuine failing test stays final even when the "
+                         "launch wedge evidence is present beside it")
 
     def test_unclassifiable_infrastructure_is_retryable(self):
         lane_artifacts(self.lane_dir, status="fail",

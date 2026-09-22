@@ -803,18 +803,23 @@ echo "--- case: the repeat policy runs even when the unit lane failed ---"
 # cannot hide the rest." A regression that nested the repeat block inside the
 # lane-success branch would pass every other case while silently dropping the
 # policy on exactly the runs that matter.
-export FAKE_UNIT_B1_A1=fail
+# The repetition itself must carry the genuine failure too: with a passing
+# repetition the no-retry assertion below would be decided by an EMPTY lane
+# (vacuously true), not by is-infra-only refusing a REAL failing test.
+export FAKE_UNIT_B1_A1=fail FAKE_REPEAT_ITER=fail
 RUN18="$(new_run_dir)"
 run_gate --ref HEAD --gate-root "$WORK/gate-artifacts" --run-dir "$RUN18"     --repeat-classes AlphaTests --repeat-iterations 1 >/dev/null 2>&1 || true
 GATE18="$RUN18/gate-result.json"
 if needs_extraction; then
   assert_eq "the repetition still executed despite the failed lane"     "$(json_get "$GATE18" 'len(doc["focused_repeats"]["classes"][0]["iterations"])')" "1"
+  # The genuine/infra split is only readable from an extracted bundle, so
+  # this half is asserted exactly where that is possible.
+  assert_eq "and a genuine assertion IN the repetition gets NO retry (it is final)"     "$(find "$RUN18/repeats" -name "iter-*-retry" 2>/dev/null | wc -l | tr -d ' ')" "0"
 else
   skip "repeat-after-failed-lane (needs a readable result bundle)"
 fi
 assert_eq "the repeat artifacts exist regardless of the lane result"   "$([ -d "$RUN18/repeats" ] && echo yes || echo no)" "yes"
-assert_eq "and a genuine assertion gets NO retry (it is final)"   "$(find "$RUN18/repeats" -name "iter-*-retry" 2>/dev/null | wc -l | tr -d ' ')" "0"
-unset FAKE_UNIT_B1_A1
+unset FAKE_UNIT_B1_A1 FAKE_REPEAT_ITER
 
 echo ""
 echo "--- case: a repetition lost to the launcher gets exactly one retry ---"

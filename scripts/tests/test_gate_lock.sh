@@ -148,9 +148,11 @@ LOCK5="$WORK/lock-5"
 mkdir -p "$LOCK5"
 printf '999999999\n' > "$LOCK5/pid"     # a pid that cannot be running
 STALE_RC=0
-acquire_gate_lock "$LOCK5" || STALE_RC=$?
+acquire_gate_lock "$LOCK5" 2>"$WORK/lock-5.steal.err" || STALE_RC=$?
 assert_eq "a dead owner's lock is taken over" "$STALE_RC" "0"
 assert_eq "and now carries this process's pid" "$(cat "$LOCK5/pid")" "$$"
+assert_eq "the takeover printed the warning docs/CI.md promises" \
+  "$(grep -c 'taking it over' "$WORK/lock-5.steal.err" 2>/dev/null)" "1"
 gate_lock_release
 rm -rf "$LOCK5"
 

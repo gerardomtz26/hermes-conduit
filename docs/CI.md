@@ -469,7 +469,7 @@ lanes and the preparation), so the simulator/runtime recorded in the result is
 the one the tests actually ran on. The gate creates this device from the
 `iPhone 17 Pro` device type when it does not already exist, which is what makes
 it safe for the gate to erase it: it is never a developer's device, and an
-inherited `SIMULATOR_NAME` is deliberately ignored
+inherited `SIMULATOR_NAME` is deliberately ignored.
 
 ### Policy (non-negotiable)
 
@@ -516,8 +516,9 @@ and the A/B probe that diagnosed it showed only `simctl erase` clears the
 condition reliably.
 
 Because the wedge accumulates again over successive launches, a one-time
-pre-run erase is not enough. The gate therefore has exactly one bounded
-recovery round, and it is allowed for exactly one infrastructure class:
+pre-run erase is not enough. The gate therefore allows at most one bounded
+recovery round per suite (one for the unit lane, one for the UI lane), and a
+round is allowed for exactly one infrastructure class:
 
 * the refusal is reported as **infrastructure**, never as an assertion
   failure, with the affected batch named and the classes it hid listed as
@@ -525,8 +526,10 @@ recovery round, and it is allowed for exactly one infrastructure class:
 * the **continuation pass** runs the batches the stopped lane never reached;
 * if work is still incomplete and the evidence is the verified launch class
   (XCTest's synthetic `System Failures` entry and/or the Busy signature in the
-  lane log), the gate erases its own simulator once (shutdown/erase/boot/wait,
-  via ci-lib.sh) and retries exactly the incomplete work **once**;
+  lane log), that suite's round erases the gate simulator once
+  (shutdown/erase/boot/wait, via ci-lib.sh) and retries exactly the
+  incomplete work **once** (the other suite's round, if it ever runs,
+  performs its own erase);
 * **a genuine assertion anywhere disqualifies the round entirely** — the
   projection refuses, so a product failure is never retried around;
 * if the same class comes back after the round, the gate fails as
@@ -672,7 +675,7 @@ root) and refuses to start while another gate is running: two concurrent
 `xcodebuild` chains on one Mac corrupt each other's Simulator state, and a
 result from such a run would be meaningless. `--no-lock` exists and is
 documented as unsafe. Stale locks (dead holder pid) are taken over with a
-warning.
+warning printed to stderr.
 
 ## Adding a test
 

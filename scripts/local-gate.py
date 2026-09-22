@@ -495,21 +495,9 @@ def cmd_recovery_spec(args) -> int:
         "GATE_RECOVERY_TIMEOUT": int(sum(t["timeout_s"] for t in tasks)),
     }
     write_env(args.out, env)
-    # TSV the shell loops over: one lane invocation PER CLASS. A lane stops at
-    # the batch that fails, so one multi-class invocation would let a single
-    # wedged class eat the rest of the round - each class in its own
-    # invocation keeps the loss to one class (the same shape the repeat policy
-    # uses for exactly this reason).
     tsv = args.tsv_out or (os.path.splitext(args.out)[0] + ".tsv")
-    # The round runs in CHUNKS of at most 7 classes (the planner's own
-    # MAX_UNIT_CLASSES_PER_XCODEBUILD_BATCH shape, which is the resilient one:
-    # PR #184's sequential small-batch finding), one xcodebuild invocation per
-    # chunk. Per-class invocations would mean one launch per class - and the
-    # wedge is a per-launch risk, so that multiplies the odds of losing a
-    # class - while one giant invocation would let its first wedged batch eat
-    # everything. Chunking keeps the loss at worst one chunk, and the launches
-    # few.
-    # ONE retry invocation for the whole retry set, in ONE batch. The
+    # TSV the shell loops over: ONE retry invocation for the whole retry set,
+    # in ONE batch. The
     # verified wedge on this machine alternates across app launches (every
     # other launch is refused, regardless of terminate/uninstall/erase between
     # them - see docs/CI.md), so the round minimises the number of launches:
@@ -544,7 +532,9 @@ def cmd_is_infra_only(args) -> int:
         return 1
     if lane.get("assertion_failures"):
         return 1
-    if lane.get("infrastructure_failures") or lane.get("synthetic_failures")             or lane.get("launch_signature_hits") or lane.get("timeouts")             or lane.get("not_executed"):
+    if (lane.get("infrastructure_failures") or lane.get("synthetic_failures")
+            or lane.get("launch_signature_hits") or lane.get("timeouts")
+            or lane.get("not_executed")):
         return 0
     return 1
 
@@ -1384,7 +1374,6 @@ def _merge_lane_summaries(passes, expected_classes) -> dict:
         "is_launch_wedge": p.get("is_launch_wedge"),
     } for p in passes]
 
-    # A lane that stopped on the launch wedge and whose work the gate's
     # A pass that stopped on the launch wedge and whose work the gate's bounded
     # recovery round then completed is not a problem in itself: its failure is
     # exactly what the round exists for, and the round is recorded as
@@ -1722,10 +1711,13 @@ def cmd_summarize(args) -> int:
     # downgraded it. Assertions that were re-run until they passed are not
     # validation in any mode.
     #
-    # The gate's bounded recovery round heals exactly one class of event -
-    # `test-runner-failure`, the simulator/host-app launch refusal - and only
-    # when it actually left the run complete. A hang or an unreadable bundle
-    # is a different class and is never healed by it.
+    # The gate's bounded recovery round heals the infrastructure evidence
+    # (`test-runner-failure`, `incomplete`, `unclassified`) when it actually
+    # left the run complete - and it heals a hang too, but ONLY a hang whose
+    # work it re-ran itself. A batch watchdog that fired while some of its
+    # classes already had results leaves those classes' remaining cases
+    # unexecuted; healing that hang would flip a must-FAIL run into PASS on
+    # coverage the round never produced.
     if round_healed:
         # Every infrastructure token a pass can record is healed when the
         # round left the run COMPLETE: `test-runner-failure` (the launch
@@ -1738,9 +1730,26 @@ def cmd_summarize(args) -> int:
         for entry in events["infrastructure_failures"]:
             entry["recovered"] = True
             entry["recovered_by"] = "gate recovery round"
+        # A timeout is healed only when the round's own passes observed every
+        # class the hang names: then the round really did re-run that exact
+        # work, so the hang's cause was retried and completed. A repeat
+        # iteration's hang is excluded outright (its `lane` is "repeat:..."):
+        # the round never re-runs a repetition, its own one bounded retry
+        # decides it, and attributing it to the round would be a lie in the
+        # report.
+        recovery_observed = set()
+        for summary in (unit_summary, ui_summary):
+            for lane_pass in summary.get("passes") or []:
+                if _is_recovery_pass(lane_pass.get("name")):
+                    recovery_observed.update(
+                        lane_pass.get("observed_names") or [])
         for entry in events["timeouts"]:
-            entry["recovered"] = True
-            entry["recovered_by"] = "gate recovery round"
+            if str(entry.get("lane") or "") not in ("unit", "ui"):
+                continue
+            if _classes_have_results(recovery_observed,
+                                     str(entry.get("name") or "")):
+                entry["recovered"] = True
+                entry["recovered_by"] = "gate recovery round"
     persistent_infra = [e for e in events["infrastructure_failures"]
                         if not e.get("recovered")]
     recovered_infra = [e for e in events["infrastructure_failures"]
@@ -1823,7 +1832,8 @@ def cmd_summarize(args) -> int:
         caveats.append("--allow-recovered-infrastructure downgraded recovered "
                        "infrastructure from FAIL to this verdict")
     sim_record = meta.get("simulator") or {}
-    if not meta.get("xcode_version") or not sim_record.get("runtime")             or not sim_record.get("udid"):
+    if (not meta.get("xcode_version") or not sim_record.get("runtime")
+            or not sim_record.get("udid")):
         caveats.append("environment identity incomplete: the Xcode version or "
                        "the simulator runtime/UDID could not be read for this run")
     if run_flags.get("lock_used") is False:
