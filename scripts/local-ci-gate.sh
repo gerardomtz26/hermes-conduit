@@ -837,23 +837,30 @@ else
           --out "$RUN_DIR/recovery.env" --tsv-out "$RUN_DIR/recovery.tsv"; then
         # shellcheck disable=SC1090
         . "$RUN_DIR/recovery.env"
-        if [ "${GATE_RECOVERY_PRESENT:-0}" -eq 1 ]; then
+        if [ "${GATE_RECOVERY_PRESENT:-0}" -eq 1 ] && [ -s "$RUN_DIR/recovery.tsv" ]; then
           echo "== recovery round 1 of 1: erasing the gate simulator and retrying ${GATE_RECOVERY_CLASS_COUNT} class(es) once =="
-          # The whole round is ONE lane invocation whose batches are the
-          # planner's own per-class batches: only work no earlier pass
-          # completed is in it, so nothing is re-run by accident.
+          # ONE erase, then one invocation PER CLASS: a lane stops at the batch
+          # that fails, so a single multi-class invocation would let one wedged
+          # class eat the rest of the round. Per-class invocations keep the loss
+          # to one class - the same shape the repeat policy uses.
           simulator_prep recovery
-          if run_lane unit "$GATE_UNIT_LANE-recovery" "$GATE_UNIT_TARGET" \
-              "$GATE_RECOVERY_CLASSES" 0 "$GATE_RECOVERY_TIMEOUT" \
-              "$RUN_DIR/lanes/unit-recovery" \
-              --batches-json "$GATE_RECOVERY_BATCHES_JSON"; then
-            echo "recovery round: the retried work passed"
-          else
-            echo "recovery round: the retried work still reports failures (classified in the result document)"
-          fi
+          while IFS=$'\t' read -r rcls rbatches rpredicted rtimeout; do
+            [ -z "$rcls" ] && continue
+            rtimeout="${rtimeout%$'\r'}"
+            rpredicted="${rpredicted%$'\r'}"
+            rbatches="${rbatches%$'\r'}"
+            if run_lane unit "$GATE_UNIT_LANE-recovery-$rcls" "$GATE_UNIT_TARGET" \
+                "$rcls" "$rpredicted" "$rtimeout" \
+                "$RUN_DIR/lanes/unit-recovery-$rcls" \
+                --batches-json "$rbatches"; then
+              echo "  recovery $rcls: recovered"
+            else
+              echo "  recovery $rcls: still failing (reported in the result document)"
+            fi
+          done < "$RUN_DIR/recovery.tsv"
           # No third attempt: whether the round worked - and whether the same
           # infrastructure class came back - is decided by the summarizer from
-          # this pass's evidence.
+          # these passes' evidence.
         else
           echo "== recovery round: nothing to retry (no launch-refusal evidence, or nothing incomplete) =="
         fi

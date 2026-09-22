@@ -491,18 +491,26 @@ def cmd_recovery_spec(args) -> int:
         "GATE_RECOVERY_KIND": "ui" if ui else "unit",
         "GATE_RECOVERY_CLASS_COUNT": len(tasks),
         "GATE_RECOVERY_CLASSES": _csv(t["class"] for t in tasks),
-        # One batches-json for a single recovery pass: the planner's own batch
-        # objects (unit) or one batch per class (UI), so the watchdogs keep the
-        # planner's policy.
-        "GATE_RECOVERY_BATCHES_JSON": json.dumps(
-            [{"classes": [t["class"]],
-              "predicted_s": t["predicted_s"],
-              "timeout_s": t["timeout_s"]} for t in tasks],
-            separators=(",", ":")),
         "GATE_RECOVERY_CLASS_TIMEOUTS": timeout_csv,
         "GATE_RECOVERY_TIMEOUT": int(sum(t["timeout_s"] for t in tasks)),
     }
     write_env(args.out, env)
+    # TSV the shell loops over: one lane invocation PER CLASS. A lane stops at
+    # the batch that fails, so one multi-class invocation would let a single
+    # wedged class eat the rest of the round - each class in its own
+    # invocation keeps the loss to one class (the same shape the repeat policy
+    # uses for exactly this reason).
+    tsv = args.tsv_out or (os.path.splitext(args.out)[0] + ".tsv")
+    with open(tsv, "w", encoding="utf-8", newline="\n") as fh:
+        for task in tasks:
+            batches_json = json.dumps(
+                [{"classes": [task["class"]],
+                  "predicted_s": task["predicted_s"],
+                  "timeout_s": task["timeout_s"]}],
+                separators=(",", ":"))
+            fh.write("{0}\t{1}\t{2}\t{3}\n".format(
+                task["class"], batches_json, task["predicted_s"],
+                task["timeout_s"]))
     print("recovery round ({0}): retrying {1} class(es) once".format(
         kind, len(tasks)))
     return 0
@@ -1440,12 +1448,22 @@ def cmd_summarize(args) -> int:
     # the rest of the suite. Its evidence is folded in here, and the coverage
     # that matters is the aggregate against the plan's full class list.
     continuation_dir = os.path.join(run_dir, "lanes", "unit-continuation")
-    recovery_dir = os.path.join(run_dir, "lanes", "unit-recovery")
     unit_lanes = [unit]
     if os.path.isdir(continuation_dir):
         unit_lanes.append(_read_lane(continuation_dir))
-    if os.path.isdir(recovery_dir):
-        unit_lanes.append(_read_lane(recovery_dir))
+    # The recovery round runs one invocation per class (a lane stops at the
+    # batch that fails, so one multi-class invocation would let a wedged class
+    # eat the rest of the round), so its evidence lives in per-class dirs.
+    lanes_root = os.path.join(run_dir, "lanes")
+    try:
+        recovery_dirs = sorted(os.path.join(lanes_root, name)
+                               for name in os.listdir(lanes_root)
+                               if name.startswith("unit-recovery"))
+    except OSError:
+        recovery_dirs = []
+    for directory in recovery_dirs:
+        if os.path.isdir(directory):
+            unit_lanes.append(_read_lane(directory))
     unit_summary = _merge_lane_summaries(
         [_summarize_lane(l, unit_expected if l is unit else None,
                          _int_or_zero(expected.get("unit_batches")) or None if l is unit else None)

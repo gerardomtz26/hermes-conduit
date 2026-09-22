@@ -622,8 +622,13 @@ class RecoverySpecTests(unittest.TestCase):
         self.assertEqual(values["GATE_RECOVERY_PRESENT"], "1")
         # Only work no pass completed: GammaTests (batch 2 never ran).
         self.assertEqual(values["GATE_RECOVERY_CLASSES"], "GammaTests")
-        # The planner's own batch object, so the watchdog keeps its policy.
-        self.assertIn('"timeout_s":500', values["GATE_RECOVERY_BATCHES_JSON"])
+        # The retry list is a per-class TSV (one lane invocation per class, so
+        # one wedged class cannot eat the round), carrying the planner's own
+        # batch budget for each class.
+        tsv = (self.root / "recovery.tsv").read_text(encoding="utf-8").strip()
+        self.assertEqual(tsv.count("\n") + 1, 1)
+        self.assertTrue(tsv.startswith("GammaTests\t"))
+        self.assertIn('"timeout_s":500', tsv)
 
     def test_nothing_to_retry_when_everything_ran(self):
         self._lane(status="pass", classes=("AlphaTests", "BetaTests", "GammaTests"),
