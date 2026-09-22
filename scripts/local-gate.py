@@ -761,14 +761,17 @@ def _work_items(attempts, batches, lane_classes=None):
     order = []
     items = {}
 
-    def touch(key, name=None, batch=None, part_keys=()):
+    def touch(key, name=None, batch=None, part_keys=(), from_declared=False):
         if key not in items:
             items[key] = {"name": name or "", "batch": batch, "statuses": [],
-                          "part_keys": list(part_keys)}
+                          "part_keys": list(part_keys),
+                          "name_from_declared": bool(from_declared)}
             order.append(key)
         entry = items[key]
         if name and not entry["name"]:
             entry["name"] = name
+        if from_declared:
+            entry["name_from_declared"] = True
         if batch is not None and entry["batch"] is None:
             entry["batch"] = batch
         for part_key in part_keys:
@@ -786,12 +789,16 @@ def _work_items(attempts, batches, lane_classes=None):
         if mode.startswith("batch"):
             key = ("batch", str(n))
             # A UI lane runs per-class invocations and writes NO `batches`
-            # array, so its shard-level item must be named by the lane's own
+            # array, so its shard-level item is named by the lane's own
             # declared classes: the synthetic "batch-<n>" fallback names no
-            # work any recovery could observe, and the healing evidence rule
-            # (`_round_reran`) would then never be satisfiable for it.
+            # work any recovery could observe. An item named this way is
+            # tagged, because its classes ran as their OWN invocations - the
+            # healing evidence rule covers it per class rather than as one
+            # interrupted batch (see `_round_reran`).
+            declared = _csv(lane_classes or [])
+            from_declared = not batch_classes.get(str(n)) and bool(declared)
             name = _csv(batch_classes.get(str(n)) or []) \
-                or _csv(lane_classes or []) \
+                or declared \
                 or "batch-{0}".format(n)
             # "batch-<n>" is the unit naming; a UI shard has one batch-level
             # invocation whose part is named without the index. A UI shard's
@@ -805,7 +812,8 @@ def _work_items(attempts, batches, lane_classes=None):
                 if len(existing) == 1:
                     key = existing[0]
                     keys = ["batch-{0}".format(key[1]), "batch"]
-            touch(key, name=name, batch=n, part_keys=keys)["statuses"].append(status)
+            touch(key, name=name, batch=n, part_keys=keys,
+                  from_declared=from_declared)["statuses"].append(status)
         elif mode.startswith("class") or mode == "skipped":
             # The runner writes UI diagnosis parts as detail-<Cls>-a<k>.json:
             # the class name carries no "class-" infix (see ci-test-lane.sh's
@@ -824,12 +832,17 @@ def _work_items(attempts, batches, lane_classes=None):
             continue
         n = _int_or_zero(batch.get("batch"))
         key = ("batch", str(n))
+        declared = _csv(lane_classes or [])
         name = _csv(batch_classes.get(str(n)) or batch.get("classes") or []) \
-            or "batch-{0}".format(n)
+            or declared or "batch-{0}".format(n)
+        from_declared = (not batch_classes.get(str(n))
+                         and not (batch.get("classes") or [])
+                         and bool(declared))
         chain = [a for a in (batch.get("attempts") or []) if isinstance(a, dict)]
         for attempt in chain:
             entry = touch(key, name=name, batch=n,
-                          part_keys=["batch-{0}".format(n), "batch"])
+                          part_keys=["batch-{0}".format(n), "batch"],
+                          from_declared=from_declared)
             status = str(attempt.get("status") or "")
             if status and status not in entry["statuses"]:
                 entry["statuses"].append(status)
@@ -961,6 +974,12 @@ def _classify_attempts(attempts, batches, parts=None, lane_has_real_failures=Tru
             continue
         final = statuses[-1]
         common = {"name": entry["name"], "key": list(key)}
+        if entry.get("name_from_declared"):
+            # The item is a UI shard-level invocation named by the lane's
+            # DECLARED classes: each of those classes ran (or was re-run) as
+            # its own invocation, so healing evidence for this item is a
+            # per-class question (`_round_reran`).
+            common["name_from_declared"] = True
         if entry["batch"] is not None:
             common["batch"] = entry["batch"]
         saw_assertion = any(s in ASSERTION_FAILURE_STATUSES for s in statuses)
@@ -1171,10 +1190,19 @@ def _recovery_observations(unit_summary, ui_summary):
         observed = set()
         for lane_pass in recovery_passes:
             observed.update(lane_pass.get("observed_names") or [])
+        # Classes SOME earlier pass reported. A shard-level item named by the
+        # lane's declared classes is covered per class, so what the round had
+        # to re-run for it is exactly the classes left without results - this
+        # is the evidence the coverage check unions with the round's own.
+        primary_observed = set()
+        for lane_pass in summary.get("passes") or []:
+            if not _is_recovery_pass(lane_pass.get("name")):
+                primary_observed.update(lane_pass.get("observed_names") or [])
         evidence[suite] = {
             "ran": bool(recovery_passes),
             "complete": not (summary.get("classes_missing") or []),
             "observed": observed,
+            "primary_observed": primary_observed,
         }
     return evidence
 
@@ -1196,8 +1224,16 @@ def _round_reran(entry, evidence) -> bool:
     record = evidence.get(suite) or {}
     if not record.get("ran") or not record.get("complete"):
         return False
-    return _classes_have_results(record.get("observed") or set(),
-                                 str(entry.get("name") or ""))
+    name = str(entry.get("name") or "")
+    if entry.get("name_from_declared"):
+        # A UI shard-level item names the lane's DECLARED classes, and each of
+        # them ran (or was re-run) as its OWN invocation. The item is covered
+        # when every class it names has a result from some pass; the round had
+        # only to re-run the ones the earlier passes left without results.
+        covered = (record.get("observed") or set()) | \
+                  (record.get("primary_observed") or set())
+        return _classes_have_results(covered, name)
+    return _classes_have_results(record.get("observed") or set(), name)
 
 
 def _lane_pass_dirs(lanes_root, primary, extra, recovery_prefix):

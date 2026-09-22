@@ -534,7 +534,10 @@ round is allowed for exactly one infrastructure class:
   infrastructure event (or hang) counts as recovered by the round only when
   that event's suite ran a recovery pass, **that round left the suite
   complete (no planned class without a result)**, and that pass observed
-  every class the event names — a unit round never heals UI evidence, a UI
+  every class the event names (an event naming a UI shard's declared class
+  set — a lane with no `batches` array — is covered when each of those
+  classes has a result from some pass, because each ran as its own
+  invocation) — a unit round never heals UI evidence, a UI
   round never heals unit evidence, and work the round never re-ran stays
   **persistent** and fails the run (repeat-lane events are never healed by
   it: their own bounded retry decides them);

@@ -1206,6 +1206,44 @@ class UIRecoveryVerdictTests(unittest.TestCase):
         self.assertEqual(code, 0, doc["problems"])
         self.assertEqual(doc["verdict"], "PASS")
 
+    def test_a_partially_healed_ui_shard_item_is_still_healed(self):
+        """A mid-shard refusal can leave only SOME of the shard's classes
+        missing. The item names the lane's declared classes, each of which ran
+        as its own invocation: the round re-ran the missing one, so the item
+        is covered (every named class has a result from some pass) and a
+        legitimately healed shard is not reported persistent.
+        """
+        self._round_ran()
+        lane_artifacts(self.run_dir / "lanes" / "ui", status="fail",
+                       classes=("LaunchUITests",), cases=1, batches=[],
+                       lane_classes=("LaunchUITests", "SettingsUITests"),
+                       failures=self.WEDGE_FAILURE,
+                       attempts=[{"mode": "batch", "n": 1, "class": "all",
+                                  "status": "incomplete"},
+                                 {"mode": "class", "n": 1,
+                                  "class": "SettingsUITests",
+                                  "status": "test-failures"}])
+        logs = self.run_dir / "lanes" / "ui" / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        (logs / "batch-a1.log").write_text(self.BUSY_LOG + chr(10),
+                                           encoding="utf-8")
+        lane_artifacts(self.run_dir / "lanes" / "ui-recovery", status="pass",
+                       classes=("SettingsUITests",), cases=2)
+        code, doc = self._summarize()
+        ui_infra = [
+            e for e in doc["infrastructure"]["events"]["infrastructure_failures"]
+            if e.get("lane") == "ui"]
+        self.assertTrue(ui_infra, doc["infrastructure"]["events"])
+        self.assertTrue(
+            all(e.get("recovered_by") == "gate recovery round"
+                for e in ui_infra),
+            "the round re-ran the missing class - both events must be "
+            "healed: {0}".format([(e.get("name"), e.get("recovered_by"))
+                                  for e in ui_infra]))
+        self.assertEqual(doc["ui"]["classes_missing"], [])
+        self.assertEqual(code, 0, doc["problems"])
+        self.assertEqual(doc["verdict"], "PASS")
+
     def _round_ran(self):
         write_json(self.run_dir / "recovery" / "phase.json", {
             "schema_version": 1, "phase": "recovery", "status": "pass",
