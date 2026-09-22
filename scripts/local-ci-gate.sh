@@ -994,6 +994,21 @@ else
                 echo "  $rcls iteration $iteration: pass"
               else
                 echo "  $rcls iteration $iteration: FAIL"
+                # One bounded retry for a repetition the launcher ate:
+                # only when the evidence is infrastructure. A genuine
+                # failing test is final and is never re-run.
+                if python3 "$HELPER" is-infra-only \
+                    --lane-dir "$RUN_DIR/repeats/$rcls/iter-$iteration"; then
+                  simulator_prime
+                  if run_lane unit "repeat-$rcls-$iteration-retry" \
+                      "$GATE_UNIT_TARGET" "$rcls" "$rpredicted" "$rtimeout" \
+                      "$RUN_DIR/repeats/$rcls/iter-$iteration-retry" \
+                      --batches-json "$rbatches"; then
+                    echo "  $rcls iteration $iteration: recovered on its one retry"
+                  else
+                    echo "  $rcls iteration $iteration: its one retry also failed"
+                  fi
+                fi
               fi
               iteration=$(( iteration + 1 ))
             done

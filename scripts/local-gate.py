@@ -531,6 +531,24 @@ def cmd_recovery_spec(args) -> int:
     return 0
 
 
+def cmd_is_infra_only(args) -> int:
+    """Exit 0 when a lane's failure is the launch wedge / infrastructure and
+    NOT a genuine assertion.
+
+    The gate's retries are only ever for infrastructure: a genuine failing
+    test is final. The repeat loop asks this before it retries a repetition,
+    so a product failure can never be re-run by the gate.
+    """
+    lane = _read_lane(args.lane_dir)
+    if lane.get("real_failures"):
+        return 1
+    if lane.get("assertion_failures"):
+        return 1
+    if lane.get("infrastructure_failures") or lane.get("synthetic_failures")             or lane.get("launch_signature_hits") or lane.get("timeouts")             or lane.get("not_executed"):
+        return 0
+    return 1
+
+
 def real_failures_in_parts(lane_dirs) -> bool:
     """Best-effort check across the lane directories' per-invocation parts:
     a genuine failing test anywhere disqualifies the recovery round."""
@@ -1320,11 +1338,18 @@ def _merge_lane_summaries(passes, expected_classes) -> dict:
 
 
 def _read_repeats(repeats_dir: str, expected, iterations: int):
-    """Read every repeat class's per-iteration lane artifacts."""
+    """Read every repeat class's per-iteration lane artifacts.
+
+    An iteration may have a second attempt directory (`iter-<n>-retry`): the
+    gate's bounded retry for a repetition that the launch wedge ate. Both
+    attempts are read, because an iteration is satisfied when a later attempt
+    is clean and NO attempt contains a genuine failure - a genuine failing
+    test is final and is never retried.
+    """
     classes = []
     for name in expected:
         class_dir = os.path.join(repeats_dir, name)
-        iterations_out = []
+        per_iteration = {}
         try:
             entries = sorted(os.listdir(class_dir))
         except OSError:
@@ -1332,9 +1357,11 @@ def _read_repeats(repeats_dir: str, expected, iterations: int):
         for entry in entries:
             if not entry.startswith("iter-"):
                 continue
+            number = _int_or_zero(entry.split("-")[1])
+            retry = entry.endswith("-retry")
             lane = _read_lane(os.path.join(class_dir, entry))
-            iterations_out.append({
-                "iteration": _int_or_zero(entry.split("-", 1)[1]),
+            per_iteration.setdefault(number, []).append({
+                "attempt": 2 if retry else 1,
                 "dir": lane["dir"],
                 "status": lane["status"],
                 "executions": lane["executions"],
@@ -1350,7 +1377,25 @@ def _read_repeats(repeats_dir: str, expected, iterations: int):
                 "observations_present": lane["observations_present"],
                 "lane_result_present": lane["lane_result_present"],
             })
-        iterations_out.sort(key=lambda i: i["iteration"])
+        iterations_out = []
+        for number in sorted(per_iteration):
+            attempts = sorted(per_iteration[number], key=lambda a: a["attempt"])
+            clean = [a for a in attempts
+                     if a["status"] == "pass" and not a["failures"]
+                     and not a["infrastructure_failures"] and not a["timeouts"]
+                     and not a["not_executed"]
+                     and not a["assertion_failures"]]
+            genuine = [a for a in attempts if a["failures"] or a["assertion_failures"]]
+            best = clean[-1] if clean else attempts[-1]
+            merged = dict(best)
+            merged["iteration"] = number
+            merged["attempts"] = attempts
+            merged["attempts_count"] = len(attempts)
+            merged["satisfied"] = bool(clean) and not genuine
+            merged["genuine_failure"] = bool(genuine)
+            merged["executions"] = max(
+                [a["executions"] or 0 for a in attempts] or [0]) or None
+            iterations_out.append(merged)
         classes.append({
             "class": name,
             "iterations_expected": iterations,
@@ -1373,19 +1418,24 @@ def _repeat_problems(entry, iterations: int):
             entry["class"], seen, expected_numbers))
     for iteration in entry["iterations"]:
         label = "{0} iteration {1}".format(entry["class"], iteration["iteration"])
-        if iteration["status"] != "pass":
-            problems.append("{0}: lane status {1!r}".format(label, iteration["status"]))
-        if not iteration["lane_result_present"]:
-            problems.append("{0}: lane-result.json missing".format(label))
-        if iteration["executions"] is None:
-            problems.append("{0}: execution count unreadable".format(label))
-        if iteration["failures"]:
-            problems.append("{0}: {1} genuine test failure(s)".format(
-                label, iteration["failures"]))
-        if iteration["assertion_failures"] or iteration["infrastructure_failures"] \
-                or iteration["timeouts"] or iteration["not_executed"]:
-            problems.append("{0}: environment/classification events present".format(label))
-        if iteration["assertion_retried_until_green"]:
+        if iteration.get("genuine_failure"):
+            # A genuine failing test is FINAL: it is never retried, and the
+            # repetition failed even if a later attempt passed.
+            problems.append(
+                "{0}: genuine test failure(s) ({1})".format(
+                    label, iteration["failures"]))
+        elif not iteration.get("satisfied"):
+            problems.append(
+                "{0}: no clean attempt (lane status {1!r})".format(
+                    label, iteration["status"]))
+        for attempt in iteration.get("attempts") or []:
+            if not attempt.get("lane_result_present"):
+                problems.append("{0} attempt {1}: lane-result.json missing".format(
+                    label, attempt.get("attempt")))
+            if attempt.get("executions") is None:
+                problems.append("{0} attempt {1}: execution count unreadable".format(
+                    label, attempt.get("attempt")))
+        if iteration.get("assertion_retried_until_green"):
             problems.append(
                 "{0}: genuine assertions were retried and then passed".format(label))
     return problems
@@ -2044,6 +2094,10 @@ def main(argv=None) -> int:
     p.add_argument("--tsv-out", default="",
                    help="TSV of per-class retry tasks (read by the gate shell)")
     p.set_defaults(func=cmd_recovery_spec)
+
+    p = sub.add_parser("is-infra-only")
+    p.add_argument("--lane-dir", required=True)
+    p.set_defaults(func=cmd_is_infra_only)
 
     p = sub.add_parser("summarize")
     p.add_argument("--run-dir", required=True)

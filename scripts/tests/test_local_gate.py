@@ -525,6 +525,61 @@ class RecoveryVerdictTests(unittest.TestCase):
                          "both classes of the batch have results now")
         self.assertFalse(any("not executed" in p for p in doc["problems"]))
 
+    def test_a_wedged_repetition_is_satisfied_by_its_one_retry(self):
+        """A repetition lost to the launcher is retried once and counts as
+        passed when that retry is clean - the wedge is not the test's fault."""
+        self._primary(observed=("AlphaTests", "BetaTests", "GammaTests"), cases=3)
+        meta = json.loads((self.run_dir / "meta.json").read_text(encoding="utf-8"))
+        meta["expected"]["repeat_classes"] = ["AlphaTests"]
+        meta["expected"]["repeat_iterations"] = 1
+        write_json(self.run_dir / "meta.json", meta)
+        base = self.run_dir / "repeats" / "AlphaTests"
+        lane_artifacts(base / "iter-1", status="fail", classes=(), cases=0,
+                       failures=[{"class": "System Failures",
+                                  "test": "Conduit encountered an error",
+                                  "attempts": []}],
+                       attempts=[{"mode": "batch", "n": 1, "class": "all",
+                                  "status": "test-failures"}],
+                       batches=[{"batch": 1, "classes": ["AlphaTests"],
+                                 "timeout_s": 600, "status": "test-failures",
+                                 "attempts": [{"attempt": 1,
+                                               "status": "test-failures",
+                                               "seconds": 1.0, "failures": 1}]}])
+        self._wedge_log(base / "iter-1")
+        lane_artifacts(base / "iter-1-retry", status="pass",
+                       classes=("AlphaTests",), cases=2)
+        self._recovery_phase("pass")
+        code, doc = self._summarize()
+        entry = doc["focused_repeats"]["classes"][0]
+        self.assertTrue(entry["iterations"][0]["satisfied"])
+        self.assertEqual(entry["iterations"][0]["attempts_count"], 2)
+        self.assertFalse(any("AlphaTests iteration 1" in p
+                             for p in doc["problems"]), doc["problems"])
+
+    def test_a_genuine_failure_is_final_across_attempts(self):
+        """A genuine failing test is never satisfied by a later attempt: the
+        repetition failed, and no retry may launder it."""
+        self._primary(observed=("AlphaTests", "BetaTests", "GammaTests"), cases=3)
+        meta = json.loads((self.run_dir / "meta.json").read_text(encoding="utf-8"))
+        meta["expected"]["repeat_classes"] = ["AlphaTests"]
+        meta["expected"]["repeat_iterations"] = 1
+        write_json(self.run_dir / "meta.json", meta)
+        base = self.run_dir / "repeats" / "AlphaTests"
+        lane_artifacts(base / "iter-1", status="fail",
+                       classes=("AlphaTests",), cases=2,
+                       failures=[{"class": "AlphaTests", "test": "testBoom",
+                                  "attempts": []}],
+                       attempts=[{"mode": "batch", "n": 1, "class": "all",
+                                  "status": "test-failures"}])
+        lane_artifacts(base / "iter-1-retry", status="pass",
+                       classes=("AlphaTests",), cases=2)
+        code, doc = self._summarize()
+        entry = doc["focused_repeats"]["classes"][0]
+        self.assertTrue(entry["iterations"][0]["genuine_failure"])
+        self.assertFalse(entry["iterations"][0]["satisfied"])
+        self.assertEqual(code, 1)
+        self.assertTrue(any("genuine test failure" in p for p in doc["problems"]))
+
     def test_gate_simulator_is_recorded(self):
         self._primary(observed=("AlphaTests", "BetaTests"), cases=2)
         lane_artifacts(self.run_dir / "lanes" / "unit-recovery", status="pass",
