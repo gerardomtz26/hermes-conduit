@@ -1272,16 +1272,19 @@ def _merge_lane_summaries(passes, expected_classes) -> dict:
     healed_verdicts = [str(p.get("dir") or "") for p in passes
                        if "recovery" in str(p.get("dir") or "")]
 
-    problems = list(primary.get("problems") or [])
-    problems = [p for p in problems
-                if not p.startswith("classes never executed")
-                and not p.startswith("work recorded as not executed")]
+    problems = []
+    for summary in passes:
+        problems.extend(p for p in (summary.get("problems") or [])
+                        if not p.startswith("classes never executed")
+                        and not p.startswith("work recorded as not executed"))
+    # Coverage and "not executed" are AGGREGATE facts after the merge: every
+    # pass's own version of them is stale the moment a later pass runs, so the
+    # merged list is recomputed against the aggregate.
     if missing:
         problems.append("classes never executed: {0}".format(_csv(missing)))
     if merged["not_executed"]:
         problems.append("work recorded as not executed: {0}".format(
             _csv(sorted({e["name"] for e in merged["not_executed"]}))))
-    problems.extend(p for summary in passes[1:] for p in (summary.get("problems") or []))
     # A pass that stopped on the launch wedge and whose work the gate's bounded
     # recovery round then completed is not a problem in itself: its failure is
     # exactly what the round exists for, and the round is recorded as
