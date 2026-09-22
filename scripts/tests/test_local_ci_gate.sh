@@ -119,6 +119,7 @@ stem="$(basename "$bundle" .xcresult)"
 mode="pass"
 case "$bundle" in
   *ui-recovery*)       mode="${FAKE_UI_RECOVERY:-pass}" ;;
+  */repeats/*/iter-[0-9]*/*) mode="${FAKE_REPEAT_ITER:-pass}" ;;
   *unit-recovery*)     mode="${FAKE_RECOVERY_MODE:-pass}" ;;
   *unit-continuation*) mode="${FAKE_CONTINUATION_MODE:-pass}" ;;
   */lanes/ui/*)        mode="${FAKE_UI_BATCH:-pass}" ;;
@@ -812,7 +813,18 @@ else
   skip "repeat-after-failed-lane (needs a readable result bundle)"
 fi
 assert_eq "the repeat artifacts exist regardless of the lane result"   "$([ -d "$RUN18/repeats" ] && echo yes || echo no)" "yes"
+assert_eq "and a genuine assertion gets NO retry (it is final)"   "$(find "$RUN18/repeats" -name "iter-*-retry" 2>/dev/null | wc -l | tr -d ' ')" "0"
 unset FAKE_UNIT_B1_A1
+
+echo ""
+echo "--- case: a repetition lost to the launcher gets exactly one retry ---"
+# The other half of the same decision: is-infra-only must let the verified
+# launch wedge through, so the shell creates exactly one retry directory.
+export FAKE_REPEAT_ITER=crash
+RUN20="$(new_run_dir)"
+run_gate --ref HEAD --gate-root "$WORK/gate-artifacts" --run-dir "$RUN20"     --repeat-classes AlphaTests --repeat-iterations 1 >/dev/null 2>&1 || true
+assert_eq "the wedged repetition was retried exactly once"   "$(find "$RUN20/repeats" -name "iter-*-retry" 2>/dev/null | wc -l | tr -d ' ')" "1"
+unset FAKE_REPEAT_ITER
 
 echo ""
 echo "--- case: the repeat policy is skipped when the build fails ---"

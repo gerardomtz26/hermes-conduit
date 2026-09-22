@@ -462,10 +462,14 @@ The gate prints the full SHA it tested and writes
 `gate-result.json` + `summary.md` under its run directory. Exit status is `0`
 only when the entire gate passed. Run `--help` for every flag.
 
-The device is pinned by name (`--simulator`, default `iPhone 17 Pro`; the
-environment's `SIMULATOR_OS`/`SIMULATOR_ARCH` are honoured by ci-lib.sh as
-usual) and the SAME device is exported to every phase, so the
-simulator/runtime recorded in the result is the one the tests actually ran on.
+The device is pinned by name (`--simulator`, default **`Conduit CI Gate`**;
+the environment's `SIMULATOR_OS`/`SIMULATOR_ARCH` are honoured by ci-lib.sh as
+usual), and the SAME device is passed explicitly to every phase (the build, the
+lanes and the preparation), so the simulator/runtime recorded in the result is
+the one the tests actually ran on. The gate creates this device from the
+`iPhone 17 Pro` device type when it does not already exist, which is what makes
+it safe for the gate to erase it: it is never a developer's device, and an
+inherited `SIMULATOR_NAME` is deliberately ignored
 
 ### Policy (non-negotiable)
 

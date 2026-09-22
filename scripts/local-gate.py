@@ -1727,10 +1727,20 @@ def cmd_summarize(args) -> int:
     # when it actually left the run complete. A hang or an unreadable bundle
     # is a different class and is never healed by it.
     if round_healed:
+        # Every infrastructure token a pass can record is healed when the
+        # round left the run COMPLETE: `test-runner-failure` (the launch
+        # refusal), `incomplete` (a shard whose result was missing assigned
+        # classes - exactly what the round then ran), and `unclassified`. The
+        # round only runs when work was left incomplete, so complete coverage
+        # after it means that incomplete work was completed. A wedge INSIDE the
+        # round is still a FAIL - that decision comes from the passes'
+        # `is_launch_wedge` check, not from these counts.
         for entry in events["infrastructure_failures"]:
-            if str(entry.get("status")) == "test-runner-failure":
-                entry["recovered"] = True
-                entry["recovered_by"] = "gate recovery round"
+            entry["recovered"] = True
+            entry["recovered_by"] = "gate recovery round"
+        for entry in events["timeouts"]:
+            entry["recovered"] = True
+            entry["recovered_by"] = "gate recovery round"
     persistent_infra = [e for e in events["infrastructure_failures"]
                         if not e.get("recovered")]
     recovered_infra = [e for e in events["infrastructure_failures"]

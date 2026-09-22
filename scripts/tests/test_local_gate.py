@@ -901,6 +901,69 @@ class RecoverySpecTests(unittest.TestCase):
         self.assertIn("LaunchUITests=420", values["GATE_RECOVERY_CLASS_TIMEOUTS"])
 
 
+class IsInfraOnlyTests(unittest.TestCase):
+    """The gate's ONE retry decision point.
+
+    A repeat iteration is re-run only when its failure is infrastructure; a
+    genuine failing test is final. Both directions are pinned here, because a
+    mutation either way would otherwise keep the whole suite green (the shell
+    suite never drives a wedged repetition) while a real run either
+    re-executed a genuine assertion or stopped retrying wedged repetitions.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.lane_dir = Path(self.tmp.name) / "lane"
+        self.lane_dir.mkdir(parents=True, exist_ok=True)
+
+    def _decide(self):
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer),                 contextlib.redirect_stderr(io.StringIO()):
+            return local_gate.main(["is-infra-only",
+                                    "--lane-dir", str(self.lane_dir)])
+
+    def test_a_genuine_assertion_is_never_retryable(self):
+        lane_artifacts(self.lane_dir, status="fail",
+                       classes=("AlphaTests",), cases=2,
+                       failures=[{"class": "AlphaTests", "test": "testBoom",
+                                  "attempts": []}],
+                       attempts=[{"mode": "batch", "n": 1, "class": "all",
+                                  "status": "test-failures"}])
+        self.assertEqual(self._decide(), 1,
+                         "a genuine failing test must be final - never retried")
+
+    def test_a_launch_wedge_is_retryable(self):
+        lane_artifacts(self.lane_dir, status="fail",
+                       classes=("AlphaTests",), cases=1,
+                       failures=[{"class": "System Failures",
+                                  "test": "Conduit encountered an error",
+                                  "attempts": []}],
+                       attempts=[{"mode": "batch", "n": 1, "class": "all",
+                                  "status": "test-failures"}])
+        logs = self.lane_dir / "logs"
+        logs.mkdir(exist_ok=True)
+        (logs / "batch-1-a1.log").write_text(
+            "Simulator device failed to launch com.milim.relay "
+            "(BSErrorCodeDescription=Busy)" + chr(10), encoding="utf-8")
+        self.assertEqual(self._decide(), 0,
+                         "the verified launch wedge is exactly what may be "
+                         "retried once")
+
+    def test_unclassifiable_infrastructure_is_retryable(self):
+        lane_artifacts(self.lane_dir, status="fail",
+                       classes=(), cases=0,
+                       attempts=[{"mode": "batch", "n": 1, "class": "all",
+                                  "status": "unclassified"}])
+        self.assertEqual(self._decide(), 0)
+
+    def test_a_clean_lane_is_not_retryable(self):
+        lane_artifacts(self.lane_dir, status="pass",
+                       classes=("AlphaTests",), cases=1)
+        self.assertEqual(self._decide(), 1,
+                         "there is nothing to retry in a clean lane")
+
+
 class SimulatorTests(unittest.TestCase):
     def test_picks_newest_ios_runtime(self):
         tmp = tempfile.TemporaryDirectory()

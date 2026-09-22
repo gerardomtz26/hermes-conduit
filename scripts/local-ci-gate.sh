@@ -356,7 +356,9 @@ run_bounded() { # $1=budget seconds $2=log path $3=working directory, rest=comma
   local pid status deadline grace
   mkdir -p "$(dirname "$log")"
   # Job control puts this one background job into its OWN process group - the
-  # idiom ci-lib.sh's run_with_deadline uses for the same reason. Without it a
+  # idiom ci-lib.sh's run_with_deadline uses for the same reason. The set -m /
+  # set +m pair is deliberate and local to this one launch: it creates the
+  # child's group for the kill below, then restores the parent shell's state. Without it a
   # non-interactive bash leaves the child in the SCRIPT's group, so
   # `kill -- -$pid` targets a group that does not exist, fails silently, and
   # only the direct child dies while a grandchild keeps the Simulator busy
@@ -933,7 +935,7 @@ else
             # simulator_prep), and each piece of work is still retried
             # exactly once.
             simulator_prep "recovery-$rcls"
-            simulator_prime "retry-set"
+            simulator_prime "recovery-$rcls"
             if run_lane unit "$GATE_UNIT_LANE-recovery-$rcls" "$GATE_UNIT_TARGET" \
                 "$rclasses" "$rpredicted" "$rtimeout" \
                 "$RUN_DIR/lanes/unit-recovery-$rcls" \
@@ -1104,7 +1106,7 @@ fi
 # silent, because it re-arms the SHA for another full run.
 printf '%s\t%s\t%s\t%s\n' "$(now_iso)" "$RUN_DIR" "${VERDICT}" "$SHA" \
   >> "$SHA_REGISTRY" 2>/dev/null \
-  || echo "local-ci-gate: warning: could not record this result in the SHA registry; it lives at $RUN_DIR/gate-result.json" >&2
+  || echo "local-ci-gate: warning: could not record the result for $SHA in the SHA registry; it lives at $RUN_DIR/gate-result.json" >&2
 
 echo ""
 echo "tested SHA : $SHA"
