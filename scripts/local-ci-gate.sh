@@ -983,6 +983,10 @@ else
             rbatches="${rbatches%$'\r'}"
             iteration=1
             while [ "$iteration" -le "$REPEAT_ITERATIONS" ]; do
+              # Primed like the recovery round's retry: the wedge alternates
+              # across app launches, and the prime keeps a repetition from
+              # being lost to the launcher rather than to the test.
+              simulator_prime
               if run_lane unit "repeat-$rcls-$iteration" "$GATE_UNIT_TARGET" \
                   "$rcls" "$rpredicted" "$rtimeout" \
                   "$RUN_DIR/repeats/$rcls/iter-$iteration" \
