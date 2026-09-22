@@ -284,7 +284,10 @@ reset_and_boot_simulator() {
       return 1
     fi
   fi
-  sleep 3
+  # GATE_SLEEP_SCALE: 1 (default) everywhere except the gate's stubbed
+  # integration suite, which scales settling sleeps to 0 - deadlines are
+  # wall-clock (`date`), so watchdog budgets never depend on this multiplier.
+  sleep $(( 3 * ${GATE_SLEEP_SCALE:-1} ))
   if ! udid=$(simulator_udid); then
     echo "::warning::could not resolve simulator UDID - letting xcodebuild boot the destination itself"
     [ "$erase" -eq 1 ] && return 1

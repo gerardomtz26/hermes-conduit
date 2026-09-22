@@ -5,6 +5,23 @@ This document describes the Conduit CI architecture that replaced the static
 still runs the complete XCTest suite on every PR; nothing is skipped,
 quarantined, or moved to a nightly gate.
 
+## Two gates, two jobs
+
+Conduit is tested by two independent gates, and they answer different
+questions:
+
+| Gate | Where | Scope | What a green result means |
+|---|---|---|---|
+| **GitHub-hosted CI** (this document) | GitHub runners, public/fork PRs included | The complete suite, sharded into dynamic lanes | The commit compiles and the suite passes on a clean machine |
+| **Local exhaustive gate** (`scripts/local-ci-gate.sh`) | Our own Mac, over SSH, outside GitHub's runner system | The complete suite, plus an explicit repeat policy, plus the cheap static checks | A **trusted** commit is correct: see [Local exhaustive gate](#local-exhaustive-gate-mac-outside-github) |
+
+**A local gate result is valid only for the exact commit SHA it reports.**
+Any other SHA — a branch name that moved, a later commit, "essentially the
+same" tree — invalidates the result. The gate is the authority that a release
+head is certified with; the hosted pipeline stays as it is today (its slim
+redesign is a separate, later change), and remains what guards arbitrary
+public and fork PRs.
+
 ## Architecture
 
 ```
@@ -410,6 +427,273 @@ wall clock. On failure it names the failing test, the lane, whether a
 simulator reset/erase occurred, whether the targeted retry passed, and any
 classes left `not_diagnosed` after a confirmed hang.
 
+## Local exhaustive gate (Mac, outside GitHub)
+
+`scripts/local-ci-gate.sh` is the exhaustive gate. It runs on our own Mac over
+SSH — never inside GitHub's self-hosted-runner system — and it always tests an
+**exact commit**, resolved to a full SHA, in a throwaway detached worktree.
+
+### Invocation
+
+From any machine with the `ios-mac` SSH alias (see the workspace `AGENTS.md`):
+
+```
+ssh ios-mac 'bash ~/projects/conduit-gate-tooling/scripts/local-ci-gate.sh --ref <sha-or-ref>'
+```
+
+`~/projects/conduit-gate-tooling` is a scratch worktree **of the Conduit
+repository itself** (created once with `git -C
+~/projects/hermes-conduit-swiftui worktree add --detach
+~/projects/conduit-gate-tooling origin/main`), not a separate clone: `--ref`
+is resolved in the shared object store, so the SHA that gets reported is a
+Conduit commit. The script refuses to run at all unless the checkout it is
+invoked from looks like Conduit (`project.yml`, `ConduitTests/`,
+`ConduitUITests/`), so pointing it at an unrelated repository fails fast
+instead of certifying a meaningless SHA.
+
+`--ref` accepts any ref or SHA that repository already has; add `--fetch` to
+fetch `origin` first, which makes the whole thing one command:
+
+```
+ssh ios-mac 'bash ~/projects/conduit-gate-tooling/scripts/local-ci-gate.sh --ref origin/main --fetch'
+```
+
+The gate prints the full SHA it tested and writes
+`gate-result.json` + `summary.md` under its run directory. Exit status is `0`
+only when the entire gate passed. Run `--help` for every flag.
+
+The device is pinned by name (`--simulator`, default **`Conduit CI Gate`**;
+the environment's `SIMULATOR_OS`/`SIMULATOR_ARCH` are honoured by ci-lib.sh as
+usual), and the SAME device is passed explicitly to every phase (the build, the
+lanes and the preparation), so the simulator/runtime recorded in the result is
+the one the tests actually ran on. The gate creates this device from the
+`iPhone 17 Pro` device type when it does not already exist, which is what makes
+it safe for the gate to erase it: it is never a developer's device, and an
+inherited `SIMULATOR_NAME` is deliberately ignored.
+
+### Policy (non-negotiable)
+
+1. **Before approving a trusted PR for merge, or a release head for archive,
+   run the local Mac gate on the exact head SHA.**
+2. **A result for any other SHA is invalid.** The gate reports the commit it
+   tested; if that is not the head you are approving, the result does not
+   apply.
+3. **Never use a developer's active worktree as the tested tree.** The gate
+   creates its own detached worktree and never reads, writes, resets,
+   stashes, or checks out anything in the invoking checkout.
+4. **Rerun-until-green is not validation.** The gate invokes the lane runner
+   with `--iterations 1` (no Xcode-native flake retry), and it fails the run
+   outright if any work item recorded `test-failures` and then `passed`.
+5. **Genuine failures and infrastructure failures are reported separately.**
+   An infrastructure/simulator/AX failure still fails the gate, but it is
+   reported as infrastructure — never dressed up as an assertion failure, and
+   never as a pass.
+6. **Never execute arbitrary or unreviewed external PR code on the Mac.** Only
+   run heads we have explicitly decided are trusted enough for local
+   execution. Fork PRs are covered by hosted CI, not by this gate.
+
+### What it does
+
+| Phase | What runs | Notes |
+|---|---|---|
+| resolve + worktree | `git worktree add --detach <sha>` outside the invoking checkout | HEAD is verified to equal the requested SHA; the worktree is removed afterwards and all diagnostics live in the run directory |
+| generate | `xcodegen generate` | The generated `.xcodeproj` is never committed |
+| static | `plan-tests.py validate`, `python3 -m unittest discover -s scripts/tests`, `check-l10n-coverage.py` | `--skip-static` exists for developer loops and marks the result **partial** |
+| build | `ci-build-for-testing.sh` once, into a gate-specific DerivedData | The same build-once contract as hosted CI, without the artifact round trip |
+| prepare | before each lane: ci-lib.sh's own bounded shutdown/**erase**/boot/wait-for-boot | Environment preparation, never a retry — it re-runs nothing and a lane that fails afterwards still fails. Without it, the host app's install/launch is refused (`Simulator device failed to launch com.milim.relay … Application failed preflight checks … reason: Busy`) and the batch is lost. An A/B probe on our Mac settled that the erase is the part that matters (shutdown+boot alone still refused the next lane; erase+boot passed it), but it is a **partial** mitigation: on a full run the refusal returned a batch or two into a lane, so it accumulates over successive launches of the same bundle on one device. Costs ~40 s per lane. `--no-simulator-erase` keeps the cheaper mode for observing the raw behavior; `--no-simulator-prep` skips preparation entirely. |
+
+| unit | the **complete** `ConduitTests` suite | One exhaustive lane: the planner is forced to `--min-lanes 1 --max-lanes 1` so it still owns the sequential batches and every per-batch watchdog |
+| ui | the **complete** `ConduitUITests` suite | One batched invocation over every UI class, with the planner's per-class watchdogs |
+| repeats | the repeat policy below | Runs even when the unit or UI lane failed, so one red lane cannot hide the rest; skipped when the build failed (no test products), and left failing when the plan could not be produced (there is nothing to project the repeat tasks from) |
+
+### The bounded recovery round (and the wedge it is for)
+
+The gate runs on a dedicated simulator device ("Conduit CI Gate", created on
+demand) precisely so it can erase that device freely: on our Mac the host
+app's install/launch is periodically refused (`Simulator device failed to
+launch com.milim.relay … Application failed preflight checks … reason: Busy`),
+and the A/B probe that diagnosed it showed only `simctl erase` clears the
+condition reliably.
+
+Because the wedge accumulates again over successive launches, a one-time
+pre-run erase is not enough. The gate therefore allows at most one bounded
+recovery round per suite (one for the unit lane, one for the UI lane), and a
+round is allowed for exactly one infrastructure class:
+
+* the refusal is reported as **infrastructure**, never as an assertion
+  failure, with the affected batch named and the classes it hid listed as
+  `not executed`;
+* the **continuation pass** runs the batches the stopped lane never reached;
+* if work is still incomplete and the evidence is the verified launch class
+  (XCTest's synthetic `System Failures` entry and/or the Busy signature in the
+  lane log), that suite's round erases the gate simulator once
+  (shutdown/erase/boot/wait, via ci-lib.sh) and retries exactly the
+  incomplete work **once** (the other suite's round, if it ever runs,
+  performs its own erase);
+* the round heals evidence only where its OWN pass re-ran the work: an
+  infrastructure event (or hang) counts as recovered by the round only when
+  that event's suite ran a recovery pass, **that round left the suite
+  complete (no planned class without a result)**, and that pass observed
+  every class the event names (an event naming a UI shard's declared class
+  set — a lane with no `batches` array — is covered when each of those
+  classes has a result from some pass, because each ran as its own
+  invocation) — a unit round never heals UI evidence, a UI
+  round never heals unit evidence, and work the round never re-ran stays
+  **persistent** and fails the run (repeat-lane events are never healed by
+  it: their own bounded retry decides them);
+* **a genuine assertion anywhere disqualifies the round entirely** — the
+  projection refuses, so a product failure is never retried around;
+* if the same class comes back after the round, the gate fails as
+  infrastructure and makes **no third attempt**.
+
+The wedge is worth knowing in detail, because it defeated every per-launch
+mitigation and it shapes the round. Probes on our Mac (all on the gate's own
+device) showed the refusal **alternates across app launches**: every other
+launch is refused, and that held through `simctl terminate` + 5/10/15 s
+settles, `simctl uninstall` between launches, and a fresh `erase` before a
+retry alike - and it appears inside a single lane too (batch 1 passes,
+batch 2 refused). Only an erase reliably clears the condition *once*. The
+round therefore puts the whole retry set back in ONE invocation with one
+batch, so the retry gets its single chance on a single launch instead of
+spreading it across many launches that the alternation would thin out.
+
+A run the round recovered is a PASS with the retry recorded
+(`infrastructure.retries`, `recovered`, and a caveat naming the healed
+wedge) — never a silently green run. A run that needed no recovery is the
+normal case. Work that produced a result is never re-executed across passes,
+so the aggregate execution counts are exact; a class that somehow did appear
+in two passes is counted once and reported in `reread_classes`.
+
+The lane runner, the planner and the timing extractor come from the **tested
+commit's own tree**, so the policy that decides the verdict is the policy of
+the revision being certified. Only the orchestrator and the result assembler
+come from the invoking checkout.
+
+### Repeat policy
+
+Classes whose failures have historically depended on scheduling are executed
+**K times unconditionally** (default `3`) and must pass **every** time. This
+is repetition as *evidence*, not retry as *recovery*: the lane runner is
+still called with `--iterations 1`, so nothing is retried until it agrees.
+Every iteration gets its own result directory, its own execution and failure
+counts, and its own watchdog — the planner's batch budget for that class,
+capped by `--repeat-timeout-cap` (default 900 s) so one hung iteration cannot
+burn an unbounded wall clock.
+
+The default set is the settled-Markdown/dormancy and transcript-performance
+families that have repeatedly failed in scheduling-dependent ways:
+`SettledMessageIsolationTests`, `TranscriptPerfLedgerContractTests`,
+`TranscriptPerformanceFixtureTests`, `MarkdownRichContentHostedTests`
+(override with `--repeat-classes`). A repeat class that is no longer in the
+suite **fails the gate**: a policy that quietly stopped covering what it
+promises is a gate defect, not a warning.
+
+### Failure classification
+
+The gate classifies on the lane runner's own attempt tokens (`passed`,
+`test-failures`, `infra-error`, `timeout`, `unclassified`, `incomplete`,
+`not_run`, `not_diagnosed`) rather than re-deriving a verdict from logs. The
+lane runner's own final verdict is a problem in its own right: a lane that
+says anything other than `pass`/`skipped` fails the gate even if the event
+vocabulary came up empty.
+
+* **genuine assertion failures** — the invocation's extraction recorded a
+  failing *test* (an entry naming a real test case), and the work item ended
+  on `test-failures`. Fails the gate.
+* **test-runner failures** — XCTest also files the *run* itself: when the
+  Simulator refuses to install or launch the host app, the result bundle
+  carries a synthetic entry under the pseudo-class `System Failures`
+  (`Conduit encountered an error`), and the lane runner's status token cannot
+  tell it from an assertion. The gate splits those apart using the
+  per-invocation extraction parts, so a machine that never started the app is
+  reported as infrastructure — never as an assertion failure. This is not
+  hypothetical: it is what the gate's first runs on `main` produced.
+* **assertions retried until green** — a work item recorded `test-failures`
+  and later `passed`. Fails the gate in every mode, including
+  `--allow-recovered-infrastructure`: a flake is a flake, not a pass. (A UI
+  shard's targeted retry arrives as a second batch attempt and is grouped
+  back onto the shard's work item for exactly this reason.)
+* **infrastructure failures** — nonzero exit with a known zero failing-test
+  count, or a result that could not be classified. Fails the gate. A
+  *persistent* one (the environment never recovered) is always fatal. A
+  *recovered* one is split by what recovered it: healed by the gate's own
+  bounded recovery round (below) the run may PASS with the retry recorded and
+  a caveat naming the healed wedge; healed by the lane runner's own retry
+  inside one lane it is still fatal by default, because the run is not
+  trustworthy evidence — the operator reruns the gate. That default is the
+  only thing `--allow-recovered-infrastructure` downgrades, and it is then
+  recorded as a **caveat** in `gate-result.json` and `summary.md`, the two
+  documents a result is cited from. `--no-lock` and `--no-simulator-prep`, and
+  a failed Simulator preparation, are recorded the same way.
+* **watchdog timeouts (hangs)** — classified as timeouts, with the hung class
+  or batch named by the runner. They follow the same split by healer as
+  infrastructure failures: healed by the gate's round the run may pass with
+  the caveat; healed by the lane runner's own retry they are fatal by
+  default (the same `--allow-recovered-infrastructure` downgrade applies).
+  The gate's round never re-runs a repetition, so a hang inside the repeat
+  policy is decided by that policy's own one bounded retry; a hang neither
+  recovered stays fatal.
+* **not executed / not diagnosed** — work that never ran. Fails the gate:
+  unexecuted tests may never masquerade as passed. Because a unit lane stops
+  at the batch that failed, the gate then runs the batches it never reached as
+  a **continuation pass** (diagnostic, never a retry of anything that already
+  ran) so one failure cannot hide the rest of the suite; the coverage the gate
+  certifies is the aggregate over the lane and its continuation, and the
+  "never executed" evidence is recomputed against that aggregate rather than
+  carried over from the stopped lane.
+
+### Result document
+
+`gate-result.json` is machine-readable and carries at least: `tested_sha`
+(plus `requested_ref`), `xcode_version`, `simulator` (`name`, `runtime`,
+`udid`), `unit` and `ui` blocks with `executions`, `failures`,
+`classes_expected`/`classes_observed`, `batch_count` (`null` for a UI shard,
+which is one batched invocation rather than a batch layout), per-phase
+`assertion_failures`/`infrastructure_failures`/`timeouts`/`not_executed`,
+`synthetic_failures` (XCTest reporting the run itself),
+`focused_repeats` (per class and per iteration), an `infrastructure` roll-up
+(`persistent`, `recovered`, `retries` = recovery rounds the gate used, `retry_detail`, `simulator_resets`/`erases`), a
+`partial`/`partial_reasons` pair, `caveats` and `run_flags` (the operating
+flags a run was given), `problems[]`, and the final `verdict`
+(`PASS`/`FAIL`). The human `summary.md` next to it carries the same numbers.
+
+A run is `partial` when the operator deliberately narrowed it
+(`--skip-static`, or a disabled repeat policy): a partial run can pass, but it
+must never be cited as the exhaustive result for a release head.
+
+Both artifacts, every phase log, every per-iteration log and the `.xcresult`
+bundles live under the run directory (default
+`<parent of the repo>/conduit-local-gate/runs/<sha12>-<UTC>`), which is
+**outside** the repository, so the gate never adds files to a working tree.
+
+What is kept is the lane runner's existing retention policy, not a new one: a
+clean pass prunes its own bundles (timings have already been extracted), a
+failing or retried lane keeps them, and a red run therefore always carries the
+bundles that explain it. The `.xcresult` paths the gate recorded for a passing
+lane can legitimately be empty; the timings, counts and logs are the evidence
+there, and the full run is reproducible from the printed SHA.
+
+The throwaway worktree is removed at the end of the run, including on
+`INT`/`TERM` (the gate then exits 130/143 rather than continuing); a `SIGKILL`
+is the one case nothing can cover, and the gate prints the
+`git worktree remove --force` command for it. Reproduce the exact tested tree
+with the `git worktree add --detach` command the gate prints on failure.
+
+`--fetch` (opt-in) rewrites the invoking repository's remote-tracking refs and
+tags. It does not touch the working tree, the index or any stash — that is the
+property the gate guarantees — but it is a fetch in that repository rather
+than in a scratch clone, so a run without `--fetch` tests exactly the refs the
+checkout already had.
+
+### Simulator safety
+
+The gate takes a single-gate-per-Mac lock (a `mkdir`-based lock under the gate
+root) and refuses to start while another gate is running: two concurrent
+`xcodebuild` chains on one Mac corrupt each other's Simulator state, and a
+result from such a run would be meaningless. `--no-lock` exists and is
+documented as unsafe. Stale locks (dead holder pid) are taken over with a
+warning printed to stderr.
+
 ## Adding a test
 
 Just add it. The planner discovers it on the next run, gives it the default
@@ -420,6 +704,12 @@ it into a lane. No lane-assignment files to maintain. To check locally:
 python3 scripts/plan-tests.py validate
 python3 -m unittest discover -s scripts/tests
 ```
+
+New test classes need no gate changes either: the local gate asks the same
+planner for the class inventory, so a new class joins the exhaustive unit or
+UI lane automatically. A class added to `--repeat-classes` (or to the
+default set) without existing in the suite fails the gate, so the repeat
+policy cannot silently decay.
 
 ## Local run directories
 
