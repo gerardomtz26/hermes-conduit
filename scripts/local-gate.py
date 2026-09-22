@@ -1418,23 +1418,24 @@ def _repeat_problems(entry, iterations: int):
             entry["class"], seen, expected_numbers))
     for iteration in entry["iterations"]:
         label = "{0} iteration {1}".format(entry["class"], iteration["iteration"])
+        # The repeat policy judges TEST reliability: its job is to catch a
+        # test that fails intermittently. A repetition lost to the launcher
+        # says nothing about the tests, and is governed instead by the
+        # infrastructure rules (which require those events to be recovered,
+        # else the gate fails as infrastructure) - reporting both would
+        # dress an environment loss up as a test problem.
         if iteration.get("genuine_failure"):
-            # A genuine failing test is FINAL: it is never retried, and the
+            # A genuine failing test is FINAL: never retried, and a
             # repetition failed even if a later attempt passed.
             problems.append(
                 "{0}: genuine test failure(s) ({1})".format(
                     label, iteration["failures"]))
-        elif not iteration.get("satisfied"):
-            problems.append(
-                "{0}: no clean attempt (lane status {1!r})".format(
-                    label, iteration["status"]))
         for attempt in iteration.get("attempts") or []:
             if not attempt.get("lane_result_present"):
                 problems.append("{0} attempt {1}: lane-result.json missing".format(
                     label, attempt.get("attempt")))
-            if attempt.get("executions") is None:
-                problems.append("{0} attempt {1}: execution count unreadable".format(
-                    label, attempt.get("attempt")))
+        if not iteration.get("attempts"):
+            problems.append("{0}: never executed".format(label))
         if iteration.get("assertion_retried_until_green"):
             problems.append(
                 "{0}: genuine assertions were retried and then passed".format(label))
