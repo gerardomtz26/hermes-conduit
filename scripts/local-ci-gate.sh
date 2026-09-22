@@ -220,10 +220,12 @@ for marker in project.yml ConduitTests ConduitUITests; do
 done
 
 # The device is pinned by name and every phase must use the SAME one: the
-# build, the unit lane and the UI lane all resolve their destination through
-# ci-lib.sh, which reads this variable. Exporting it here is what keeps the
-# recorded simulator/runtime honest when --simulator overrides the default.
-export SIMULATOR_NAME
+# build, the lanes and the recovery round all resolve their destination
+# through ci-lib.sh, which reads this variable. It is passed EXPLICITLY to
+# those invocations (see run_lane / simulator_prep / the build call) and is
+# deliberately NOT exported: the tested tree's own CI-tooling suites stub
+# `simctl` with the default device name, and an exported override makes those
+# suites fail against a device their fixtures do not know about.
 
 # Everything the gate writes lives OUTSIDE the repository: the invoking
 # checkout is never the run's workspace and never accumulates gate output.
@@ -694,7 +696,7 @@ run_lane() { # $1=kind $2=lane $3=target $4=classes $5=predicted $6=timeout
   echo ""
   echo "== $kind lane $lane =="
   echo "classes: $(printf '%s' "$classes" | tr ',' '\n' | wc -l | tr -d ' ') | watchdog: ${timeout}s"
-  # SIMULATOR_NAME is restated here (it is also exported) so the lane can never
+  # SIMULATOR_NAME is passed here (it is deliberately not exported) so the lane can never
   # silently fall back to ci-lib.sh's default device when --simulator differs:
   # the recorded simulator/runtime must describe the device the tests ran on.
   CONDUIT_PERF_TRACE="${CONDUIT_PERF_TRACE:-1}" \
