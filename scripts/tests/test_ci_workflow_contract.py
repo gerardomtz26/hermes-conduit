@@ -90,7 +90,9 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("name: build-products", ui)
         self.assertIn('UI_CLASSES: "${{ needs.plan.outputs.ui-csv }}"', ui)
         self.assertIn("-only-testing:ConduitUITests/", ui)
+        # Both jobs must fail on a genuine assertion rather than retry it.
         self.assertNotIn("-test-iterations", ui)
+        self.assertNotIn("-retry-tests-on-failure", ui)
 
     def test_smoke_jobs_fail_closed_on_an_empty_selection(self):
         # With no -only-testing filter, xcodebuild runs the WHOLE suite, so an
@@ -133,7 +135,6 @@ class WorkflowContractTests(unittest.TestCase):
             ("success", "success", "timed_out", "success", "success"): False,
             ("success", "success", "success", "timed_out", "success"): False,
             ("success", "success", "success", "success", "failure"): False,
-            ("success", "success", "failure", "success", "success"): False,
             ("success", "failure", "skipped", "skipped", "skipped"): False,
             ("cancelled", "success", "success", "success", "success"): False,
             ("success", "success", "cancelled", "success", "success"): False,
@@ -262,6 +263,22 @@ class SmokeSelectionTests(unittest.TestCase):
 
         proc = self._run_smoke_with(mutate)
         self.assertNotEqual(proc.returncode, 0)
+
+    def test_a_failing_selection_writes_no_output_file(self):
+        # The plan job's `jq -r '.unit_csv' smoke.json` must never read a stale
+        # or partially written selection: a failed validation writes nothing.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "smoke.json")
+            with open(SMOKE_SUITE, encoding="utf-8") as fh:
+                suite = json.load(fh)
+            suite.pop("ui")
+            bogus = os.path.join(tmp, "suite.json")
+            with open(bogus, "w", encoding="utf-8") as fh:
+                json.dump(suite, fh)
+            proc = self._run_smoke(bogus, out_path=out)
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertFalse(os.path.exists(out),
+                             "a failed selection must not leave a selection file")
 
     def test_selection_output_feeds_the_smoke_jobs(self):
         with tempfile.TemporaryDirectory() as tmp:

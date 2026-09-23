@@ -37,9 +37,10 @@ SHA). Neither substitutes for the other.
                  |
         +--------+--------+
         v                 v
-   unit-smoke         ui-smoke        (sequential test-without-building
-   (32 curated        (2 curated       invocations, one -only-testing filter
-    unit classes)      UI classes)     per class; no native flake retry)
+   unit-smoke         ui-smoke        (unit: sequential batches of at most
+   (32 curated        (2 curated       $SMOKE_BATCH_SIZE; UI: ONE invocation;
+    unit classes)      UI classes)     one -only-testing filter per class;
+        |                 |            no native flake retry)
         |                 |
         +--------+--------+
                  v
@@ -119,10 +120,10 @@ Measured on the last full v2 run of main (18 jobs): **129.2 macOS minutes** per
 run, wall clock ~20–21 minutes, longest job 18.8 min. The v3 shape is 6 jobs:
 `plan` + `self-test` + `ci-gate` on Linux (the same work as before), and three
 macOS jobs — the unchanged compile-everything `build`, plus one `unit-smoke`
-and one `ui-smoke` job running the curated slice. The measured v3 numbers are
-recorded in the pull request that introduced this shape. macOS minutes are the
-smaller part of the win: the point is that the hosted verdict no longer depends
-on shared runners re-litigating timing-sensitive suites.
+and one `ui-smoke` job running the curated slice. Every run's own wall clock and
+per-job durations are in its Actions run page. macOS minutes are the smaller
+part of the win: the point is that the hosted verdict no longer depends on
+shared runners re-litigating timing-sensitive suites.
 
 ## Test discovery
 
@@ -787,6 +788,11 @@ covers a risk area the smoke set does not already cover, keeping one or a few
 per area. A name in the file that no longer exists fails the plan job, so the
 selection cannot silently decay; the timing/performance/dormancy families must
 stay out (a contract test enforces that).
+
+**New timing/performance/dormancy class?** The Mac gate's repeat set is explicit
+too: add the class to `DEFAULT_REPEAT_CLASSES` in `scripts/local-ci-gate.sh` (or
+pass `--repeat-classes`), otherwise it is covered once but never repeated — the
+repeats are what catch scheduling-dependent regressions.
 
 The same fail-closed rule protects the Mac gate: a class in `--repeat-classes`
 that does not exist fails the gate rather than quietly repeating nothing.

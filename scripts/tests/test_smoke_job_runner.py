@@ -141,6 +141,16 @@ class SmokeJobRunnerTests(unittest.TestCase):
         for invocation in invocations:
             self.assertEqual(invocation.count("-only-testing:ConduitTests/"), 8,
                              invocation)
+        self.assertEqual(proc.stdout.count("::group::"), 4)
+        self.assertEqual(proc.stdout.count("::group::"), proc.stdout.count("::endgroup::"))
+
+    def test_unit_smoke_defaults_the_batch_size_when_unset(self):
+        # The workflow always sets SMOKE_BATCH_SIZE; the default exists so a
+        # future edit that forgets it degrades to batching, not to `set -u`.
+        proc = self._run_step(UNIT_STEP, UNIT_CLASSES=self._classes("Unit", 32))
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(len(self._invocations()), 4)
+        self.assertIn("batches of at most 8", proc.stdout)
 
     def test_unit_smoke_keeps_the_remainder_batch(self):
         proc = self._run_step(UNIT_STEP, UNIT_CLASSES=self._classes("Unit", 20),
@@ -173,7 +183,7 @@ class SmokeJobRunnerTests(unittest.TestCase):
         self.assertIn("refusing to run unfiltered", proc.stdout + proc.stderr)
 
     def test_unit_smoke_rejects_a_malformed_batch_size(self):
-        for bad in ("0", "many"):
+        for bad in ("0", "many", "00", " "):
             proc = self._run_step(UNIT_STEP, UNIT_CLASSES="SomeTests",
                                   SMOKE_BATCH_SIZE=bad)
             self.assertNotEqual(proc.returncode, 0, "batch size {0!r}".format(bad))
@@ -218,6 +228,7 @@ class SmokeJobRunnerTests(unittest.TestCase):
         with open(os.path.join(self.tmp, "smoke.json"), encoding="utf-8") as fh:
             selection = json.load(fh)
         self.assertEqual(selection["unit_csv"].split(","), selection["unit"])
+        self.assertEqual(selection["ui_csv"].split(","), selection["ui"])
         self.assertEqual(selection["unit_csv"].count(",") + 1, len(selection["unit"]))
 
 

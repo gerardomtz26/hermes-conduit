@@ -225,15 +225,20 @@ jobs:
             exit 1
           fi
           IFS=',' read -r -a CLASSES <<< "$UNIT_CLASSES"
-          # A missing or malformed batch size must read as an error here, not as
-          # a bash "unbound variable" abort or a silently unbounded batch.
-          SMOKE_BATCH_SIZE="${SMOKE_BATCH_SIZE:-8}"
+          # Default only when UNSET: an explicitly empty value is malformed, not
+          # a request for the default.
+          SMOKE_BATCH_SIZE="${SMOKE_BATCH_SIZE-8}"
           case "$SMOKE_BATCH_SIZE" in
-            ''|0|*[!0-9]*)
+            ''|*[!0-9]*)
               echo "::error::SMOKE_BATCH_SIZE must be a positive integer, got '$SMOKE_BATCH_SIZE'"
               exit 1
               ;;
           esac
+          # 10# forces base 10, so "00" and "08" are not read as octal.
+          if [ "$((10#$SMOKE_BATCH_SIZE))" -lt 1 ]; then
+            echo "::error::SMOKE_BATCH_SIZE must be greater than zero, got '$SMOKE_BATCH_SIZE'"
+            exit 1
+          fi
           echo "unit smoke: ${#CLASSES[@]} classes, batches of at most $SMOKE_BATCH_SIZE"
 
           run_batch() {
