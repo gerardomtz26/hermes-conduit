@@ -90,7 +90,8 @@ class CliTests(unittest.TestCase):
         return subprocess.run(
             [sys.executable, os.path.join(SCRIPTS_DIR, "ci-gate.py"),
              "--plan", plan, "--build", build,
-             "--unit", unit, "--ui", ui, "--self-test", self_test],
+             "--unit-smoke", unit, "--ui-smoke", ui,
+             "--self-test", self_test],
             capture_output=True, text=True)
 
     def test_cli_exit_codes(self):

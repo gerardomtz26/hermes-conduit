@@ -60,8 +60,8 @@ def main(argv=None) -> int:
     passed, reason = verdict(args.plan, args.build, args.unit_smoke,
                              args.ui_smoke, args.self_test)
     if passed:
-        print("CI Gate: PASS (plan/build/unit-smoke/self-test succeeded; "
-              f"ui-smoke {args.ui_smoke!r})")
+        print("CI Gate: PASS (plan/build/unit-smoke/ui-smoke/self-test all "
+              "succeeded)")
         return 0
     print(f"CI Gate: FAIL - {reason}")
     print("::error::CI Gate failed: " + reason)

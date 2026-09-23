@@ -128,6 +128,10 @@ class WorkflowContractTests(unittest.TestCase):
             # closed on an empty curated selection, so a skipped smoke job is
             # always an upstream failure cascade - and fails the gate.
             ("success", "success", "success", "skipped", "success"): False,
+            ("success", "success", "failure", "success", "success"): False,
+            ("success", "success", "success", "failure", "success"): False,
+            ("success", "success", "timed_out", "success", "success"): False,
+            ("success", "success", "success", "timed_out", "success"): False,
             ("success", "success", "success", "success", "failure"): False,
             ("success", "success", "failure", "success", "success"): False,
             ("success", "failure", "skipped", "skipped", "skipped"): False,

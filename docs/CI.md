@@ -293,8 +293,8 @@ before running `test-without-building` - no compilation downstream.
 generated `.xctestrun` points outside the workspace root (or outside known
 system locations), so non-portable products are caught at build time, not at
 lane time. If Xcode ever produces inherently non-portable products, the audit
-is the documented tripwire: revert to per-lane `build-for-testing` and keep
-the rest of CI v2.
+is the documented tripwire: revert to per-job `build-for-testing` and keep
+everything else in this shape.
 
 ## Failure domains
 
@@ -421,8 +421,9 @@ ui_class_timeout = max(420s, ceil(estimate x 3.0))   # computed in plan-tests.py
   slower runners without letting any single class hold a lane hostage;
 - a class normally taking 2-4 minutes is caught in ~7-17 minutes if it
   hangs, instead of the old single 2861s (~48 min) suite-level watchdog;
-- estimates come from timing history (EWMA, outlier-clamped), so one
-  anomalous run cannot inflate a class's watchdog;
+- estimates come from the checked-in baseline (`scripts/test-timings.json`, or
+  the planner default for unseen classes), so one anomalous run can never
+  inflate a class's watchdog;
 - UI lane ceilings are `sum(per-class budgets)` - the batched shard
   invocation watchdog - and the outer GitHub job ceiling is
   `ceil((4 x sum + (n_classes + 1) x 600s + (2 x n_classes + 1) x 300s
@@ -463,9 +464,10 @@ batch/class that needed its retry. (The hosted `lane-<lane-name>` artifact
 upload and the CI Test Report that rendered a **"Unit lane batches"** section
 were removed with the hosted lane matrix in CI v3 — a hosted smoke failure is
 read from the job log, and the report renderer survives only as a local
-inspection subcommand.) Timing history is recorded per class (UI included),
-which is what lets the planner balance the Mac gate's lanes and price batch
-watchdogs from real runtimes.
+inspection subcommand.) Per-class timings (`observations.json`) are recorded per
+local run (UI included) for diagnosis; standing estimates come from the
+checked-in baseline (see [Timing data](#timing-data)) — there is no persistent
+timing history any more.
 
 ## CI Gate (branch protection)
 
@@ -768,8 +770,14 @@ it into a lane automatically — no lane-assignment files to maintain:
 
 ```
 python3 scripts/plan-tests.py validate
+python3 scripts/plan-tests.py smoke
 python3 -m unittest discover -s scripts/tests
 ```
+
+`validate` checks inventory completeness; `smoke` is the command that actually
+reads `scripts/smoke-suite.json`, so it is the one that catches a curated class
+that was renamed, deleted or moved between targets — the same check the hosted
+plan job runs.
 
 **Hosted smoke coverage is a decision, not a default.** A new class runs on
 GitHub only if it is listed in `scripts/smoke-suite.json`; the smoke gate does

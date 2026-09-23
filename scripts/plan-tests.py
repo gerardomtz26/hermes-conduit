@@ -1066,8 +1066,13 @@ def cmd_smoke(args) -> int:
                     f"{target} test class")
     for name in sorted(set(unit) & set(ui)):
         problems.append(f"smoke suite lists {name!r} in both unit and ui")
+    # Report failures before the split: the delegated counts are only
+    # meaningful once every curated name has been validated.
     for e in problems:
         print(f"::error::{e}")
+    if problems:
+        print("smoke selection FAILED")
+        return 1
 
     delegated_unit = len(discovery["unit"]) - len(unit)
     delegated_ui = len(discovery["ui"]) - len(ui)
@@ -1075,9 +1080,6 @@ def cmd_smoke(args) -> int:
     print(f"delegated to the Mac local gate: {delegated_unit} unit + "
           f"{delegated_ui} UI classes (exhaustive coverage, repeats and the "
           f"timing-sensitive families)")
-    if problems:
-        print("smoke selection FAILED")
-        return 1
 
     if args.out:
         payload = {

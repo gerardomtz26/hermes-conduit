@@ -1,0 +1,225 @@
+"""Integration coverage for the hosted smoke jobs' bash run steps.
+
+The smoke jobs' load-bearing behaviour - the empty-selection guard, the bounded
+sequential batching, failing fast when a batch fails - exists only inside
+`.github/workflows/ci.yml`. This module extracts those `run:` bodies from the
+workflow and executes them against a stub `xcodebuild`, so a broken loop or a
+guard that stopped guarding fails the CI-tooling suite instead of the first PR
+that touches the workflow.
+
+It is deliberately stdlib-only and YAML-library-free (the workflow is parsed by
+indentation, like `test_ci_workflow_contract`), and it runs the script with
+whatever `bash` is on PATH - bash 3.2 on macOS runners, where the local gate's
+static phase runs this same suite.
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+
+from _util import SCRIPTS_DIR
+
+REPO_ROOT = os.path.dirname(SCRIPTS_DIR)
+WORKFLOW = os.path.join(REPO_ROOT, ".github", "workflows", "ci.yml")
+
+UNIT_STEP = "Run the curated unit smoke suite"
+UI_STEP = "Run the curated UI smoke suite"
+
+# Records every invocation, and can be told to fail from the Nth one on.
+STUB = """#!/usr/bin/env bash
+printf 'INVOKE|%s\\n' "$*" >> "$STUB_LOG"
+if [ -n "${STUB_FAIL_AT:-}" ]; then
+  count=$(grep -c '^INVOKE|' "$STUB_LOG" 2>/dev/null || printf '1')
+  if [ "$count" -ge "$STUB_FAIL_AT" ]; then
+    exit 1
+  fi
+fi
+exit 0
+"""
+
+
+def _step_script(step_name):
+    """Return the dedented `run:` block of the named workflow step."""
+    with open(WORKFLOW, encoding="utf-8") as fh:
+        lines = fh.read().splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.strip() == "- name: " + step_name:
+            start = i
+            break
+    if start is None:
+        raise AssertionError("step {0!r} not found in ci.yml".format(step_name))
+    run_at = None
+    for j in range(start + 1, len(lines)):
+        if lines[j].strip().startswith("run:"):
+            run_at = j
+            break
+    if run_at is None:
+        raise AssertionError("step {0!r} has no run block".format(step_name))
+    run_indent = len(lines[run_at]) - len(lines[run_at].lstrip(" "))
+    body = []
+    for line in lines[run_at + 1:]:
+        if not line.strip():
+            body.append("")
+            continue
+        if len(line) - len(line.lstrip(" ")) <= run_indent:
+            break
+        body.append(line)
+    widths = [len(l) - len(l.lstrip(" ")) for l in body if l.strip()]
+    pad = min(widths) if widths else 0
+    return "\n".join(l[pad:] if l.strip() else "" for l in body) + "\n"
+
+
+class SmokeJobRunnerTests(unittest.TestCase):
+    def setUp(self):
+        if not os.path.exists(WORKFLOW):
+            self.skipTest("ci.yml not present")
+        self.bash = shutil.which("bash")
+        if not self.bash:
+            self.skipTest("bash not available")
+        self.tmp = tempfile.mkdtemp(prefix="smoke-job-")
+        self.bin = os.path.join(self.tmp, "bin")
+        os.makedirs(self.bin)
+        self.log = os.path.join(self.tmp, "calls.log")
+        stub = os.path.join(self.bin, "xcodebuild")
+        with open(stub, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(STUB)
+        os.chmod(stub, 0o755)
+        if not self._stub_runs():
+            self.skipTest("cannot execute a stub executable in this environment")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _env(self, **extra):
+        env = dict(os.environ)
+        env["PATH"] = self.bin + os.pathsep + env.get("PATH", "")
+        env["STUB_LOG"] = self.log
+        env["XCRUN_FILE"] = os.path.join(self.tmp, "fake.xctestrun")
+        env["SIMULATOR_NAME"] = "iPhone 17 Pro"
+        env.pop("STUB_FAIL_AT", None)
+        env.update({k: str(v) for k, v in extra.items()})
+        return env
+
+    def _stub_runs(self):
+        probe = os.path.join(self.tmp, "probe.sh")
+        with open(probe, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("#!/usr/bin/env bash\nxcodebuild --probe || exit 1\n")
+        proc = subprocess.run([self.bash, probe], env=self._env(),
+                              capture_output=True, text=True)
+        return proc.returncode == 0
+
+    def _run_step(self, step_name, **env_extra):
+        path = os.path.join(self.tmp, step_name.replace(" ", "_") + ".sh")
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(_step_script(step_name))
+        with open(self.log, "w", encoding="utf-8"):
+            pass
+        return subprocess.run([self.bash, path], env=self._env(**env_extra),
+                              capture_output=True, text=True)
+
+    def _invocations(self):
+        with open(self.log, encoding="utf-8") as fh:
+            return [l for l in fh.read().splitlines() if l.startswith("INVOKE|")]
+
+    @staticmethod
+    def _classes(prefix, count):
+        return ",".join("{0}{1}Tests".format(prefix, i) for i in range(count))
+
+    # --- unit smoke: bounded sequential batches -----------------------------
+
+    def test_unit_smoke_splits_into_batches_of_the_configured_size(self):
+        proc = self._run_step(UNIT_STEP, UNIT_CLASSES=self._classes("Unit", 32),
+                              SMOKE_BATCH_SIZE=8)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        invocations = self._invocations()
+        self.assertEqual(len(invocations), 4, invocations)
+        for invocation in invocations:
+            self.assertEqual(invocation.count("-only-testing:ConduitTests/"), 8,
+                             invocation)
+
+    def test_unit_smoke_keeps_the_remainder_batch(self):
+        proc = self._run_step(UNIT_STEP, UNIT_CLASSES=self._classes("Unit", 20),
+                              SMOKE_BATCH_SIZE=8)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        sized = [i.count("-only-testing:ConduitTests/") for i in self._invocations()]
+        self.assertEqual(sized, [8, 8, 4], sized)
+
+    def test_unit_smoke_runs_a_single_class_in_one_batch(self):
+        proc = self._run_step(UNIT_STEP, UNIT_CLASSES="OnlyOneTests",
+                              SMOKE_BATCH_SIZE=8)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(len(self._invocations()), 1)
+
+    def test_unit_smoke_fails_fast_when_a_batch_fails(self):
+        proc = self._run_step(UNIT_STEP, UNIT_CLASSES=self._classes("Unit", 20),
+                              SMOKE_BATCH_SIZE=8, STUB_FAIL_AT=2)
+        self.assertNotEqual(proc.returncode, 0,
+                            "a failing batch must fail the job")
+        invocations = self._invocations()
+        self.assertEqual(len(invocations), 2, invocations)
+        self.assertEqual(proc.stdout.count("::group::"), proc.stdout.count("::endgroup::"),
+                         "every opened log group must be closed, including on failure")
+
+    def test_unit_smoke_refuses_an_empty_selection(self):
+        proc = self._run_step(UNIT_STEP, UNIT_CLASSES="", SMOKE_BATCH_SIZE=8)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(self._invocations(), [],
+                         "nothing may be invoked without a class filter")
+        self.assertIn("refusing to run unfiltered", proc.stdout + proc.stderr)
+
+    def test_unit_smoke_rejects_a_malformed_batch_size(self):
+        for bad in ("0", "many"):
+            proc = self._run_step(UNIT_STEP, UNIT_CLASSES="SomeTests",
+                                  SMOKE_BATCH_SIZE=bad)
+            self.assertNotEqual(proc.returncode, 0, "batch size {0!r}".format(bad))
+            self.assertEqual(self._invocations(), [], "batch size {0!r}".format(bad))
+
+    # --- UI smoke: one invocation, same guards ------------------------------
+
+    def test_ui_smoke_runs_the_curated_classes_in_one_invocation(self):
+        proc = self._run_step(UI_STEP,
+                              UI_CLASSES="ConnectionSetupUITests,ProfilePickerUITests")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        invocations = self._invocations()
+        self.assertEqual(len(invocations), 1, invocations)
+        self.assertEqual(invocations[0].count("-only-testing:ConduitUITests/"), 2)
+
+    def test_ui_smoke_refuses_an_empty_selection(self):
+        proc = self._run_step(UI_STEP, UI_CLASSES="")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertEqual(self._invocations(), [])
+        self.assertIn("refusing to run unfiltered", proc.stdout + proc.stderr)
+
+    # --- the extracted scripts must be the ones the workflow ships ----------
+
+    def test_extracted_unit_step_reads_its_classes_from_the_plan_output(self):
+        script = _step_script(UNIT_STEP)
+        self.assertIn('"$UNIT_CLASSES"', script)
+        self.assertIn("SMOKE_BATCH_SIZE", script)
+        self.assertNotIn("-test-iterations", script)
+        self.assertNotIn("-retry-tests-on-failure", script,
+                         "a genuine assertion must fail the job, not be retried")
+
+    def test_shipped_smoke_selection_matches_the_documented_split(self):
+        """The curated file and the plan output must agree, so the workflow's
+        unit-csv/ui-csv outputs are the ones this suite exercises."""
+        proc = subprocess.run(
+            [sys.executable, os.path.join(SCRIPTS_DIR, "plan-tests.py"),
+             "smoke", "--repo-root", REPO_ROOT, "--suite",
+             os.path.join(SCRIPTS_DIR, "smoke-suite.json"), "--out",
+             os.path.join(self.tmp, "smoke.json")],
+            capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        with open(os.path.join(self.tmp, "smoke.json"), encoding="utf-8") as fh:
+            selection = json.load(fh)
+        self.assertEqual(selection["unit_csv"].split(","), selection["unit"])
+        self.assertEqual(selection["unit_csv"].count(",") + 1, len(selection["unit"]))
+
+
+if __name__ == "__main__":
+    unittest.main()

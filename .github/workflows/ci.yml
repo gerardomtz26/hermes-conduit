@@ -28,7 +28,9 @@ name: CI
 #                        minutes-long bash state machines.
 #   build      (macos)   build-for-testing exactly once; audit the .xctestrun
 #                        for absolute-path portability; upload the products.
-#   unit-smoke (macos)   the curated unit classes, ONE invocation.
+#   unit-smoke (macos)   the curated unit classes, as SEQUENTIAL xcodebuild
+#                        batches of at most $SMOKE_BATCH_SIZE (8) classes -
+#                        never one giant invocation.
 #   ui-smoke   (macos)   the curated UI classes, ONE invocation.
 #   ci-gate    (ubuntu)  the single stable branch-protection check.
 #
@@ -110,13 +112,6 @@ jobs:
           set -euo pipefail
           python3 scripts/smoke-summary.py \
             --selection ci-artifacts/smoke.json >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload smoke selection
-        uses: actions/upload-artifact@v4
-        with:
-          name: smoke-selection
-          path: ci-artifacts/
-          retention-days: 7
 
   self-test:
     name: CI tooling self-test
@@ -230,6 +225,15 @@ jobs:
             exit 1
           fi
           IFS=',' read -r -a CLASSES <<< "$UNIT_CLASSES"
+          # A missing or malformed batch size must read as an error here, not as
+          # a bash "unbound variable" abort or a silently unbounded batch.
+          SMOKE_BATCH_SIZE="${SMOKE_BATCH_SIZE:-8}"
+          case "$SMOKE_BATCH_SIZE" in
+            ''|0|*[!0-9]*)
+              echo "::error::SMOKE_BATCH_SIZE must be a positive integer, got '$SMOKE_BATCH_SIZE'"
+              exit 1
+              ;;
+          esac
           echo "unit smoke: ${#CLASSES[@]} classes, batches of at most $SMOKE_BATCH_SIZE"
 
           run_batch() {
@@ -243,11 +247,16 @@ jobs:
               batch_args+=("-only-testing:ConduitTests/${cls}")
             done
             echo "::group::unit smoke batch $batch_no ($# classes)"
-            xcodebuild test-without-building \
+            # Close the log group on both paths: a failing batch aborts the
+            # script (set -e), so the group must be closed before returning.
+            if ! xcodebuild test-without-building \
               -xctestrun "$XCRUN_FILE" \
               -destination "platform=iOS Simulator,name=$SIMULATOR_NAME" \
               -parallel-testing-enabled NO \
-              "${batch_args[@]}"
+              "${batch_args[@]}"; then
+              echo "::endgroup::"
+              return 1
+            fi
             echo "::endgroup::"
           }
 
