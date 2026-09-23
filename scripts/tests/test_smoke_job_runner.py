@@ -97,11 +97,16 @@ class SmokeJobRunnerTests(unittest.TestCase):
 
     def _env(self, **extra):
         env = dict(os.environ)
+        # Nothing from the developer's shell may leak into the step: the
+        # "unset" case must actually be unset.
+        env.pop("SMOKE_BATCH_SIZE", None)
+        env.pop("STUB_FAIL_AT", None)
+        env.pop("UNIT_CLASSES", None)
+        env.pop("UI_CLASSES", None)
         env["PATH"] = self.bin + os.pathsep + env.get("PATH", "")
         env["STUB_LOG"] = self.log
         env["XCRUN_FILE"] = os.path.join(self.tmp, "fake.xctestrun")
         env["SIMULATOR_NAME"] = "iPhone 17 Pro"
-        env.pop("STUB_FAIL_AT", None)
         env.update({k: str(v) for k, v in extra.items()})
         return env
 
@@ -183,11 +188,20 @@ class SmokeJobRunnerTests(unittest.TestCase):
         self.assertIn("refusing to run unfiltered", proc.stdout + proc.stderr)
 
     def test_unit_smoke_rejects_a_malformed_batch_size(self):
-        for bad in ("0", "many", "00", " "):
+        for bad in ("", "0", "many", "00", " "):
             proc = self._run_step(UNIT_STEP, UNIT_CLASSES="SomeTests",
                                   SMOKE_BATCH_SIZE=bad)
             self.assertNotEqual(proc.returncode, 0, "batch size {0!r}".format(bad))
             self.assertEqual(self._invocations(), [], "batch size {0!r}".format(bad))
+
+    def test_unit_smoke_reads_a_leading_zero_batch_size_as_decimal(self):
+        # `10#` is load-bearing: without it bash would read "08" as an invalid
+        # octal and the step would die instead of batching.
+        proc = self._run_step(UNIT_STEP, UNIT_CLASSES=self._classes("Unit", 8),
+                              SMOKE_BATCH_SIZE="08")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(len(self._invocations()), 1)
+        self.assertIn("batches of at most 08", proc.stdout)
 
     # --- UI smoke: one invocation, same guards ------------------------------
 
