@@ -6,18 +6,28 @@ import SwiftUI
 /// live state must not re-evaluate settled Markdown presentation. These use
 /// the deterministic TranscriptPerf counters, not wall-clock timing.
 ///
-/// The streaming-tick simulation publishes unrelated live state so the row's
-/// body chain re-runs — exactly what ChatView's ForEach does to every mounted
-/// row on each AppState publish — and asserts the Equatable gate skipped the
-/// expensive settled subtree.
+/// What this suite asserts: the gate's input contract at value level
+/// (`testEquatableConformanceComparesEveryGateInput` — every Equality field,
+/// including both environment-derived inputs), that a content, resolver or
+/// Dynamic Type change still OPENS the gate and re-renders
+/// (`testContentChange…`, `testResolverChange…`,
+/// `testDynamicTypeChange…`), and that ancestry environment churn cannot
+/// re-open a pinned row (`testWindowTraitChurnDoesNotReopenSettledGate`, the
+/// build-147 churn vector, with an unpinned canary proving the churn reached
+/// the hierarchy).
 ///
-/// The publish vector this suite drives re-runs the row's body chain — exactly
-/// what ChatView's ForEach does to every mounted row on each AppState publish —
-/// and the fixture asserts the gate's INPUTS are untouched by it. The dormancy
-/// side of the invariant (settled Markdown must not re-evaluate) is asserted in
-/// the production transcript shape by TranscriptPerformanceFixtureTests, not
-/// here: a settled row hosted on its own re-evaluates once per publish with the
-/// gate comparison never consulted (that suite's tests carry the measurement).
+/// What this suite deliberately does NOT assert: dormancy itself. On a cold
+/// erased device (2026-09-22, this suite run alone in the exact composition
+/// hosted CI runs), a settled row hosted on its own re-evaluates its Markdown
+/// once per unrelated publish while the gate comparison is not reached at all
+/// in a majority of runs — the hosting graph re-runs the row's
+/// dynamic-property body. That is a property of hosting a settled row outside
+/// a transcript, and it is invariant to the shape (hosting root, ForEach child
+/// of a LazyVStack in a ScrollView, environment pin above or below the row).
+/// The dormancy invariant is therefore asserted where production exercises it:
+/// TranscriptPerformanceFixtureTests, over a 10-tick streaming window in the
+/// real transcript shape, with per-position classification and bounded
+/// per-tick work.
 @MainActor
 final class SettledMessageIsolationTests: XCTestCase {
 
@@ -162,149 +172,6 @@ final class SettledMessageIsolationTests: XCTestCase {
         return host
     }
 
-    func testUnrelatedPublishRecreatesRowWithoutChangingSettledGateInputs() throws {
-        let appState = try makeAppState()
-        let resolver = GatewayMediaDataURLResolver(appState: appState, profile: "default")
-        let message = markdownMessage()
-
-        // Mount through the concrete harness root (see makeHarnessRow for
-        // why the root stays concrete, and the tick simulation below for
-        // why the tick itself is a publish rather than a root re-assignment).
-        let host = mountConcreteRow(
-            message: message,
-            appState: appState,
-            resolver: resolver
-        )
-
-        // Baseline: the initial mount performed the expensive work — and let
-        // its full commit (including trait-sync follow-up transactions) land
-        // BEFORE arming the measurement window, exactly like
-        // testDynamicTypeChangeReOpensSettledContentGate. A zero-interval
-        // run-loop tick observes only what flushed synchronously, so a late
-        // first-mount transaction on a slow/cold runner otherwise lands
-        // inside the window and reads as a spurious re-evaluation.
-        drainUntil(2.0) { TranscriptPerf.settledMarkdownTextBodyEvaluations > 0 }
-        // The first body evaluation is followed by a late trait-sync commit
-        // on slow/cold runners; wait until the counters go quiet for over a
-        // second so that commit lands BEFORE the measurement window arms.
-        var quietFor: TimeInterval = 0
-        var settleElapsed: TimeInterval = 0
-        var lastTotal = TranscriptPerf.settledMarkdownTextBodyEvaluations
-            + TranscriptPerf.textKitMeasurementCalls
-            + TranscriptPerf.selectableTextViewUpdateCalls
-        let settleStep: TimeInterval = 0.1
-        var baselineSettled = false
-        while settleElapsed < 10 {
-            // Force a layout each turn so a hosting transaction still in
-            // flight from the cold first launch (key/attach, trait sync)
-            // flushes HERE, during the baseline — not inside the armed
-            // measurement window on the next render.
-            host.view.setNeedsLayout()
-            host.view.layoutIfNeeded()
-            RunLoop.current.run(until: Date().addingTimeInterval(settleStep))
-            settleElapsed += settleStep
-            let current = TranscriptPerf.settledMarkdownTextBodyEvaluations
-                + TranscriptPerf.textKitMeasurementCalls
-                + TranscriptPerf.selectableTextViewUpdateCalls
-            if current == lastTotal {
-                quietFor += settleStep
-                if quietFor >= 1.2 {
-                    baselineSettled = true
-                    break
-                }
-            } else {
-                quietFor = 0
-                lastTotal = current
-            }
-        }
-        // Without a settled baseline the stay-at-zero assertion would race
-        // against the still-draining first-mount commit.
-        guard baselineSettled else {
-            XCTFail("counters never reached a quiet state; the measurement window would be meaningless on this runner")
-            return
-        }
-        let initialSTVUpdates = TranscriptPerf.selectableTextViewUpdateCalls
-        XCTAssertGreaterThan(TranscriptPerf.settledMarkdownTextBodyEvaluations, 0, "initial mount must render the markdown")
-
-        // Simulate a streaming tick the way production delivers it: an
-        // unrelated AppState publish (@Published streamingText — the same
-        // vector the transcript fixtures drive) invalidates the row's
-        // @EnvironmentObject and re-runs its body chain, re-creating the
-        // SettledAssistantMessageContent value with IDENTICAL inputs (equal
-        // message value, same resolver identity, same pinned Dynamic Type
-        // environment). Root re-assignment is deliberately NOT used: an
-        // erased AnyView root replacement is a hosting shape no production
-        // path exercises, and its erased diff remounts the identical row
-        // under a loaded scheduler — the hosted artifact this suite chased
-        // — while an identical CONCRETE root is pruned wholesale by value
-        // diffing before the gate is ever consulted, which would make the
-        // stay-at-zero assertion vacuous.
-        TranscriptPerf.reset()
-        let bubbleBodiesBeforeRecreation = TranscriptPerf.settledMessageBubbleBodyEvaluations
-        for tick in 1...3 {
-            appState.streamingText = "unrelated live-state tick \(tick)"
-            host.view.setNeedsLayout()
-            host.view.layoutIfNeeded()
-            RunLoop.current.run(until: Date())
-        }
-
-        // Give any (incorrect) re-evaluation time to surface before
-        // asserting; draining past the re-creation commit keeps the gate
-        // assertion below meaningful instead of vacuously passing.
-        drainUntil(1.0) { TranscriptPerf.settledMarkdownTextBodyEvaluations > 0 }
-
-        // Anti-vacuity guard: the publish must have actually re-run the
-        // row's body chain (AssistantBubble notes its body, mirroring
-        // MessageBubble). If SwiftUI ever prunes an identical row update
-        // before reaching the gate, this fails and the assertion below would
-        // be measuring nothing.
-        XCTAssertGreaterThan(
-            TranscriptPerf.settledMessageBubbleBodyEvaluations,
-            bubbleBodiesBeforeRecreation,
-            "recreation must reach the row's body chain; a fully-pruned update makes the gate assertion vacuous"
-        )
-
-        // The assertion this vehicle carries: a publish that re-creates an
-        // identical settled row must not change a single gate INPUT — that is
-        // what "identical" means here. It is strict: a reopened gate always
-        // names the field that changed, so a legitimate input change
-        // (content, resolver identity, Dynamic Type, chat text size) can
-        // never pass as dormancy, and the reopen report is embedded in the
-        // failure message.
-        //
-        // Dormancy is NOT asserted here, and the omission is measured rather
-        // than assumed. On a cold erased device (2026-09-22, this suite run
-        // alone in the exact composition hosted CI runs), a synthetic single
-        // row hosted OUTSIDE a transcript container re-evaluates its settled
-        // Markdown once per unrelated publish — spans one per tick, ~16ms
-        // apart — while the Equatable gate is NEVER consulted
-        // (`SettledAssistantMessageContent.==` calls: 0, no reopen report,
-        // gated body ran). That is the hosting graph re-running the row's
-        // dynamic-property body, not the gate deciding: the comparison the
-        // gate owns never happens in this shape. The same measurement holds
-        // whether the row is the hosting root, a ForEach child of a
-        // LazyVStack in a ScrollView, or pinned above/below the transcript.
-        // Production never hosts a settled row on its own: the dormancy
-        // invariant is asserted, with these same counters over a 10-tick
-        // streaming window and per-position classification, by
-        // TranscriptPerformanceFixtureTests
-        // .testStreamingTicksLeaveSettledMarkdownDormant_MarkdownTranscript /
-        // _PlainTextTranscript — the production transcript shape, green on
-        // the same cold device in the same runs.
-        let reopened = TranscriptPerf.recentGateReopenReports
-        let spanSuffix = TranscriptPerf.windowEvaluationSpans.isEmpty
-            ? ""
-            : " (spans:\n"
-                + TranscriptPerf.windowEvaluationSpans.joined(separator: "\n") + ")"
-        XCTAssertTrue(
-            reopened.isEmpty,
-            "an unrelated publish must not change a settled row's gate inputs"
-                + (reopened.isEmpty ? "" : " (gate reopens: " + reopened.joined(separator: "; ") + ")")
-                + spanSuffix
-        )
-        _ = initialSTVUpdates
-    }
-
     func testContentChangeStillReRendersSettledContent() throws {
         let appState = try makeAppState()
         let resolver = GatewayMediaDataURLResolver(appState: appState, profile: "default")
@@ -364,7 +231,19 @@ final class SettledMessageIsolationTests: XCTestCase {
         )
     }
 
-    func testEquatableConformanceComparesMessageAndResolverIdentity() throws {
+    /// The gate's INPUT CONTRACT, asserted at value level so it can never be
+    /// vacuous: every field the equality describes is covered here, including
+    /// the two environment-derived inputs (Dynamic Type, chat text size) and
+    /// the identity fields. A publish that re-creates a settled row with the
+    /// same inputs must compare equal — which is exactly the "identical
+    /// recreation" condition the transcript fixtures rely on — and a change in
+    /// ANY input must compare unequal so the gate opens.
+    ///
+    /// This is asserted directly rather than through the hosting machinery on
+    /// purpose: a hosted assertion depends on SwiftUI consulting the
+    /// comparison, which the measured single-row shape does not guarantee
+    /// (see the class note), while this one is deterministic.
+    func testEquatableConformanceComparesEveryGateInput() throws {
         let appState = try makeAppState()
         let resolver = GatewayMediaDataURLResolver(appState: appState, profile: "default")
         let otherResolver = GatewayMediaDataURLResolver(appState: appState, profile: "default")
@@ -409,11 +288,38 @@ final class SettledMessageIsolationTests: XCTestCase {
             sizeCategory: .extraExtraLarge,
             chatTextSize: .default
         )
+        let differentChatTextSize = SettledAssistantMessageContent(
+            message: markdownMessage(),
+            displayName: "Hermes",
+            avatarURL: nil,
+            gatewayResolver: resolver,
+            sizeCategory: .large,
+            chatTextSize: .largest
+        )
+        let differentDisplayName = SettledAssistantMessageContent(
+            message: markdownMessage(),
+            displayName: "Hermes (work)",
+            avatarURL: nil,
+            gatewayResolver: resolver,
+            sizeCategory: .large,
+            chatTextSize: .default
+        )
+        let differentAvatarURL = SettledAssistantMessageContent(
+            message: markdownMessage(),
+            displayName: "Hermes",
+            avatarURL: URL(string: "https://example.com/avatar.png"),
+            gatewayResolver: resolver,
+            sizeCategory: .large,
+            chatTextSize: .default
+        )
 
         XCTAssertEqual(a, sameInputs, "equal message + same resolver identity must compare equal")
         XCTAssertNotEqual(a, differentResolver, "different resolver instance must compare unequal even with equal contents")
         XCTAssertNotEqual(a, differentMessage, "different message must compare unequal")
         XCTAssertNotEqual(a, differentSizeCategory, "a Dynamic Type change must compare unequal and re-open the gate")
+        XCTAssertNotEqual(a, differentChatTextSize, "a chat text-size change must compare unequal and re-open the gate")
+        XCTAssertNotEqual(a, differentDisplayName, "a profile display-name change must compare unequal")
+        XCTAssertNotEqual(a, differentAvatarURL, "an avatar change must compare unequal")
     }
 
     /// Dynamic Type invalidation (#4): a size-category change must re-open
@@ -435,7 +341,7 @@ final class SettledMessageIsolationTests: XCTestCase {
     /// UIFontMetrics resolve against UIApplication's
     /// preferredContentSizeCategory, which is process-global. The Equatable
     /// input contract (including sizeCategory) is covered directly by
-    /// testEquatableConformanceComparesMessageAndResolverIdentity.
+    /// testEquatableConformanceComparesEveryGateInput.
     func testDynamicTypeChangeReOpensSettledContentGate() throws {
         let appState = try makeAppState()
         let resolver = GatewayMediaDataURLResolver(appState: appState, profile: "default")

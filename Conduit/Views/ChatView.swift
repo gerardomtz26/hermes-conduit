@@ -1052,14 +1052,14 @@ struct UserMessageContent: View, Equatable {
     let chatTextSize: ChatTextSize
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        // Same DEBUG-only gate-reopen observation as
-        // SettledAssistantMessageContent: names the field that opened the
-        // gate so failures distinguish input-change from bypass.
-        #if DEBUG
+        // One comparison expression for every configuration — see
+        // SettledAssistantMessageContent.== for why the DEBUG recording below
+        // must never be a second copy of the field list.
         let equal = lhs.message == rhs.message
             && lhs.gatewayResolver === rhs.gatewayResolver
             && lhs.sizeCategory == rhs.sizeCategory
             && lhs.chatTextSize == rhs.chatTextSize
+        #if DEBUG
         if !equal {
             var fields: [String] = []
             if lhs.message != rhs.message { fields.append("message") }
@@ -1068,13 +1068,8 @@ struct UserMessageContent: View, Equatable {
             if lhs.chatTextSize != rhs.chatTextSize { fields.append("chatTextSize") }
             TranscriptPerf.noteGateReopen(component: "UserMessageContent", fields: fields)
         }
-        return equal
-        #else
-        return lhs.message == rhs.message
-            && lhs.gatewayResolver === rhs.gatewayResolver
-            && lhs.sizeCategory == rhs.sizeCategory
-            && lhs.chatTextSize == rhs.chatTextSize
         #endif
+        return equal
     }
 
     var body: some View {
@@ -1331,19 +1326,22 @@ struct SettledAssistantMessageContent: View, Equatable {
     let chatTextSize: ChatTextSize
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        // DEBUG-only observation: when the gate opens, record WHICH field
-        // opened it so a dormancy failure distinguishes "legitimately
-        // changed input" from "gate bypassed entirely" (no report + body
-        // ran). The comparison result is identical in all configurations;
-        // Release compiles the recording out and keeps short-circuit
-        // semantics.
-        #if DEBUG
+        // ONE comparison expression for every configuration: the field list a
+        // gate actually compares must never diverge between DEBUG (what the
+        // tests exercise) and Release (what ships). The DEBUG-only recording
+        // below observes the outcome and cannot change it.
         let equal = lhs.message == rhs.message
             && lhs.displayName == rhs.displayName
             && lhs.avatarURL == rhs.avatarURL
             && lhs.gatewayResolver === rhs.gatewayResolver
             && lhs.sizeCategory == rhs.sizeCategory
             && lhs.chatTextSize == rhs.chatTextSize
+        #if DEBUG
+        // Consultation counter: a fixture asserting "the gate reported no
+        // input change" is vacuous unless the gate was reached at all, and a
+        // hosting shape that re-creates the subtree without consulting the
+        // comparison leaves the report list empty too.
+        TranscriptPerf.note(.settledContentGateComparison)
         if !equal {
             var fields: [String] = []
             if lhs.message != rhs.message { fields.append("message") }
@@ -1354,15 +1352,8 @@ struct SettledAssistantMessageContent: View, Equatable {
             if lhs.chatTextSize != rhs.chatTextSize { fields.append("chatTextSize") }
             TranscriptPerf.noteGateReopen(component: "SettledAssistantMessageContent", fields: fields)
         }
-        return equal
-        #else
-        return lhs.message == rhs.message
-            && lhs.displayName == rhs.displayName
-            && lhs.avatarURL == rhs.avatarURL
-            && lhs.gatewayResolver === rhs.gatewayResolver
-            && lhs.sizeCategory == rhs.sizeCategory
-            && lhs.chatTextSize == rhs.chatTextSize
         #endif
+        return equal
     }
 
     var body: some View {

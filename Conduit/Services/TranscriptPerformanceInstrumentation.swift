@@ -29,6 +29,7 @@ enum TranscriptPerf {
         switch event {
         case .settledBubbleBody: storage.settledBubbleBody += 1
         case .settledMarkdownBody: storage.settledMarkdownBody += 1
+        case .settledContentGateComparison: storage.settledContentGateComparison += 1
         case .selectableTextViewUpdate: storage.selectableTextViewUpdate += 1
         case .selectableTextViewTextRebuild: storage.selectableTextViewTextRebuild += 1
         case .textKitMeasurement: storage.textKitMeasurement += 1
@@ -147,12 +148,17 @@ enum TranscriptPerf {
     static func noteGateReopen(component: String, fields: [String]) {
         gateReopenLock.lock()
         defer { gateReopenLock.unlock() }
-        guard storage.recentGateReopenReports.count < 32 else { return }
         let offset: String
         if let openedAt = storage.windowOpenedAt {
             offset = String(format: "%.3f", Date().timeIntervalSince(openedAt))
         } else {
             offset = "?"
+        }
+        // Newest wins: dropping the report that names the violating field
+        // (what a drop-newest cap would do after saturation) would recreate
+        // the misdiagnosis this diagnostic exists to prevent.
+        if storage.recentGateReopenReports.count >= 32 {
+            storage.recentGateReopenReports.removeFirst()
         }
         storage.recentGateReopenReports.append(
             "t=\(offset)s \(component) opened by: \(fields.joined(separator: ", "))"
@@ -189,9 +195,20 @@ enum TranscriptPerf {
         case reasoningProjectionPublish
         case reasoningTranscriptMutation
         case scrollTargetPrefixSetBuild
+        case settledContentGateComparison
     }
 
     // MARK: - Counter accessors
+
+    /// How many times a settled-content Equatable gate was CONSULTED
+    /// (DEBUG diagnostics). This is what makes a "no reopen report" assertion
+    /// non-vacuous: an empty report list proves nothing on its own, because a
+    /// hosting shape that never reaches the comparison (`==` calls 0) would
+    /// leave it empty too. A fixture asserting input-invariance must also
+    /// assert that this counter moved.
+    static var settledContentGateComparisons: Int {
+        get { read(\.settledContentGateComparison) }
+    }
 
     static var settledMessageBubbleBodyEvaluations: Int {
         get { read(\.settledBubbleBody) }
@@ -477,8 +494,11 @@ enum TranscriptPerf {
         /// diagnostics, see `windowEvaluationSpans`).
         var windowEvaluationSpans: [String] = []
         /// Bounded ring of gate-reopen reports (DEBUG diagnostics, see
-        /// `recentGateReopenReports`).
+        /// `recentGateReopenReports`); newest wins on overflow.
         var recentGateReopenReports: [String] = []
+        /// Settled-content gate consultations (DEBUG diagnostics, see
+        /// `settledContentGateComparisons`).
+        var settledContentGateComparison = 0
         var selectableTextViewUpdate = 0
         var selectableTextViewTextRebuild = 0
         var textKitMeasurement = 0

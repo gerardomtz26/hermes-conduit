@@ -117,9 +117,19 @@ final class LongContextScalingFixtureTests: XCTestCase {
         return buffer
     }
 
+    /// Mounted through the dormancy harness contract (`DormancyHarnessEnvironment`
+    /// pinning + ChatView's test-only chat-size seam), like every other fixture
+    /// in this lane: an unpinned ChatView lets a late hosting trait push
+    /// re-open every settled row's gate and inflate the at-rest re-render
+    /// counters this suite classifies.
     private func mountChat(appState: AppState) -> UIHostingController<AnyView> {
         let host = UIHostingController(
-            rootView: AnyView(ChatView().environmentObject(appState))
+            rootView: AnyView(
+                DormancyHarnessEnvironment.applying(
+                    ChatView(chatTextSizeOverride: DormancyHarnessEnvironment.pinnedChatTextSize)
+                        .environmentObject(appState)
+                )
+            )
         )
         let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 844))
         window.rootViewController = host
