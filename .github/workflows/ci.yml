@@ -408,8 +408,11 @@ jobs:
           rc=0
           run_classes "${CLASSES[@]}" 2>&1 | tee "$UI_SMOKE_LOG" || rc=$?
           if [ "$rc" -ne 0 ]; then
-            flaked=$(grep -oE "Test Suite '[A-Za-z0-9_]+' failed" "$UI_SMOKE_LOG" \
-              | sed -E "s/.*'([A-Za-z0-9_]+)'.*/\1/" | sort -u | tr '\n' ' ')
+            # `|| true`: a failure with no class-level line (the app died before
+            # any suite finished) must still reach the retry and its diagnostic,
+            # not abort this step on grep's non-zero status under pipefail.
+            flaked=$({ grep -oE "Test Suite '[A-Za-z0-9_]+' failed" "$UI_SMOKE_LOG" \
+              | sed -E "s/.*'([A-Za-z0-9_]+)'.*/\1/" | sort -u | tr '\n' ' '; } || true)
             echo "::warning::UI smoke failed (${flaked:-no curated class named}); one targeted retry of the curated classes"
             run_classes "${CLASSES[@]}" 2>&1 | tee -a "$UI_SMOKE_LOG" || {
               echo "::error::the UI smoke classes failed again on the targeted retry - not a runner flake"

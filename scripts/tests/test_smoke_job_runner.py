@@ -42,7 +42,9 @@ if [ -n "${STUB_FAIL_FIRST_N:-}" ] && [ "$count" -le "$STUB_FAIL_FIRST_N" ]; the
   fail=1
 fi
 if [ "$fail" = "1" ]; then
-  printf "Test Suite '%s' failed\\n" "${STUB_FLAKE_CLASS:-StubFailingTests}"
+  if [ "${STUB_SILENT_FAIL:-0}" != "1" ]; then
+    printf "Test Suite '%s' failed\\n" "${STUB_FLAKE_CLASS:-StubFailingTests}"
+  fi
   exit 1
 fi
 exit 0
@@ -118,7 +120,8 @@ class SmokeJobRunnerTests(unittest.TestCase):
         # Nothing from the developer's shell may leak into the step: the
         # "unset" case must actually be unset.
         for name in ("SMOKE_BATCH_SIZE", "STUB_FAIL_AT", "STUB_FAIL_FIRST_N",
-                     "STUB_FLAKE_CLASS", "UNIT_CLASSES", "UI_CLASSES"):
+                     "STUB_FLAKE_CLASS", "STUB_SILENT_FAIL", "UNIT_CLASSES",
+                     "UI_CLASSES"):
             env.pop(name, None)
         env["PATH"] = self.bin + os.pathsep + env.get("PATH", "")
         env["STUB_LOG"] = self.log
@@ -246,6 +249,17 @@ class SmokeJobRunnerTests(unittest.TestCase):
         self.assertEqual(len(self._invocations()), 2, "exactly one retry")
         self.assertIn("runner-level flake absorbed", proc.stdout)
         self.assertIn("ConnectionSetupUITests", proc.stdout)
+
+    def test_ui_smoke_still_retries_when_no_class_level_line_was_logged(self):
+        # The failure can happen before any suite finishes (the app dies at
+        # launch). The step must still reach the retry and its diagnostic
+        # instead of aborting on grep's non-zero status under `pipefail`.
+        proc = self._run_step(UI_STEP,
+                              UI_CLASSES="ConnectionSetupUITests,ProfilePickerUITests",
+                              STUB_FAIL_FIRST_N=1, STUB_SILENT_FAIL=1)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(len(self._invocations()), 2, "the retry must still run")
+        self.assertIn("no curated class named", proc.stdout)
 
     def test_ui_smoke_fails_when_the_targeted_retry_also_fails(self):
         proc = self._run_step(UI_STEP,
