@@ -210,10 +210,11 @@ jobs:
         # runner): wait for CoreSimulator to settle its device pairs on a fresh
         # runner, pin the destination by UDID instead of letting xcodebuild pick
         # the first of several devices with the same name, then boot that device
-        # before handing it to a test session. Bounded by construction - every
-        # probe and the boot carry their own deadlines and the boot is
-        # best-effort, so a device hiccup degrades to the name-based destination
-        # rather than failing the job here.
+        # before handing it to a test session. The wait is fatal by design - it
+        # fails fast with the device inventory when the destination never
+        # appears, instead of letting xcodebuild report a misleading destination
+        # error - while the boot is best-effort and every probe carries its own
+        # deadline.
         #
         # LOG_DIR is ci-lib.sh's territory: bounded_run writes its per-call log
         # there, and without it every probe dies on an unbound variable (which

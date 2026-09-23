@@ -42,6 +42,16 @@ fi
 exit 0
 """
 
+# Answers the device probes the prepare step makes through ci-lib.sh, so the
+# step resolves a destination instead of waiting out its settle budget. The run
+# steps' stub is separate: they are invoked through xcodebuild.
+STUB_XCRUN = """#!/usr/bin/env bash
+if [ "${1:-}" = "simctl" ] && [ "${2:-}" = "list" ] && [ "${3:-}" = "devices" ]; then
+  printf '{"devices":{"com.apple.CoreSimulator.SimRuntime.iOS-26-5":[{"name":"%s","udid":"STUB-DEVICE-0000-0000","isAvailable":true}]}}\\n' "${SIMULATOR_NAME:-iPhone 17 Pro}"
+fi
+exit 0
+"""
+
 
 def _step_script(step_name):
     """Return the dedented `run:` block of the named workflow step."""
@@ -86,10 +96,11 @@ class SmokeJobRunnerTests(unittest.TestCase):
         self.bin = os.path.join(self.tmp, "bin")
         os.makedirs(self.bin)
         self.log = os.path.join(self.tmp, "calls.log")
-        stub = os.path.join(self.bin, "xcodebuild")
-        with open(stub, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(STUB)
-        os.chmod(stub, 0o755)
+        for name, body in (("xcodebuild", STUB), ("xcrun", STUB_XCRUN)):
+            path = os.path.join(self.bin, name)
+            with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(body)
+            os.chmod(path, 0o755)
         if not self._stub_runs():
             self.skipTest("cannot execute a stub executable in this environment")
 
@@ -238,7 +249,8 @@ class SmokeJobRunnerTests(unittest.TestCase):
         with open(path, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(_step_script(PREPARE_STEP))
         gh_env = os.path.join(self.tmp, "github_env")
-        env = self._env(SIMULATOR_NAME="iPhone 17 Pro")
+        env = self._env(SIMULATOR_NAME="iPhone 17 Pro",
+                        DESTINATION_SETTLE_TIMEOUT_S="5")
         env.pop("DESTINATION", None)
         env.pop("LOG_DIR", None)
         env["GITHUB_ENV"] = gh_env
