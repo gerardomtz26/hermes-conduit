@@ -28,13 +28,10 @@ Package.resolved
 TestResults*.xcresult
 ci-logs/
 
-# CI v2 local run directories (the CI workspace uses the same paths)
+# CI local run directories (the CI workspace uses the same paths)
 ci-derived-data/
 ci-lane/
 ci-artifacts/
-ci-timing/
-ci-report/
-ci-update/
 .scratch-obs/
 __pycache__/
 

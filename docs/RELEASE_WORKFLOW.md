@@ -46,6 +46,14 @@ The PR description should include the marketing version, build number, starting 
 
 Build and test from the release branch itself. Do not test a moving `main` checkout and assume it represents the candidate.
 
+**Which gate certifies a candidate.** Hosted CI is a broad smoke gate — it
+compiles everything and runs a curated slice (`docs/CI.md`) — and is *not* a
+release verdict. A candidate is certified by the **Mac local exhaustive gate**
+(`scripts/local-ci-gate.sh`) run against the **exact release-head SHA**: the
+complete unit and UI suites, the timing/dormancy repeats, and bounded
+infrastructure recovery. Hosted-green on a different SHA certifies nothing, and
+neither does a gate run from before a rebase.
+
 If testing finds a bug:
 
 1. Open a normal fix PR against `main`.

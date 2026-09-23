@@ -66,7 +66,8 @@ if [ "$status" -eq 0 ]; then
   fi
 fi
 
-# build-result.json feeds the report job's summary. Values are script-controlled
+# build-result.json records this job's own build outcome (diagnostics only:
+# the report job that consumed it was removed in CI v3). Values are script-controlled
 # (status token, integer seconds, ISO stamps, one path) - safe to printf.
 build_status_token="failed"
 [ "$status" -eq 0 ] && build_status_token="ok"

@@ -15,9 +15,13 @@ merge-parts  Fold the per-attempt extraction parts written by the
              wins per class: on a green lane that is always the passing
              attempt.
 lane-result  Merge bash-computed lane facts with extraction output into the
-             canonical lane-result.json consumed by the report job.
-aggregate    Build the human-readable CI Test Report (GitHub Step Summary)
-             from plan.json + lane-result.json files + build-result.json.
+             canonical lane-result.json consumed by the report renderer.
+aggregate    Render a human-readable report (GitHub Step Summary) from
+             plan.json + lane-result.json files + build-result.json. NOT wired
+             into any workflow since CI v3 (the hosted lane matrix and its
+             Report job are gone); kept as a local inspection tool, with its
+             tests, until something needs it again or it is deliberately
+             deleted.
 
 Design rules (see docs/CI.md):
   * Timing extraction is NEVER allowed to fail a CI lane. Any structural
@@ -865,7 +869,10 @@ def main(argv=None) -> int:
     p.add_argument("--out", required=True)
     p.set_defaults(func=lambda a: lane_result(a))
 
-    p = sub.add_parser("aggregate", help="build the CI Test Report summary")
+    p = sub.add_parser(
+        "aggregate",
+        help="render a report summary (local inspection only - no workflow "
+             "calls this since CI v3)")
     p.add_argument("--plan", required=True)
     p.add_argument("--lanes-dir", required=True)
     p.add_argument("--build-result", default="")

@@ -992,6 +992,115 @@ def _human_report(plan: dict, discovery: dict, source: str) -> str:
     return "\n".join(out)
 
 
+_CLASS_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def load_smoke_suite(path: str) -> tuple:
+    """Read the curated smoke selection. Returns (unit_names, ui_names).
+
+    Fails closed on anything that is not a well-formed suite: the file must be
+    a JSON object declaring non-empty `unit` and `ui` lists of plain Swift class
+    names. Defaulting an absent key to an empty list would turn a malformed
+    edit into a silently empty hosted selection.
+    """
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    if not isinstance(data, dict):
+        raise ValueError("smoke suite must be a JSON object")
+    for key in ("unit", "ui"):
+        if key not in data:
+            raise ValueError("smoke suite must declare a {0!r} list".format(key))
+        names = data[key]
+        if not isinstance(names, list) or not names:
+            raise ValueError(
+                "smoke suite {0!r} must be a non-empty list".format(key))
+        for name in names:
+            if not isinstance(name, str) or not _CLASS_NAME_RE.match(name):
+                raise ValueError(
+                    "smoke suite {0!r} names an invalid class: {1!r}".format(
+                        key, name))
+    return list(data["unit"]), list(data["ui"])
+
+
+def cmd_smoke(args) -> int:
+    """Validate the curated smoke selection against the discovered inventory.
+
+    GitHub-hosted CI runs only these classes (docs/CI.md): the exhaustive and
+    timing-sensitive families belong to the Mac local gate. This subcommand is
+    what keeps that selection honest - a class that is renamed, deleted or moved
+    between targets fails the plan job instead of silently shrinking hosted
+    coverage, and the delegated counts are printed so the split is visible on
+    every run.
+    """
+    discovery = discover_test_classes(args.repo_root)
+    for w in discovery["warnings"]:
+        warn(w)
+    if discovery["errors"]:
+        for e in discovery["errors"]:
+            print(f"::error::{e}")
+        return 1
+
+    unit_inventory = {entry["name"] for entry in discovery["unit"]}
+    ui_inventory = {entry["name"] for entry in discovery["ui"]}
+    try:
+        unit, ui = load_smoke_suite(args.suite)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"::error::smoke suite unreadable: {exc}")
+        return 1
+
+    problems = []
+    # Validated per TARGET, never against the union of both: a class moved
+    # between ConduitTests/ and ConduitUITests/ would otherwise still validate
+    # while the smoke job filters it against the wrong bundle - which runs zero
+    # tests for it and silently shrinks hosted coverage.
+    for target, names, inventory in (("unit", unit, unit_inventory),
+                                     ("ui", ui, ui_inventory)):
+        seen = set()
+        for name in names:
+            if name in seen:
+                problems.append(f"smoke suite lists {name!r} twice in {target}")
+            seen.add(name)
+            if name not in inventory:
+                problems.append(
+                    f"smoke suite lists {name!r} in {target}, but it is not a "
+                    f"{target} test class")
+    for name in sorted(set(unit) & set(ui)):
+        problems.append(f"smoke suite lists {name!r} in both unit and ui")
+    # Report failures before the split: the delegated counts are only
+    # meaningful once every curated name has been validated.
+    for e in problems:
+        print(f"::error::{e}")
+    if problems:
+        print("smoke selection FAILED")
+        return 1
+
+    delegated_unit = len(discovery["unit"]) - len(unit)
+    delegated_ui = len(discovery["ui"]) - len(ui)
+    print(f"smoke selection: {len(unit)} unit + {len(ui)} UI classes")
+    print(f"delegated to the Mac local gate: {delegated_unit} unit + "
+          f"{delegated_ui} UI classes (exhaustive coverage, repeats and the "
+          f"timing-sensitive families)")
+
+    if args.out:
+        payload = {
+            "schema_version": 1,
+            "unit": unit,
+            "ui": ui,
+            "unit_csv": ",".join(unit),
+            "ui_csv": ",".join(ui),
+            "inventory_unit": len(discovery["unit"]),
+            "inventory_ui": len(discovery["ui"]),
+            "delegated_unit": delegated_unit,
+            "delegated_ui": delegated_ui,
+        }
+        os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+        with open(args.out, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        print(f"smoke selection written: {args.out}")
+    print("smoke selection OK")
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -1033,7 +1142,15 @@ def main(argv=None) -> int:
     p.add_argument("--xctestrun", required=True)
     p.add_argument("--workspace-root", required=True)
 
+    p = sub.add_parser("smoke")
+    p.add_argument("--repo-root", default=".")
+    p.add_argument("--suite", default=os.path.join("scripts", "smoke-suite.json"))
+    p.add_argument("--out", default="")
+
     a = parser.parse_args(argv)
+
+    if a.cmd == "smoke":
+        return cmd_smoke(a)
 
     if a.cmd == "audit-xctestrun":
         violations, checked = audit_xctestrun(a.xctestrun, a.workspace_root)
