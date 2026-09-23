@@ -33,11 +33,17 @@ PREPARE_STEP = "Prepare the pinned simulator destination"
 # Records every invocation, and can be told to fail from the Nth one on.
 STUB = """#!/usr/bin/env bash
 printf 'INVOKE|%s\\n' "$*" >> "$STUB_LOG"
-if [ -n "${STUB_FAIL_AT:-}" ]; then
-  count=$(grep -c '^INVOKE|' "$STUB_LOG" 2>/dev/null || printf '1')
-  if [ "$count" -ge "$STUB_FAIL_AT" ]; then
-    exit 1
-  fi
+count=$(grep -c '^INVOKE|' "$STUB_LOG" 2>/dev/null || printf '1')
+fail=0
+if [ -n "${STUB_FAIL_AT:-}" ] && [ "$count" -ge "$STUB_FAIL_AT" ]; then
+  fail=1
+fi
+if [ -n "${STUB_FAIL_FIRST_N:-}" ] && [ "$count" -le "$STUB_FAIL_FIRST_N" ]; then
+  fail=1
+fi
+if [ "$fail" = "1" ]; then
+  printf "Test Suite '%s' failed\\n" "${STUB_FLAKE_CLASS:-StubFailingTests}"
+  exit 1
 fi
 exit 0
 """
@@ -111,10 +117,9 @@ class SmokeJobRunnerTests(unittest.TestCase):
         env = dict(os.environ)
         # Nothing from the developer's shell may leak into the step: the
         # "unset" case must actually be unset.
-        env.pop("SMOKE_BATCH_SIZE", None)
-        env.pop("STUB_FAIL_AT", None)
-        env.pop("UNIT_CLASSES", None)
-        env.pop("UI_CLASSES", None)
+        for name in ("SMOKE_BATCH_SIZE", "STUB_FAIL_AT", "STUB_FAIL_FIRST_N",
+                     "STUB_FLAKE_CLASS", "UNIT_CLASSES", "UI_CLASSES"):
+            env.pop(name, None)
         env["PATH"] = self.bin + os.pathsep + env.get("PATH", "")
         env["STUB_LOG"] = self.log
         env["XCRUN_FILE"] = os.path.join(self.tmp, "fake.xctestrun")
@@ -167,11 +172,12 @@ class SmokeJobRunnerTests(unittest.TestCase):
 
     def test_unit_smoke_defaults_the_batch_size_when_unset(self):
         # The workflow always sets SMOKE_BATCH_SIZE; the default exists so a
-        # future edit that forgets it degrades to batching, not to `set -u`.
+        # future edit that forgets it degrades to the measured-safe batch size,
+        # not to `set -u` and not to an unbounded invocation.
         proc = self._run_step(UNIT_STEP, UNIT_CLASSES=self._classes("Unit", 32))
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertEqual(len(self._invocations()), 4)
-        self.assertIn("batches of at most 8", proc.stdout)
+        self.assertEqual(len(self._invocations()), 5, "32 classes / 7 per batch")
+        self.assertIn("batches of at most 7", proc.stdout)
 
     def test_unit_smoke_keeps_the_remainder_batch(self):
         proc = self._run_step(UNIT_STEP, UNIT_CLASSES=self._classes("Unit", 20),
@@ -228,6 +234,30 @@ class SmokeJobRunnerTests(unittest.TestCase):
         invocations = self._invocations()
         self.assertEqual(len(invocations), 1, invocations)
         self.assertEqual(invocations[0].count("-only-testing:ConduitUITests/"), 2)
+
+    def test_ui_smoke_absorbs_one_runner_flake_and_reports_it(self):
+        # The lane runner's rule for a failing UI batch: one targeted retry,
+        # with the class that failed reported as a runner-level flake.
+        proc = self._run_step(UI_STEP,
+                              UI_CLASSES="ConnectionSetupUITests,ProfilePickerUITests",
+                              STUB_FAIL_FIRST_N=1,
+                              STUB_FLAKE_CLASS="ConnectionSetupUITests")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(len(self._invocations()), 2, "exactly one retry")
+        self.assertIn("runner-level flake absorbed", proc.stdout)
+        self.assertIn("ConnectionSetupUITests", proc.stdout)
+
+    def test_ui_smoke_fails_when_the_targeted_retry_also_fails(self):
+        proc = self._run_step(UI_STEP,
+                              UI_CLASSES="ConnectionSetupUITests,ProfilePickerUITests",
+                              STUB_FAIL_FIRST_N=99,
+                              STUB_FLAKE_CLASS="ConnectionSetupUITests")
+        self.assertNotEqual(proc.returncode, 0,
+                            "a failure that survives the retry must fail the job")
+        self.assertEqual(len(self._invocations()), 2,
+                         "one retry only - never rerun-until-green")
+        self.assertIn("failed again on the targeted retry",
+                      proc.stdout + proc.stderr)
 
     def test_ui_smoke_refuses_an_empty_selection(self):
         proc = self._run_step(UI_STEP, UI_CLASSES="")
@@ -296,6 +326,14 @@ class SmokeJobRunnerTests(unittest.TestCase):
         self.assertEqual(selection["unit_csv"].split(","), selection["unit"])
         self.assertEqual(selection["ui_csv"].split(","), selection["ui"])
         self.assertEqual(selection["unit_csv"].count(",") + 1, len(selection["unit"]))
+        # Size is policy, not taste (docs/CI.md): seven unit classes is exactly
+        # one 7-class invocation, and one test-host launch costs ~12 minutes on a
+        # hosted runner, so an eighth class silently buys a whole invocation.
+        self.assertEqual(
+            len(selection["unit"]), 7,
+            "the hosted selection is one class per risk area - growing it adds a "
+            "whole xcodebuild invocation, not just one class")
+        self.assertEqual(len(selection["ui"]), 2)
 
 
 if __name__ == "__main__":

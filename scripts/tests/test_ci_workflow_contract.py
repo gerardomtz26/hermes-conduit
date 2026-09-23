@@ -80,9 +80,11 @@ class WorkflowContractTests(unittest.TestCase):
                       "test-without-building needs the uploaded products")
         self.assertIn('UNIT_CLASSES: "${{ needs.plan.outputs.unit-csv }}"', unit)
         self.assertIn("-only-testing:ConduitTests/", unit)
-        # A genuine assertion must FAIL the run: no Xcode-native retry.
+        # A genuine assertion must FAIL the run: no Xcode-native retry, and no
+        # job-level retry either - the unit classes are deterministic.
         self.assertNotIn("-test-iterations", unit)
         self.assertNotIn("-retry-tests-on-failure", unit)
+        self.assertNotIn("targeted retry", unit)
 
     def test_ui_smoke_job_runs_the_curated_classes(self):
         ui = self._job_text("ui-smoke")
@@ -90,9 +92,13 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("name: build-products", ui)
         self.assertIn('UI_CLASSES: "${{ needs.plan.outputs.ui-csv }}"', ui)
         self.assertIn("-only-testing:ConduitUITests/", ui)
-        # Both jobs must fail on a genuine assertion rather than retry it.
+        # Both jobs must fail on a genuine assertion rather than retry it with
+        # Xcode's own flags; the UI job additionally carries the lane runner's
+        # single targeted retry, which reports the flake it absorbs.
         self.assertNotIn("-test-iterations", ui)
         self.assertNotIn("-retry-tests-on-failure", ui)
+        self.assertIn("one targeted retry", ui,
+                      "UI smoke absorbs exactly one runner-level flake, visibly")
 
     def test_smoke_jobs_fail_closed_on_an_empty_selection(self):
         # With no -only-testing filter, xcodebuild runs the WHOLE suite, so an
@@ -118,8 +124,9 @@ class WorkflowContractTests(unittest.TestCase):
             self.assertIn("wait_for_destination_device", text, job)
             self.assertIn("build_destination", text, job)
             self.assertIn("reset_and_boot_simulator", text, job)
-            self.assertIn("LOG_DIR", text,
-                          f"{job} must set ci-lib.sh's LOG_DIR before probing")
+            self.assertIn("LOG_DIR=", text,
+                          f"{job} must ASSIGN ci-lib.sh's LOG_DIR before probing")
+            self.assertIn("export LOG_DIR", text, f"{job} must export LOG_DIR")
             self.assertIn('-destination "$DESTINATION"', text, job)
             self.assertNotIn("platform=iOS Simulator,name=", text,
                              f"{job} must not hand xcodebuild an unpinned destination")

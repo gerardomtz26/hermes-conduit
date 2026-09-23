@@ -68,9 +68,12 @@ the lane runner do, through the shared `scripts/ci-lib.sh`: wait for
 CoreSimulator to settle its device pairs on a fresh runner, resolve
 `SIMULATOR_NAME` to a UDID (`-destination platform=iOS Simulator,id=…,arch=arm64`)
 instead of letting `xcodebuild` choose the first of several same-named devices,
-then boot that device before the session starts. Every probe and the boot carry
-their own deadlines and the boot is best-effort, so a device hiccup degrades to
-the name-based destination instead of failing the job.
+then boot that device before the session starts. The settle wait is fatal by
+design — it fails fast with the device inventory rather than letting `xcodebuild`
+report a misleading destination error — while the boot is best-effort with its
+own deadline: a boot hiccup leaves the destination UDID-pinned and lets
+`xcodebuild` boot the device itself. Only an unresolvable UDID falls back to the
+name-based destination.
 
 ### The smoke selection
 
@@ -126,7 +129,16 @@ they caught. `SmokeSelectionTests` asserts they never re-enter the hosted set.
   count unpredictable.
 * **No Xcode-native flake retry** (`-test-iterations` / `-retry-tests-on-failure`).
   A genuine assertion failure must fail the run — never be re-run until it
-  agrees. (Contract-tested in `WorkflowContractTests`.)
+  agrees. (Contract-tested in `WorkflowContractTests`.) The one exception is the
+  UI smoke job, which applies the lane runner's own rule for a failing UI batch:
+  **one** targeted retry of the curated classes, with the class that failed
+  reported as a runner-level flake, and a class that fails twice failing the job.
+  UI tests are the only part of the hosted gate with a measured flake rate on
+  shared runners (over three runs of the introducing PR, two different UI tests
+  failed — a photo picker that did not appear inside its 15 s wait, a wizard step
+  that never advanced — and one run was green with nothing changed in between),
+  and the unit classes are deterministic, so the retry exists there and nowhere
+  else. A red UI run therefore costs one extra invocation (~10 minutes).
 * **No timing history.** The EWMA cache + `update-timing-history.py` and the
   main-only job that wrote it are gone; the planner's `--history` input still
   exists for the Mac gate but nothing produces it any more.

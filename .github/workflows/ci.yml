@@ -249,10 +249,14 @@ jobs:
             echo "::error::unit smoke selection is empty - refusing to run unfiltered"
             exit 1
           fi
+          if [ -z "${DESTINATION:-}" ]; then
+            echo "::error::DESTINATION is empty - the prepare step did not pin a simulator destination"
+            exit 1
+          fi
           IFS=',' read -r -a CLASSES <<< "$UNIT_CLASSES"
           # Default only when UNSET: an explicitly empty value is malformed, not
           # a request for the default.
-          SMOKE_BATCH_SIZE="${SMOKE_BATCH_SIZE-8}"
+          SMOKE_BATCH_SIZE="${SMOKE_BATCH_SIZE-7}"
           case "$SMOKE_BATCH_SIZE" in
             ''|*[!0-9]*)
               echo "::error::SMOKE_BATCH_SIZE must be a positive integer, got '$SMOKE_BATCH_SIZE'"
@@ -355,8 +359,21 @@ jobs:
       - name: Run the curated UI smoke suite
         # Basic launch/navigation smoke only: the full UI suite is certified by
         # the Mac local gate.
+        #
+        # UI classes are the one part of this gate with a measured flake rate on
+        # shared runners: over three runs of this PR, two different UI tests
+        # failed while the rest of the gate was green (a system photo picker that
+        # did not appear inside its 15s wait; a wizard step that never advanced),
+        # and one run had them green with no change. So the UI smoke job applies
+        # the lane runner's own rule for a failing UI batch: ONE targeted retry
+        # of the curated classes, with the class that failed reported as a
+        # runner-level flake. A class that fails twice fails this job - this is
+        # deliberately not rerun-until-green, and no Xcode-native retry flags are
+        # used anywhere. The unit smoke job gets no such retry: its classes are
+        # deterministic.
         env:
           UI_CLASSES: "${{ needs.plan.outputs.ui-csv }}"
+          UI_SMOKE_LOG: ci-lane/ui-smoke.log
         run: |
           set -euo pipefail
           # Fail closed: an empty list would expand to no -only-testing filter,
@@ -366,17 +383,40 @@ jobs:
             echo "::error::UI smoke selection is empty - refusing to run unfiltered"
             exit 1
           fi
+          if [ -z "${DESTINATION:-}" ]; then
+            echo "::error::DESTINATION is empty - the prepare step did not pin a simulator destination"
+            exit 1
+          fi
           IFS=',' read -r -a CLASSES <<< "$UI_CLASSES"
-          ARGS=()
-          for cls in "${CLASSES[@]}"; do
-            ARGS+=("-only-testing:ConduitUITests/${cls}")
-          done
+          UI_SMOKE_LOG="${UI_SMOKE_LOG:-ci-lane/ui-smoke.log}"
+          mkdir -p "$(dirname "$UI_SMOKE_LOG")"
+
+          run_classes() {
+            local args=()
+            local cls
+            for cls in "$@"; do
+              args+=("-only-testing:ConduitUITests/${cls}")
+            done
+            xcodebuild test-without-building \
+              -xctestrun "$XCRUN_FILE" \
+              -destination "$DESTINATION" \
+              -parallel-testing-enabled NO \
+              "${args[@]}"
+          }
+
           echo "UI smoke: ${#CLASSES[@]} classes"
-          xcodebuild test-without-building \
-            -xctestrun "$XCRUN_FILE" \
-            -destination "$DESTINATION" \
-            -parallel-testing-enabled NO \
-            "${ARGS[@]}"
+          rc=0
+          run_classes "${CLASSES[@]}" 2>&1 | tee "$UI_SMOKE_LOG" || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            flaked=$(grep -oE "Test Suite '[A-Za-z0-9_]+' failed" "$UI_SMOKE_LOG" \
+              | sed -E "s/.*'([A-Za-z0-9_]+)'.*/\1/" | sort -u | tr '\n' ' ')
+            echo "::warning::UI smoke failed (${flaked:-no curated class named}); one targeted retry of the curated classes"
+            run_classes "${CLASSES[@]}" 2>&1 | tee -a "$UI_SMOKE_LOG" || {
+              echo "::error::the UI smoke classes failed again on the targeted retry - not a runner flake"
+              exit 1
+            }
+            echo "::warning::runner-level flake absorbed: ${flaked:-a curated class} failed, then the targeted retry passed"
+          fi
 
       - name: Dump simulator state (failure diagnostics)
         if: failure()
