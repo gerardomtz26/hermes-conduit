@@ -38,7 +38,7 @@ SHA). Neither substitutes for the other.
         +--------+--------+
         v                 v
    unit-smoke         ui-smoke        (unit: sequential batches of at most
-   (14 curated        (2 curated       $SMOKE_BATCH_SIZE; UI: ONE invocation;
+   (7 curated         (2 curated       $SMOKE_BATCH_SIZE; UI: ONE invocation;
     unit classes)      UI classes)     one -only-testing filter per class;
         |                 |            no native flake retry)
         |                 |
@@ -89,24 +89,28 @@ deterministic signal:
 
 | Risk area | Smoke coverage |
 |---|---|
-| app/session lifecycle | `AppStateForegroundLifecycleTests`, `AppStateChatResumeTests` |
-| profile/store/session restoration | `ProfileDiscoveryTests`, `SessionIdentityContractTests` |
-| Bot Mode isolation | `BotModeTests`, `DashboardSessionIsolationTests` |
-| connection/protocol | `HermesClientTests`, `StreamEventParserTests`, `ConnectionFailureTests` |
-| settings/persistence | `ComposerDraftStoreTests`, `WakeConfigurationStoreTests` |
-| transcript/Markdown correctness | `MarkdownLargeDocumentTests`, `CompactResumeTranscriptTests` |
+| app/session lifecycle | `AppStateForegroundLifecycleTests` |
+| profile/store/session restoration | `ProfileDiscoveryTests` |
+| Bot Mode isolation | `BotModeTests` |
+| connection/protocol | `HermesClientTests` |
+| settings/persistence | `ComposerDraftStoreTests` |
+| transcript/Markdown correctness | `MarkdownLargeDocumentTests` |
 | notifications/push routing | `NotificationDashboardOwnershipTests` |
 | basic UI launch/navigation | `ConnectionSetupUITests`, `ProfilePickerUITests` |
 
-The set is deliberately one or two classes per area, not one per concern: the
-2026-09-23 main run measured the whole 137-class unit suite at 13.9 minutes of
-test time on a hosted runner, so extra classes buy almost no coverage per
-minute — what a smoke job costs is the ~6 min of xcodebuild + simulator +
-test-host launch per batch, and the stall-avoidance rule caps a batch at 7
-classes. Fourteen classes is two batches, i.e. a ~12-minute smoke job.
+**One class per area, and that is the design.** Measured on the 2026-09-23 runs:
+the whole 137-class unit suite is 13.9 minutes of *test* time on a hosted
+runner, but one `test-without-building` invocation costs ~12 minutes of
+xcodebuild + simulator + test-host overhead on top of ~5 minutes of device
+settle/boot. Coverage per minute is therefore flat in class count and steep in
+invocation count — and the stall-avoidance rule caps a batch at 7 classes
+anyway. Seven classes is one invocation, i.e. a ~17-minute smoke job. A second
+cohort doubles the hosted cost without doubling the signal: the Mac gate is the
+exhaustive authority, and this gate only has to answer "is anything obviously
+broken?".
 
 **Delegated to the Mac exhaustive gate** (deliberately NOT in the hosted set):
-the complete remaining inventory (123 unit + 5 UI classes when this shape
+the complete remaining inventory (130 unit + 5 UI classes when this shape
 landed) and in particular the timing/performance/dormancy families —
 `TranscriptPerformanceFixtureTests`, `TranscriptPerfLedgerContractTests`,
 `LongContextScalingFixtureTests`, `SettledMessageIsolationTests`,
@@ -136,14 +140,21 @@ Measured on the last full v2 run of main (18 jobs): **129.2 macOS minutes** per
 run, wall clock ~20–21 minutes, longest job 18.8 min. The v3 shape is 6 jobs:
 `plan` + `self-test` + `ci-gate` on Linux (the same work as before), and three
 macOS jobs — the unchanged compile-everything `build`, plus one `unit-smoke`
-and one `ui-smoke` job running the curated slice. First v3 run of the merged
-shape (2026-09-23, run 35853896530): plan 1m42s, self-test 9m32s, build 2m43s,
-UI smoke 14m35s — with the unit smoke being trimmed to two 7-class batches
-after that run measured the 32-class version at ~25 minutes of wall clock for
-2.9 minutes of tests. Every run's own wall clock and per-job durations are in
-its Actions run page. macOS minutes are the smaller part of the win: the point
-is that the hosted verdict no longer depends on shared runners re-litigating
-timing-sensitive suites.
+and one `ui-smoke` job.
+
+Measured on the v3 shape itself (runs on 2026-09-23, PR #203): plan 1m44s,
+self-test 9m52s, build 2m44s, `ui-smoke` **15m03s green** (5m of device
+settle/boot + one invocation), `unit-smoke` ~17m once the curated set was sized
+to one invocation. That is roughly **35 macOS minutes** against 129.2 — a ~3.7×
+cut — plus a much smaller flake surface: no lane matrix, no timing families, no
+retries. Two overshoots on the way there are recorded in the PR: a 32-class
+selection that spent ~25 minutes of wall clock on 2.9 minutes of tests, and a
+14-class one that still exceeded the job ceiling because it paid for two
+invocations.
+
+macOS minutes are the smaller part of the win: the point is that the hosted
+verdict no longer depends on shared runners re-litigating timing-sensitive
+suites.
 
 ## Test discovery
 
@@ -207,8 +218,8 @@ the `xcodebuild`/XCTest/testhost process was fresh between them). Unit
 lanes therefore execute their planner-assigned classes as **sequential
 small batches**, and the hosted smoke job applies the same rule to its curated
 classes (`SMOKE_BATCH_SIZE`, fixed at the measured-safe 7 instead of
-planner-priced — the hosted selection is deliberately small enough to fit two
-batches):
+planner-priced — the hosted selection is deliberately one class per risk area,
+i.e. exactly one batch):
 
 * `plan-tests.py` chunks each lane's class list, **in its stored (LPT)
   order**, into batches of at most
