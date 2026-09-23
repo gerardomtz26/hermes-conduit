@@ -1,82 +1,128 @@
-# CI v2 — timing-aware dynamic test lanes
+# CI — a hosted smoke gate and a Mac exhaustive gate
 
-This document describes the Conduit CI architecture that replaced the static
-`unit-a…unit-d` shard system (see PR history for the migration). The pipeline
-still runs the complete XCTest suite on every PR; nothing is skipped,
-quarantined, or moved to a nightly gate.
+Conduit is tested by two gates with deliberately different jobs. **The split is
+the design**: GitHub-hosted CI is a clean-machine broad safety net that must
+stay cheap enough to run on every PR (including public and fork PRs), and the
+Mac local gate is the exhaustive correctness gate a release is certified with.
+Nothing is skipped overall — every test class runs somewhere, and the class
+inventory is validated on both paths.
 
 ## Two gates, two jobs
 
-Conduit is tested by two independent gates, and they answer different
-questions:
-
 | Gate | Where | Scope | What a green result means |
 |---|---|---|---|
-| **GitHub-hosted CI** (this document) | GitHub runners, public/fork PRs included | The complete suite, sharded into dynamic lanes | The commit compiles and the suite passes on a clean machine |
-| **Local exhaustive gate** (`scripts/local-ci-gate.sh`) | Our own Mac, over SSH, outside GitHub's runner system | The complete suite, plus an explicit repeat policy, plus the cheap static checks | A **trusted** commit is correct: see [Local exhaustive gate](#local-exhaustive-gate-mac-outside-github) |
+| **GitHub-hosted smoke gate** (this document, `.github/workflows/ci.yml`) | GitHub runners, public/fork PRs included | Everything compiles; cheap Linux validation; a **curated representative slice** of unit + UI classes | The commit builds on a clean machine and nothing obviously broke |
+| **Local exhaustive gate** (`scripts/local-ci-gate.sh`) | Our own Mac, over SSH, outside GitHub's runner system | The **complete** unit and UI suites, an explicit repeat policy for the timing families, the cheap static checks, bounded recovery | A **trusted** commit is correct: see [Local exhaustive gate](#local-exhaustive-gate-mac-outside-github) |
 
 **A local gate result is valid only for the exact commit SHA it reports.**
 Any other SHA — a branch name that moved, a later commit, "essentially the
-same" tree — invalidates the result. The gate is the authority that a release
-head is certified with; the hosted pipeline stays as it is today (its slim
-redesign is a separate, later change), and remains what guards arbitrary
-public and fork PRs.
+same" tree — invalidates the result. A release head needs BOTH: the hosted
+smoke gate (green on the PR) and the Mac exhaustive gate (green on that exact
+SHA). Neither substitutes for the other.
 
-## Architecture
+## Hosted gate architecture
 
 ```
-                 test inventory (source scan)
-                          |
-  timing history (Actions cache) -> plan-tests.py
-             (LPT timing balance, watchdog math)
-             |                         |
-   plan.json / matrices       CI tooling self-test (ubuntu;
-   (unit + UI)                planner tests, lane-runner state
-             |                machine, destination lookup - runs
-             |                concurrently, never delays the build)
+        source scan (inventory)                     CI tooling self-test (ubuntu)
+                 |                                   planner, lane-runner state
+   scripts/smoke-suite.json                          machine, destination lookup,
+   (curated selection, validated                    gate + smoke contracts - runs
+    against the inventory)                          concurrently, never delays
+                 |                                   the build)
+   plan-tests.py smoke -> unit-csv / ui-csv
+                 |
       build-for-testing (once, workspace-anchored DerivedData)
-             |
+                 |
       .xctestrun + products artifact
-             |
-   +---------+---------+---------+
-   v         v         v         v
- unit-1    unit-2    ...     ui-1   ui-2   ui-3 ...
- (test-without-building from the SHARED products;
-  measured watchdogs. Units execute each lane as
-  SEQUENTIAL small xcodebuild batches (<= 7 classes
-  per invocation, fresh xcodebuild process per batch,
-  same runner/Simulator; native flake retry inside
-  every batch; one batch-level retry for a watchdog
-  stall or infrastructure wedge). UI runs each shard
-  as ONE batched invocation with method-precise retry
-  and a per-class diagnosis fallback)
-   |         |         |         |
-   +---------+----+----+---------+
-                  v
-          report job -> GitHub Step Summary
-                  v
-        timing-history-update (main only, EWMA)
+                 |
+        +--------+--------+
+        v                 v
+   unit-smoke         ui-smoke        (ONE test-without-building invocation
+   (32 curated        (2 curated       each, one -only-testing filter per
+    unit classes)      UI classes)     curated class; no native flake retry)
+        |                 |
+        +--------+--------+
+                 v
+          ci-gate  ->  "CI Gate" (the single required status check)
 ```
 
 ### Jobs
 
 | Job | Runner | Purpose |
 |---|---|---|
-| `plan` | ubuntu | Discovery validation + lane generation (unit AND UI matrices). Cheap guard before any macOS minutes are spent. |
-| `self-test` | ubuntu | CI-tooling regression suites (planner tests, lane-runner state machine, destination lookup, gate/timing contracts) - concurrent with `build`, so the minutes-long bash state-machine suite never delays macOS work nor risks the plan job's timeout. |
-| `build` | macos-26 | `build-for-testing` exactly once; `.xctestrun` portability audit; uploads products. |
-| `unit` (matrix) | macos-26 | One dynamically planned lane per matrix entry, executed as sequential small xcodebuild batches (see below). |
-| `ui` (matrix) | macos-26 | Dynamically planned UI lane; runs each shard as ONE batched invocation (see below). |
-| `report` | ubuntu | Aggregates lane results into the CI Test Report step summary. |
-| `timing-history-update` | ubuntu | Main-only: merges fresh timings into the history cache (EWMA). |
+| `plan` | ubuntu | Inventory/planner validation (`plan-tests.py validate`), localization coverage, CI-tooling tests, and the **smoke selection** (`plan-tests.py smoke`). Cheap guard before any macOS minutes are spent. |
+| `self-test` | ubuntu | CI-tooling regression suites (planner tests, lane-runner state machine, destination lookup, gate/contract tests) — concurrent with `build`, so the minutes-long bash state-machine suite never delays macOS work nor risks the plan job's timeout. |
+| `build` | macos-26 | `build-for-testing` exactly once; `.xctestrun` portability audit; uploads products. This is the compile gate for the whole app and every test target. |
+| `unit-smoke` | macos-26 | The curated unit classes in ONE `test-without-building` invocation. |
+| `ui-smoke` | macos-26 | The curated UI classes (launch/navigation smoke) in ONE invocation. |
+| `ci-gate` | ubuntu | The single stable branch-protection verdict (`CI Gate`), aggregating the jobs above via `scripts/ci-gate.py`. |
 
-The self-test job's timeout hierarchy is load-bearing: each synthetic hang
-in the state-machine suite is watchdog-killed within a 1-6 s test budget <
-the suite's Python wrapper subprocess cap (480 s; the suite measures
-~3.5-4 min on macOS) < the job's own 12-minute ceiling - GitHub must never
-be the first layer to kill a regression suite.
+The self-test job's timeout hierarchy is load-bearing: each synthetic hang in
+the state-machine suite is watchdog-killed within a 1–6 s test budget < the
+suite's Python wrapper subprocess cap (480 s) < the job's own 12-minute ceiling
+— GitHub must never be the first layer to kill a regression suite.
+
+### The smoke selection
+
+`scripts/smoke-suite.json` is the checked-in selection, and
+`plan-tests.py smoke` validates it against the discovered inventory on every
+run:
+
+* a class that is **renamed, deleted or moved between targets fails the plan
+  job** — hosted coverage can never silently shrink;
+* duplicates fail;
+* the run summary states the split (selected vs delegated) so it is visible
+  which coverage came from where.
+
+Selection policy — one or a few classes per risk area, chosen for fast
+deterministic signal:
+
+| Risk area | Smoke coverage |
+|---|---|
+| app/session lifecycle | `AppStateForegroundLifecycleTests`, `AppStateChatResumeTests`, `AppStateDecisionFenceTests`, the `ChatResume*` family, `SessionActivityTimestampTests` |
+| profile/store/session restoration | `ProfileDiscoveryTests`, `SessionIdentityContractTests`, `SessionPresentationCacheTests`, `SessionYoloPersistenceTests` |
+| Bot Mode isolation | `BotModeTests`, `DashboardSessionIsolationTests` |
+| connection/protocol | `HermesClientTests`, `StreamEventParserTests`, `BufferedEventDeduplicationTests`, `ConnectionFailureTests`, `NativeAuthClientTests`, `CloudflareAccessTests`, `ConnectionURLPolicyOriginTests`, `AuthWebViewNavigationPolicyTests` |
+| settings/persistence | `ComposerDraftStoreTests`, `SessionYoloStoreTests`, `WakeConfigurationStoreTests`, `ModelPickerTests` |
+| transcript/Markdown correctness | `MarkdownTableLayoutTests`, `MarkdownRichContentPolicyTests`, `MarkdownLargeDocumentTests`, `MarkdownReferenceLinkTests`, `CompactResumeTranscriptTests`, `ChatViewportControllerTests` |
+| notifications/push routing | `NotificationDashboardOwnershipTests` |
+| basic UI launch/navigation | `ConnectionSetupUITests`, `ProfilePickerUITests` |
+
+**Delegated to the Mac exhaustive gate** (deliberately NOT in the hosted set):
+the complete remaining inventory (105 unit + 5 UI classes today) and in
+particular the timing/performance/dormancy families —
+`TranscriptPerformanceFixtureTests`, `TranscriptPerfLedgerContractTests`,
+`LongContextScalingFixtureTests`, `SettledMessageIsolationTests`,
+`MarkdownRichContentHostedTests`. Those suites exist to measure scheduling and
+rendering behaviour and are only meaningful with repeats on a machine we
+control; running them on shared runners produced flakes that cost more than
+they caught. `SmokeSelectionTests` asserts they never re-enter the hosted set.
+
+### What the hosted gate deliberately does NOT do
+
+* **No dynamic lane fanout.** The smoke suite is one invocation per target;
+  lane balancing buys nothing at this size and made job count unpredictable.
+* **No Xcode-native flake retry** (`-test-iterations` / `-retry-tests-on-failure`).
+  A genuine assertion failure must fail the run — never be re-run until it
+  agrees. (Contract-tested in `WorkflowContractTests`.)
+* **No timing history.** The EWMA cache + `update-timing-history.py` and the
+  main-only job that wrote it are gone; the planner's `--history` input still
+  exists for the Mac gate but nothing produces it any more.
+* **No watchdogs or recovery plumbing.** Recovery policy lives in the Mac gate
+  (`ci-test-lane.sh` + `local-ci-gate.sh`), where the machine is ours. A wedged
+  hosted runner fails the job and is re-run by a human, deliberately.
+
+### Cost
+
+Measured on the last full v2 run of main (18 jobs): **129 macOS minutes** per
+run, wall clock ~20–21 minutes, one lane at 18.8 min. The v3 shape is 6 jobs
+and two macOS test jobs of a few minutes each (plus the unchanged
+build-once job), with the Linux jobs unchanged — roughly a **5× cut in macOS
+minutes** and a much shorter tail. The exact numbers for the first v3 run are
+recorded on the PR that introduced it.
 
 ## Test discovery
+
 
 `scripts/plan-tests.py` discovers XCTestCase classes by scanning
 `ConduitTests/` and `ConduitUITests/` sources:
@@ -92,6 +138,15 @@ be the first layer to kill a regression suite.
   `ConduitUITests/`), never from the class name.
 * Duplicates, and `*Tests`-named classes that do not resolve to
   `XCTestCase`, are hard errors. A new test class can never silently miss CI.
+
+## Lane runner (the LOCAL exhaustive gate's executor)
+
+> Everything from here to the [Local exhaustive gate](#local-exhaustive-gate-mac-outside-github)
+> section describes `scripts/ci-test-lane.sh`, the planner's lane/batch
+> layout and the timing extractor. The **hosted** gate no longer fans
+> out into lanes; these mechanisms are what the Mac exhaustive gate
+> drives for a trusted head, and they stay documented here because they
+> are still the contract CI tooling is tested against.
 
 ## Dynamic lanes
 
@@ -408,24 +463,25 @@ lanes and price batch watchdogs from real runtimes.
 The `CI Gate` job is the single stable required status check for branch
 protection. It passes only when:
 
-* `plan`, `build`, `self-test` and every dynamic `unit` lane succeed, and
-* every dynamic `ui` lane succeeds (or is skipped entirely because the repo
-  contains no UI tests).
+* `plan`, `build`, `self-test` and `unit-smoke` succeed, and
+* `ui-smoke` succeeds (or is skipped because the curated selection contains
+  no UI classes).
 
-The number of dynamic unit AND UI lanes can change between runs, so lane
-jobs must never be pinned individually. Configure repository branch
-protection to require **CI Gate**, replacing the obsolete **Build & Test**
-check from the previous architecture. The `Report` job is best-effort and
-must not be used as a required check.
+Branch protection must require **CI Gate** (and nothing else from this
+workflow): the smoke jobs are implementation detail, and any job that can be
+renamed or split must never be pinned individually. The verdict is produced by
+`scripts/ci-gate.py`, whose `--help`-visible policy is contract-tested.
 
-Every run ends with a **CI Test Report** step summary: build duration,
-per-lane predicted vs actual runtimes (unit and UI), retries/flake warnings
-(native-test flakes, runner-level class retries, and infrastructure-wedge
-recoveries - each labeled for what it is), hang results with the identified
-class, slowest classes, predicted and actual lane imbalance, and overall
-wall clock. On failure it names the failing test, the lane, whether a
-simulator reset/erase occurred, whether the targeted retry passed, and any
-classes left `not_diagnosed` after a confirmed hang.
+The gate's own docstring records what it is not: the hosted verdict is the
+smoke gate's, and a release additionally needs the Mac local exhaustive gate on
+the exact head — that result is never produced by, and cannot be substituted
+by, this job.
+
+Each run ends with a smoke-selection summary (selected classes per target and
+the count delegated to the Mac gate) so the coverage split is visible on the
+run page. When the smoke gate fails, the failing job's log names the class and
+method; there is no retry layer that could turn a genuine assertion into a
+green run.
 
 ## Local exhaustive gate (Mac, outside GitHub)
 
@@ -696,20 +752,25 @@ warning printed to stderr.
 
 ## Adding a test
 
-Just add it. The planner discovers it on the next run, gives it the default
-estimate (or its real history entry after the first main run), and balances
-it into a lane. No lane-assignment files to maintain. To check locally:
+Just add it. The Mac exhaustive gate discovers it on the next run and balances
+it into a lane automatically — no lane-assignment files to maintain:
 
 ```
 python3 scripts/plan-tests.py validate
 python3 -m unittest discover -s scripts/tests
 ```
 
-New test classes need no gate changes either: the local gate asks the same
-planner for the class inventory, so a new class joins the exhaustive unit or
-UI lane automatically. A class added to `--repeat-classes` (or to the
-default set) without existing in the suite fails the gate, so the repeat
-policy cannot silently decay.
+**Hosted smoke coverage is a decision, not a default.** A new class runs on
+GitHub only if it is listed in `scripts/smoke-suite.json`; the smoke gate does
+not grow with the suite, which is what keeps it cheap (see
+[The smoke selection](#the-smoke-selection)). Add a class to that file when it
+covers a risk area the smoke set does not already cover, keeping one or a few
+per area. A name in the file that no longer exists fails the plan job, so the
+selection cannot silently decay; the timing/performance/dormancy families must
+stay out (a contract test enforces that).
+
+The same fail-closed rule protects the Mac gate: a class in `--repeat-classes`
+that does not exist fails the gate rather than quietly repeating nothing.
 
 ## Local run directories
 

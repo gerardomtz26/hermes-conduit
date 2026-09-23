@@ -1,11 +1,19 @@
-"""Contract tests: the workflow must invoke the tooling CLIs correctly.
+"""Contract tests: the hosted workflow must invoke the tooling CLIs correctly.
 
 These tests pin the workflow/script interface so it cannot silently diverge
 again (e.g. passing observation files positionally when the script requires
 --observations).
+
+CI v3 shape (docs/CI.md): GitHub-hosted CI is a broad SMOKE gate - it compiles
+everything, runs the cheap Linux validation, and runs the curated smoke
+selection from scripts/smoke-suite.json (validated against the discovered
+inventory). The exhaustive suites, the timing/performance/dormancy families and
+all repeat/recovery policy belong to the Mac local gate
+(scripts/local-ci-gate.sh), so the workflow must contain NO lane matrix, NO
+timing-history job and NO native flake retry that would re-run a genuine
+assertion until it agrees.
 """
 
-import io
 import json
 import os
 import subprocess
@@ -17,6 +25,7 @@ from _util import SCRIPTS_DIR
 
 REPO_ROOT = os.path.dirname(SCRIPTS_DIR)
 WORKFLOW = os.path.join(REPO_ROOT, ".github", "workflows", "ci.yml")
+SMOKE_SUITE = os.path.join(SCRIPTS_DIR, "smoke-suite.json")
 
 
 class WorkflowContractTests(unittest.TestCase):
@@ -27,17 +36,6 @@ class WorkflowContractTests(unittest.TestCase):
     def _workflow_text(self):
         with open(WORKFLOW, encoding="utf-8") as fh:
             return fh.read()
-
-    def test_timing_update_uses_observations_flag(self):
-        text = self._workflow_text()
-        self.assertIn("update-timing-history.py", text)
-        # The invocation must pass observations via --observations, not
-        # positionally (positional args are rejected by argparse).
-        self.assertIn("--observations", text)
-
-    def test_timing_update_guards_missing_plan(self):
-        text = self._workflow_text()
-        self.assertIn("plan artifact missing", text)
 
     def test_ci_gate_job_present_and_required_shape(self):
         text = self._workflow_text()
@@ -62,50 +60,49 @@ class WorkflowContractTests(unittest.TestCase):
             out.append(line)
         return "\n".join(out)
 
-    def test_unit_job_is_a_dynamic_matrix_with_sequential_batches(self):
-        text = self._workflow_text()
-        unit = self._job_text("unit")
-        # Matrix fanout comes from the planner, never a hard-coded class list,
-        # and one stalled lane must not cancel the others.
-        self.assertIn("matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}", unit)
-        self.assertIn("fail-fast: false", unit)
-        self.assertIn('needs: [plan, build]', unit,
-                      "Unit lanes must consume the SHARED build products")
-        # The planner-owned batch layout + per-batch watchdog table must be
-        # handed to the runner verbatim (never template-interpolated into
-        # bash code).
-        self.assertIn("--kind unit", unit)
-        self.assertIn("--batches-json", unit)
-        self.assertIn('LANE_BATCHES: "${{ matrix.batches }}"', unit)
-        self.assertIn('echo "matrix=', text,
-                      "the plan job must emit the unit matrix the job consumes")
+    # --- the smoke selection is the workflow's only test-to-run mapping -----
 
-    def test_ui_job_is_a_dynamic_matrix_with_batched_lane_runner(self):
+    def test_plan_job_selects_the_smoke_suite(self):
+        plan = self._job_text("plan")
+        self.assertIn("plan-tests.py smoke", plan,
+                      "the plan job owns the smoke selection")
+        self.assertIn("--suite scripts/smoke-suite.json", plan)
+        self.assertIn("unit-csv", plan)
+        self.assertIn("ui-csv", plan)
+        self.assertIn("smoke-summary.py", plan,
+                      "the run summary must state the hosted/delegated split")
+
+    def test_unit_smoke_job_runs_the_curated_classes(self):
+        unit = self._job_text("unit-smoke")
+        self.assertIn("needs: [plan, build]", unit,
+                      "the smoke job must consume the SHARED build products")
+        self.assertIn("name: build-products", unit,
+                      "test-without-building needs the uploaded products")
+        self.assertIn('UNIT_CLASSES: "${{ needs.plan.outputs.unit-csv }}"', unit)
+        self.assertIn("-only-testing:ConduitTests/", unit)
+        # A genuine assertion must FAIL the run: no Xcode-native retry.
+        self.assertNotIn("-test-iterations", unit)
+        self.assertNotIn("-retry-tests-on-failure", unit)
+
+    def test_ui_smoke_job_runs_the_curated_classes(self):
+        ui = self._job_text("ui-smoke")
+        self.assertIn("needs: [plan, build]", ui)
+        self.assertIn("name: build-products", ui)
+        self.assertIn('UI_CLASSES: "${{ needs.plan.outputs.ui-csv }}"', ui)
+        self.assertIn("-only-testing:ConduitUITests/", ui)
+        self.assertNotIn("-test-iterations", ui)
+
+    def test_no_lane_matrix_or_timing_history_machinery_remains(self):
         text = self._workflow_text()
-        ui = self._job_text("ui")
-        # Matrix fanout comes from the planner, never a hard-coded class list,
-        # and one hung shard must not cancel the others.
-        self.assertIn("matrix: ${{ fromJSON(needs.plan.outputs.ui-matrix) }}", ui)
-        self.assertIn("fail-fast: false", ui)
-        self.assertIn('needs: [plan, build]', ui,
-                      "UI shards must consume the SHARED build products")
-        # Batched lane runner invocation with the planned per-class watchdog
-        # table (the batch watchdog is its sum; the same table prices the
-        # per-class diagnosis fallback).
-        self.assertIn("--kind ui", ui)
-        self.assertIn("--class-timeouts", ui)
-        self.assertIn('--classes "$LANE_CLASSES"', ui)
-        self.assertNotIn(
-            "--iterations", ui,
-            "UI lanes must not use native multi-iteration retry; the runner "
-            "retries exactly the failed tests once")
-        # Watchdog policy has ONE source of truth: the planner's
-        # --class-timeouts table. No duplicated floor/multiplier env here.
-        self.assertNotIn("UI_CLASS_TIMEOUT_MIN_S", ui)
-        self.assertNotIn("UI_CLASS_TIMEOUT_MULTIPLIER", ui)
-        # The plan job must emit the UI matrix the job consumes.
-        self.assertIn("--ui-matrix-out", text)
-        self.assertIn('echo "ui-matrix=', text)
+        self.assertNotIn("fromJSON(needs.plan.outputs.matrix)", text)
+        self.assertNotIn("fromJSON(needs.plan.outputs.ui-matrix)", text)
+        self.assertNotIn("actions/cache/restore", text,
+                         "the timing-history cache is gone with its job")
+        for obsolete in ("unit:", "ui:", "report:", "timing-history-update:"):
+            self.assertFalse(
+                any(line.startswith("  ") and line.strip() == obsolete
+                    for line in text.splitlines()),
+                f"obsolete job {obsolete!r} still present in ci.yml")
 
     def test_ci_gate_script_verdict_matches_spec_examples(self):
         spec = {
@@ -121,83 +118,115 @@ class WorkflowContractTests(unittest.TestCase):
             proc = subprocess.run(
                 [sys.executable, os.path.join(SCRIPTS_DIR, "ci-gate.py"),
                  "--plan", plan, "--build", build,
-                 "--unit", unit, "--ui", ui, "--self-test", self_test],
+                 "--unit-smoke", unit, "--ui-smoke", ui,
+                 "--self-test", self_test],
                 capture_output=True, text=True)
             self.assertEqual(
                 proc.returncode == 0, expected,
                 f"gate({plan},{build},{unit},{ui},{self_test}) -> {proc.stdout}")
 
+    def test_ci_gate_documents_the_mac_gate_it_does_not_replace(self):
+        with open(os.path.join(SCRIPTS_DIR, "ci-gate.py"), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn("Mac local exhaustive gate", text,
+                      "the verdict must say the hosted gate is not the "
+                      "exhaustive one")
 
-class TimingUpdateCliShapeTests(unittest.TestCase):
-    """Exercise update-timing-history.py with the EXACT argument shape the
-    main-only workflow job uses: multiple --observations files, --inventory,
-    optional --history, --out."""
 
-    def _run(self, tmp, with_history):
-        observations = []
-        for i, classes in enumerate(
-                [{"AlphaTests": 21.0, "BetaTests": 4.0},
-                 {"GammaTests": 9.5}]):
-            path = os.path.join(tmp, f"obs{i}.json")
-            with open(path, "w", encoding="utf-8") as fh:
-                json.dump({"schema_version": 1, "classes": classes}, fh)
-            observations.append(path)
-        plan = os.path.join(tmp, "plan.json")
-        with open(plan, "w", encoding="utf-8") as fh:
-            json.dump({"inventory": {"unit": ["AlphaTests", "BetaTests", "GammaTests"],
-                                     "ui": []}}, fh)
-        out = os.path.join(tmp, "ci-timing", "timing-history.json")
-        os.makedirs(os.path.dirname(out), exist_ok=True)
-        args = [sys.executable,
-                os.path.join(SCRIPTS_DIR, "update-timing-history.py")]
-        # Exactly like the workflow: --observations before the file list.
-        args += ["--observations"] + observations
-        args += ["--inventory", plan]
-        if with_history:
-            hist = os.path.join(tmp, "history.json")
-            with open(hist, "w", encoding="utf-8") as fh:
-                json.dump({"schema_version": 1,
-                           "classes": {"AlphaTests": 30.0}}, fh)
-            args += ["--history", hist]
-        args += ["--out", out]
-        proc = subprocess.run(args, capture_output=True, text=True)
-        return proc, out
+class SmokeSelectionTests(unittest.TestCase):
+    """The hosted suite selection is a checked-in list, so its integrity is a
+    contract: every class must exist, and the split must be visible."""
 
-    def test_workflow_shape_first_run(self):
+    def _run_smoke(self, suite_path, out_path=None):
+        args = [sys.executable, os.path.join(SCRIPTS_DIR, "plan-tests.py"),
+                "smoke", "--repo-root", REPO_ROOT, "--suite", suite_path]
+        if out_path:
+            args += ["--out", out_path]
+        return subprocess.run(args, capture_output=True, text=True)
+
+    def test_shipped_smoke_suite_validates_against_the_inventory(self):
+        self.assertTrue(os.path.exists(SMOKE_SUITE), "smoke-suite.json missing")
+        proc = self._run_smoke(SMOKE_SUITE)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("smoke selection OK", proc.stdout)
+        self.assertIn("delegated to the Mac local gate", proc.stdout)
+
+    def test_shipped_smoke_suite_never_names_a_mac_gate_family(self):
+        with open(SMOKE_SUITE, encoding="utf-8") as fh:
+            suite = json.load(fh)
+        # The families the Mac exhaustive gate owns (docs/CI.md): hosting them
+        # in the smoke gate would re-litigate timing-sensitive suites on a
+        # shared runner.
+        mac_gate_families = {
+            "TranscriptPerformanceFixtureTests",
+            "TranscriptPerfLedgerContractTests",
+            "LongContextScalingFixtureTests",
+            "SettledMessageIsolationTests",
+            "MarkdownRichContentHostedTests",
+        }
+        self.assertFalse(
+            mac_gate_families & set(suite.get("unit") or []),
+            "a Mac-gate-owned timing family must not be in the hosted smoke set")
+        self.assertFalse(mac_gate_families & set(suite.get("ui") or []))
+
+    def test_a_nonexistent_class_fails_the_selection(self):
+        with open(SMOKE_SUITE, encoding="utf-8") as fh:
+            suite = json.load(fh)
+        suite["unit"] = list(suite["unit"]) + ["NoSuchTestsHere"]
         with tempfile.TemporaryDirectory() as tmp:
-            proc, out = self._run(tmp, with_history=False)
-            self.assertEqual(proc.returncode, 0, proc.stderr)
+            bogus = os.path.join(tmp, "suite.json")
+            with open(bogus, "w", encoding="utf-8") as fh:
+                json.dump(suite, fh)
+            proc = self._run_smoke(bogus)
+        self.assertNotEqual(proc.returncode, 0,
+                            "a renamed/deleted class must fail the plan job")
+        self.assertIn("NoSuchTestsHere", proc.stdout)
+
+    def test_a_duplicated_class_fails_the_selection(self):
+        with open(SMOKE_SUITE, encoding="utf-8") as fh:
+            suite = json.load(fh)
+        suite["unit"] = list(suite["unit"]) + [suite["unit"][0]]
+        with tempfile.TemporaryDirectory() as tmp:
+            bogus = os.path.join(tmp, "suite.json")
+            with open(bogus, "w", encoding="utf-8") as fh:
+                json.dump(suite, fh)
+            proc = self._run_smoke(bogus)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("twice", proc.stdout)
+
+    def test_selection_output_feeds_the_smoke_jobs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "smoke.json")
+            proc = self._run_smoke(SMOKE_SUITE, out_path=out)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
             with open(out, encoding="utf-8") as fh:
                 doc = json.load(fh)
-            self.assertEqual(sorted(doc["classes"]),
-                             ["AlphaTests", "BetaTests", "GammaTests"])
-
-    def test_workflow_shape_with_history(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            inv = os.path.join(tmp, "plan.json")
-            with open(inv, "w", encoding="utf-8") as fh:
-                json.dump({"inventory": {"unit": ["AlphaTests"], "ui": []}}, fh)
-            obs = os.path.join(tmp, "obs.json")
-            with open(obs, "w", encoding="utf-8") as fh:
-                json.dump({"schema_version": 1,
-                           "classes": {"AlphaTests": 20.0}}, fh)
-            hist = os.path.join(tmp, "history.json")
-            with open(hist, "w", encoding="utf-8") as fh:
-                json.dump({"schema_version": 1,
-                           "classes": {"AlphaTests": 10.0}}, fh)
-            out = os.path.join(tmp, "out.json")
-            proc = subprocess.run(
-                [sys.executable,
-                 os.path.join(SCRIPTS_DIR, "update-timing-history.py"),
-                 "--observations", obs,
-                 "--inventory", inv,
-                 "--history", hist,
-                 "--out", out],
+            self.assertTrue(doc["unit_csv"])
+            self.assertEqual(doc["unit_csv"].split(","), doc["unit"])
+            self.assertEqual(doc["ui_csv"].split(","), doc["ui"])
+            self.assertEqual(doc["delegated_unit"] + len(doc["unit"]),
+                             doc["inventory_unit"])
+            summary = subprocess.run(
+                [sys.executable, os.path.join(SCRIPTS_DIR, "smoke-summary.py"),
+                 "--selection", out],
                 capture_output=True, text=True)
-            self.assertEqual(proc.returncode, 0, proc.stderr)
-            with open(out, encoding="utf-8") as fh:
-                doc = json.load(fh)
-            self.assertAlmostEqual(doc["classes"]["AlphaTests"], 12.5)
+        self.assertEqual(summary.returncode, 0, summary.stderr)
+        self.assertIn("Hosted smoke gate", summary.stdout)
+        self.assertIn("Mac local gate", summary.stdout)
+
+    def test_smoke_summary_rejects_an_empty_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            empty = os.path.join(tmp, "empty.json")
+            with open(empty, "w", encoding="utf-8") as fh:
+                json.dump({"unit": [], "ui": [], "inventory_unit": 3,
+                           "inventory_ui": 0}, fh)
+            proc = subprocess.run(
+                [sys.executable, os.path.join(SCRIPTS_DIR, "smoke-summary.py"),
+                 "--selection", empty],
+                capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0,
+                            "a smoke gate with no unit classes must not pass "
+                            "silently")
 
 
 if __name__ == "__main__":
