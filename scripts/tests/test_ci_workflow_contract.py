@@ -118,6 +118,8 @@ class WorkflowContractTests(unittest.TestCase):
             self.assertIn("wait_for_destination_device", text, job)
             self.assertIn("build_destination", text, job)
             self.assertIn("reset_and_boot_simulator", text, job)
+            self.assertIn("LOG_DIR", text,
+                          f"{job} must set ci-lib.sh's LOG_DIR before probing")
             self.assertIn('-destination "$DESTINATION"', text, job)
             self.assertNotIn("platform=iOS Simulator,name=", text,
                              f"{job} must not hand xcodebuild an unpinned destination")

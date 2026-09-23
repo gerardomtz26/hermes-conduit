@@ -214,8 +214,15 @@ jobs:
         # probe and the boot carry their own deadlines and the boot is
         # best-effort, so a device hiccup degrades to the name-based destination
         # rather than failing the job here.
+        #
+        # LOG_DIR is ci-lib.sh's territory: bounded_run writes its per-call log
+        # there, and without it every probe dies on an unbound variable (which
+        # is how the first version of this step failed).
         run: |
           set -euo pipefail
+          LOG_DIR="${LOG_DIR:-ci-lane/destination}"
+          mkdir -p "$LOG_DIR"
+          export LOG_DIR
           source scripts/ci-lib.sh
           wait_for_destination_device
           build_destination
@@ -335,6 +342,9 @@ jobs:
         # was never booted before the session started.
         run: |
           set -euo pipefail
+          LOG_DIR="${LOG_DIR:-ci-lane/destination}"
+          mkdir -p "$LOG_DIR"
+          export LOG_DIR
           source scripts/ci-lib.sh
           wait_for_destination_device
           build_destination

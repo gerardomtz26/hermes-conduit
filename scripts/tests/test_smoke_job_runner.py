@@ -28,6 +28,7 @@ WORKFLOW = os.path.join(REPO_ROOT, ".github", "workflows", "ci.yml")
 
 UNIT_STEP = "Run the curated unit smoke suite"
 UI_STEP = "Run the curated UI smoke suite"
+PREPARE_STEP = "Prepare the pinned simulator destination"
 
 # Records every invocation, and can be told to fail from the Nth one on.
 STUB = """#!/usr/bin/env bash
@@ -224,6 +225,39 @@ class SmokeJobRunnerTests(unittest.TestCase):
         self.assertIn("refusing to run unfiltered", proc.stdout + proc.stderr)
 
     # --- the extracted scripts must be the ones the workflow ships ----------
+
+    def test_prepare_step_survives_without_a_ci_lib_environment(self):
+        """The prepare step must set ci-lib.sh's LOG_DIR itself.
+
+        `bounded_run` writes through `$LOG_DIR`; with it unset, every probe dies
+        on an unbound variable, `wait_for_destination_device` then spins its full
+        180s budget and both smoke jobs fail before running a single test - which
+        is exactly what the first hosted run of this shape did.
+        """
+        path = os.path.join(self.tmp, "prepare.sh")
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(_step_script(PREPARE_STEP))
+        gh_env = os.path.join(self.tmp, "github_env")
+        env = self._env(SIMULATOR_NAME="iPhone 17 Pro")
+        env.pop("DESTINATION", None)
+        env.pop("LOG_DIR", None)
+        env["GITHUB_ENV"] = gh_env
+        # The step resolves ci-lib.sh relative to the repo root, and writes its
+        # probe logs under ci-lane/ (gitignored); leave the tree as we found it.
+        lane_dir = os.path.join(REPO_ROOT, "ci-lane")
+        pre_existing = os.path.isdir(lane_dir)
+        try:
+            proc = subprocess.run([self.bash, path], cwd=REPO_ROOT, env=env,
+                                  capture_output=True, text=True)
+        finally:
+            if not pre_existing:
+                shutil.rmtree(lane_dir, ignore_errors=True)
+        output = proc.stdout + proc.stderr
+        self.assertEqual(proc.returncode, 0, output)
+        self.assertNotIn("unbound variable", output)
+        with open(gh_env, encoding="utf-8") as fh:
+            self.assertIn("DESTINATION=", fh.read(),
+                          "the step must export the destination the run steps use")
 
     def test_extracted_unit_step_reads_its_classes_from_the_plan_output(self):
         script = _step_script(UNIT_STEP)
