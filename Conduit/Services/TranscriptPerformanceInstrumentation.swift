@@ -29,6 +29,7 @@ enum TranscriptPerf {
         switch event {
         case .settledBubbleBody: storage.settledBubbleBody += 1
         case .settledMarkdownBody: storage.settledMarkdownBody += 1
+        case .settledContentGateComparison: storage.settledContentGateComparison += 1
         case .selectableTextViewUpdate: storage.selectableTextViewUpdate += 1
         case .selectableTextViewTextRebuild: storage.selectableTextViewTextRebuild += 1
         case .textKitMeasurement: storage.textKitMeasurement += 1
@@ -65,6 +66,20 @@ enum TranscriptPerf {
         #if DEBUG
         note(event)
         if event == .settledMarkdownBody {
+            // Process-lifetime mount classification: a source never seen
+            // before ANY window is a fresh mount; a re-evaluation of an
+            // already-seen source is a re-render of an existing row. The
+            // ledger survives resets so cross-test mount history stays
+            // classifiable (bounded to keep diagnostics memory flat). Once
+            // the ledger is SATURATED, classification stops: an unseen
+            // source is neither counted nor inserted, so a full ledger
+            // degrades to "no new classification" instead of re-counting
+            // every unseen evaluation as a fresh mount.
+            if !storage.everSeenMarkdownSources.contains(context),
+               storage.everSeenMarkdownSources.count < 4096 {
+                storage.settledMarkdownFreshMountBody += 1
+                storage.everSeenMarkdownSources.insert(context)
+            }
             if storage.settledMarkdownKnownSources.contains(context) {
                 storage.settledMarkdownPreWindowRepeatBody += 1
                 if storage.recentPreWindowRepeatSources.count < 128 {
@@ -105,13 +120,62 @@ enum TranscriptPerf {
         }
         let stack = Thread.callStackSymbols
             .dropFirst(2)
-            .prefix(10)
+            .prefix(14)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .joined(separator: " <- ")
         storage.windowEvaluationSpans
             .append("t=\(offset)s src=\(context.prefix(24)) [\(stack)]")
     }
     #endif
+
+    #if DEBUG
+    /// Serializes `noteGateReopen`'s count-guard-and-append and the report
+    /// getter: SwiftUI may evaluate a nonisolated Equatable conformance off
+    /// the main actor, so concurrent gate comparisons can race the ring and
+    /// lose or corrupt DEBUG reports. Locking is DEBUG-only; Release never
+    /// records reports.
+    private static let gateReopenLock = NSLock()
+    #endif
+
+    /// Record which Equatable field opened a settled-content gate (DEBUG
+    /// diagnostics, bounded). A dormancy violation WITH a gate-reopen
+    /// report naming `sizeCategory`/`chatTextSize` is hosting trait churn
+    /// reopening the gate; one WITHOUT any report is a true gate bypass
+    /// (body chain re-evaluated with the gate never consulted). This is
+    /// the diagnostic #200 lacked — release-head CI failed with no way to
+    /// tell these apart.
+    #if DEBUG
+    static func noteGateReopen(component: String, fields: [String]) {
+        gateReopenLock.lock()
+        defer { gateReopenLock.unlock() }
+        let offset: String
+        if let openedAt = storage.windowOpenedAt {
+            offset = String(format: "%.3f", Date().timeIntervalSince(openedAt))
+        } else {
+            offset = "?"
+        }
+        // Newest wins: dropping the report that names the violating field
+        // (what a drop-newest cap would do after saturation) would recreate
+        // the misdiagnosis this diagnostic exists to prevent.
+        if storage.recentGateReopenReports.count >= 32 {
+            storage.recentGateReopenReports.removeFirst()
+        }
+        storage.recentGateReopenReports.append(
+            "t=\(offset)s \(component) opened by: \(fields.joined(separator: ", "))"
+        )
+    }
+    #endif
+
+    /// Most recent gate-reopen reports (bounded ring, DEBUG diagnostics).
+    static var recentGateReopenReports: [String] {
+        #if DEBUG
+        gateReopenLock.lock()
+        defer { gateReopenLock.unlock() }
+        return storage.recentGateReopenReports
+        #else
+        return []
+        #endif
+    }
 
     enum Event {
         case settledBubbleBody
@@ -131,13 +195,30 @@ enum TranscriptPerf {
         case reasoningProjectionPublish
         case reasoningTranscriptMutation
         case scrollTargetPrefixSetBuild
+        case settledContentGateComparison
     }
 
     // MARK: - Counter accessors
 
+    /// How many times a settled-content Equatable gate was CONSULTED
+    /// (DEBUG diagnostics). This is what makes a "no reopen report" assertion
+    /// non-vacuous: an empty report list proves nothing on its own, because a
+    /// hosting shape that never reaches the comparison (`==` calls 0) would
+    /// leave it empty too. A fixture asserting input-invariance must also
+    /// assert that this counter moved.
+    static var settledContentGateComparisons: Int {
+        get { read(\.settledContentGateComparison) }
+    }
+
     static var settledMessageBubbleBodyEvaluations: Int {
         get { read(\.settledBubbleBody) }
     }
+    // Note on the counter above: both MessageBubble.body AND AssistantBubble.body
+    // note `.settledBubbleBody`, so an assistant row rendered through the
+    // production MessageBubble path counts ~2 per pass, while the isolation
+    // harness (which mounts AssistantBubble directly) counts 1. The meaning is
+    // therefore path-dependent by design; consumers must stay RELATIVE
+    // (> 0, quiet-delta), never assert absolute per-row values.
 
     static var settledMarkdownTextBodyEvaluations: Int {
         get { read(\.settledMarkdownBody) }
@@ -293,6 +374,21 @@ enum TranscriptPerf {
         #endif
     }
 
+    /// Process-lifetime fresh-mount count of settled Markdown sources
+    /// (DEBUG diagnostics): increments the first time any given source
+    /// string is ever evaluated in the process, regardless of window —
+    /// until the bounded ever-seen ledger (4096 entries) saturates, after
+    /// which unseen sources are no longer classified (or counted) at all.
+    /// A re-render report whose sources are all first-seen inside the
+    /// current window is a LAZY MOUNT story, not an at-rest cascade.
+    static var settledMarkdownFreshMountEvaluations: Int {
+        #if DEBUG
+        return storage.settledMarkdownFreshMountBody
+        #else
+        return 0
+        #endif
+    }
+
     /// Diagnostics: bounded (time-since-window-open, source, call stack)
     /// records of the settled-Markdown evaluations inside the current
     /// measurement window. Fixture failure messages embed these so a
@@ -316,6 +412,9 @@ enum TranscriptPerf {
         var fresh = Storage()
         fresh.settledMarkdownKnownSources =
             storage.settledMarkdownKnownSources.union(storage.settledMarkdownWindowSources)
+        // Process-lifetime mount ledger survives windows by design.
+        fresh.everSeenMarkdownSources = storage.everSeenMarkdownSources
+        fresh.settledMarkdownFreshMountBody = storage.settledMarkdownFreshMountBody
         fresh.windowOpenedAt = Date()
         storage = fresh
         #endif
@@ -325,6 +424,12 @@ enum TranscriptPerf {
     /// this in setUp so one test's rendered sources never leak into the
     /// next test's repeat counting; plain `reset()` (per measurement
     /// window) always preserves the at-rest ledger.
+    ///
+    /// The ever-seen mount ledger is ALSO cleared here so each test starts
+    /// with a clean mount classification — cross-test contamination of the
+    /// fresh-mount counter would misclassify late remounts. The counter
+    /// itself is process-lifetime within one test, which is the scope the
+    /// dormancy fixtures measure.
     static func resetRenderLedgerForTesting() {
         #if DEBUG
         storage = Storage()
@@ -368,6 +473,12 @@ enum TranscriptPerf {
         var settledMarkdownBody = 0
         var settledMarkdownPreWindowRepeatBody = 0
         var settledMarkdownWindowDuplicateBody = 0
+        /// First-ever evaluations of a source string, process lifetime
+        /// (DEBUG diagnostics; survives `reset()` by design).
+        var settledMarkdownFreshMountBody = 0
+        /// Every settled Markdown source ever evaluated in this process,
+        /// bounded (see `settledMarkdownFreshMountEvaluations`).
+        var everSeenMarkdownSources = Set<String>()
         /// Markdown sources already evaluated at least once (DEBUG-only
         /// diagnostics memory, bounded by the same order as the render
         /// cache, which also holds one entry per distinct source).
@@ -382,6 +493,12 @@ enum TranscriptPerf {
         /// Bounded evaluation spans inside the current window (DEBUG
         /// diagnostics, see `windowEvaluationSpans`).
         var windowEvaluationSpans: [String] = []
+        /// Bounded ring of gate-reopen reports (DEBUG diagnostics, see
+        /// `recentGateReopenReports`); newest wins on overflow.
+        var recentGateReopenReports: [String] = []
+        /// Settled-content gate consultations (DEBUG diagnostics, see
+        /// `settledContentGateComparisons`).
+        var settledContentGateComparison = 0
         var selectableTextViewUpdate = 0
         var selectableTextViewTextRebuild = 0
         var textKitMeasurement = 0

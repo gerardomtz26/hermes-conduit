@@ -175,6 +175,15 @@ struct ChatView: View {
         viewport.renderedScrollScope
     }
 
+    /// Test-only seam for the dormancy fixtures (PR #201 review): ChatView
+    /// re-writes `\.chatTextSize` at its own root from the shared
+    /// @AppStorage preference — an environment write no OUTER harness pin
+    /// can dominate (the nearer write wins). When non-nil, that inner write
+    /// resolves to this value instead, so shared preference state cannot
+    /// leak into (or churn) a measured fixture. Production never sets it
+    /// (nil) and the preference decides exactly as before.
+    var chatTextSizeOverride: ChatTextSize? = nil
+
     /// The chat-only text-size preference (issue #85). Local, device-only
     /// @AppStorage like ComposerReturnKey — never synced to Hermes or the
     /// profile. Injected once here so every transcript Markdown path
@@ -184,7 +193,7 @@ struct ChatView: View {
     @AppStorage(ChatTypography.preferenceKey) private var chatTextSizeRaw = ChatTypography.defaultSize.rawValue
 
     private var chatTextSize: ChatTextSize {
-        ChatTypography.resolve(rawValue: chatTextSizeRaw)
+        chatTextSizeOverride ?? ChatTypography.resolve(rawValue: chatTextSizeRaw)
     }
 
     var body: some View {
@@ -1043,10 +1052,24 @@ struct UserMessageContent: View, Equatable {
     let chatTextSize: ChatTextSize
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.message == rhs.message
+        // One comparison expression for every configuration — see
+        // SettledAssistantMessageContent.== for why the DEBUG recording below
+        // must never be a second copy of the field list.
+        let equal = lhs.message == rhs.message
             && lhs.gatewayResolver === rhs.gatewayResolver
             && lhs.sizeCategory == rhs.sizeCategory
             && lhs.chatTextSize == rhs.chatTextSize
+        #if DEBUG
+        if !equal {
+            var fields: [String] = []
+            if lhs.message != rhs.message { fields.append("message") }
+            if lhs.gatewayResolver !== rhs.gatewayResolver { fields.append("gatewayResolver") }
+            if lhs.sizeCategory != rhs.sizeCategory { fields.append("sizeCategory") }
+            if lhs.chatTextSize != rhs.chatTextSize { fields.append("chatTextSize") }
+            TranscriptPerf.noteGateReopen(component: "UserMessageContent", fields: fields)
+        }
+        #endif
+        return equal
     }
 
     var body: some View {
@@ -1303,12 +1326,34 @@ struct SettledAssistantMessageContent: View, Equatable {
     let chatTextSize: ChatTextSize
 
     static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.message == rhs.message
+        // ONE comparison expression for every configuration: the field list a
+        // gate actually compares must never diverge between DEBUG (what the
+        // tests exercise) and Release (what ships). The DEBUG-only recording
+        // below observes the outcome and cannot change it.
+        let equal = lhs.message == rhs.message
             && lhs.displayName == rhs.displayName
             && lhs.avatarURL == rhs.avatarURL
             && lhs.gatewayResolver === rhs.gatewayResolver
             && lhs.sizeCategory == rhs.sizeCategory
             && lhs.chatTextSize == rhs.chatTextSize
+        #if DEBUG
+        // Consultation counter: a fixture asserting "the gate reported no
+        // input change" is vacuous unless the gate was reached at all, and a
+        // hosting shape that re-creates the subtree without consulting the
+        // comparison leaves the report list empty too.
+        TranscriptPerf.note(.settledContentGateComparison)
+        if !equal {
+            var fields: [String] = []
+            if lhs.message != rhs.message { fields.append("message") }
+            if lhs.displayName != rhs.displayName { fields.append("displayName") }
+            if lhs.avatarURL != rhs.avatarURL { fields.append("avatarURL") }
+            if lhs.gatewayResolver !== rhs.gatewayResolver { fields.append("gatewayResolver") }
+            if lhs.sizeCategory != rhs.sizeCategory { fields.append("sizeCategory") }
+            if lhs.chatTextSize != rhs.chatTextSize { fields.append("chatTextSize") }
+            TranscriptPerf.noteGateReopen(component: "SettledAssistantMessageContent", fields: fields)
+        }
+        #endif
+        return equal
     }
 
     var body: some View {
