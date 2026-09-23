@@ -174,24 +174,16 @@ jobs:
                  "$DERIVED_DATA_PATH/Logs"
 
       - name: Upload build products (consumed by both smoke jobs)
-        # Relative path (mirrors the working metadata upload); the artifact
-        # keeps the Build/... structure, and the smoke jobs restore it under
-        # $DERIVED_DATA_PATH/Build so the .xctestrun's absolute paths hold.
+        # Relative path (relative to the source root, where the build script
+        # wrote it); the artifact keeps the Build/... structure, and the smoke
+        # jobs restore it under $DERIVED_DATA_PATH/Build so the .xctestrun's
+        # absolute paths hold.
         uses: actions/upload-artifact@v4
         with:
           name: build-products
           path: ci-derived-data/Build
           retention-days: 1
           if-no-files-found: error
-
-      - name: Upload build metadata
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-meta
-          path: ci-lane/build/
-          retention-days: 7
-          if-no-files-found: ignore
 
   unit-smoke:
     name: Unit smoke
@@ -219,24 +211,61 @@ jobs:
             --xctestrun "$XCRUN_FILE" --workspace-root "$GITHUB_WORKSPACE"
 
       - name: Run the curated unit smoke suite
-        # One invocation with one -only-testing filter per curated class. No
-        # native flake retry: a genuine assertion must fail this job (the Mac
-        # gate is where repeats and bounded recovery live).
+        # The curated classes run as SEQUENTIAL batches of at most
+        # $SMOKE_BATCH_SIZE inside this one job, never as a single invocation:
+        # large single invocations repeatedly watchdog-stalled on hosted
+        # macos-26 (docs/CI.md, "Sequential unit batches"), which is why the lane
+        # runner batches too. No native flake retry and no recovery here - a
+        # genuine assertion must fail this job; repeats and bounded recovery are
+        # the Mac gate's business.
         env:
           UNIT_CLASSES: "${{ needs.plan.outputs.unit-csv }}"
+          SMOKE_BATCH_SIZE: "8"
         run: |
           set -euo pipefail
+          # Fail closed: an empty list would expand to no -only-testing filter,
+          # and a bare xcodebuild would run the ENTIRE suite instead of nothing.
+          if [ -z "$UNIT_CLASSES" ]; then
+            echo "::error::unit smoke selection is empty - refusing to run unfiltered"
+            exit 1
+          fi
           IFS=',' read -r -a CLASSES <<< "$UNIT_CLASSES"
-          ARGS=()
+          echo "unit smoke: ${#CLASSES[@]} classes, batches of at most $SMOKE_BATCH_SIZE"
+
+          run_batch() {
+            batch_no="$1"
+            shift
+            if [ "$#" -eq 0 ]; then
+              return 0
+            fi
+            batch_args=()
+            for cls in "$@"; do
+              batch_args+=("-only-testing:ConduitTests/${cls}")
+            done
+            echo "::group::unit smoke batch $batch_no ($# classes)"
+            xcodebuild test-without-building \
+              -xctestrun "$XCRUN_FILE" \
+              -destination "platform=iOS Simulator,name=$SIMULATOR_NAME" \
+              -parallel-testing-enabled NO \
+              "${batch_args[@]}"
+            echo "::endgroup::"
+          }
+
+          batch=0
+          group=()
           for cls in "${CLASSES[@]}"; do
-            ARGS+=("-only-testing:ConduitTests/${cls}")
+            group+=("$cls")
+            if [ "${#group[@]}" -ge "$SMOKE_BATCH_SIZE" ]; then
+              batch=$((batch + 1))
+              run_batch "$batch" "${group[@]}"
+              group=()
+            fi
           done
-          echo "unit smoke: ${#CLASSES[@]} classes"
-          xcodebuild test-without-building \
-            -xctestrun "$XCRUN_FILE" \
-            -destination "platform=iOS Simulator,name=$SIMULATOR_NAME" \
-            -parallel-testing-enabled NO \
-            "${ARGS[@]}"
+          if [ "${#group[@]}" -gt 0 ]; then
+            batch=$((batch + 1))
+            run_batch "$batch" "${group[@]}"
+          fi
+          echo "unit smoke: $batch batch invocation(s) completed"
 
       - name: Dump simulator state (failure diagnostics)
         if: failure()
@@ -276,6 +305,13 @@ jobs:
           UI_CLASSES: "${{ needs.plan.outputs.ui-csv }}"
         run: |
           set -euo pipefail
+          # Fail closed: an empty list would expand to no -only-testing filter,
+          # and a bare xcodebuild would run the ENTIRE UI suite instead of the
+          # two curated classes.
+          if [ -z "$UI_CLASSES" ]; then
+            echo "::error::UI smoke selection is empty - refusing to run unfiltered"
+            exit 1
+          fi
           IFS=',' read -r -a CLASSES <<< "$UI_CLASSES"
           ARGS=()
           for cls in "${CLASSES[@]}"; do

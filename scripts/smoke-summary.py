@@ -14,6 +14,11 @@ import json
 import sys
 
 
+def _count(value) -> str:
+    """Render a count that a hand-built selection fixture may omit."""
+    return "?" if value is None else str(value)
+
+
 def render(selection: dict) -> str:
     unit = list(selection.get("unit") or [])
     ui = list(selection.get("ui") or [])
@@ -25,11 +30,11 @@ def render(selection: dict) -> str:
         "the Mac local gate (`scripts/local-ci-gate.sh`) for a trusted head;",
         "they are deliberately not run here.",
         "",
-        f"- unit smoke classes: **{len(unit)}** of {selection.get('inventory_unit')}",
-        f"- UI smoke classes: **{len(ui)}** of {selection.get('inventory_ui')}",
+        f"- unit smoke classes: **{len(unit)}** of {_count(selection.get('inventory_unit'))}",
+        f"- UI smoke classes: **{len(ui)}** of {_count(selection.get('inventory_ui'))}",
         "- delegated to the Mac exhaustive gate: "
-        f"{selection.get('delegated_unit')} unit + "
-        f"{selection.get('delegated_ui')} UI classes",
+        f"{_count(selection.get('delegated_unit'))} unit + "
+        f"{_count(selection.get('delegated_ui'))} UI classes",
         "",
         "unit: " + ", ".join(unit),
         "",
@@ -47,8 +52,9 @@ def main(argv=None) -> int:
 
     with open(args.selection, encoding="utf-8") as fh:
         selection = json.load(fh)
-    if not selection.get("unit"):
-        print("::error::smoke selection is empty - hosted CI would run no unit tests")
+    if not selection.get("unit") or not selection.get("ui"):
+        print("::error::smoke selection is empty for at least one target - "
+              "hosted CI would exercise nothing there")
         return 1
     sys.stdout.write(render(selection))
     return 0

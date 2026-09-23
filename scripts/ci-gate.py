@@ -9,12 +9,16 @@ Policy:
   plan        must be success
   build       must be success
   unit-smoke  must be success
-  ui-smoke    must be success OR skipped (skipped is legitimate when the
-              curated selection contains no UI classes)
+  ui-smoke    must be success
   self-test   must be success (the CI-tooling regression suites - planner,
               lane-runner state machine, destination lookup, gate/contract
               tests - run as their own job so the expensive bash state-machine
               suite never delays or outlives planning)
+
+No hosted job is ever legitimately skipped: `plan-tests.py smoke` fails closed
+on an empty curated selection and both smoke jobs refuse to run unfiltered, so
+`skipped` here always means an upstream failure cascade - which fails the gate
+anyway.
 
 Anything else - failure, cancelled, skipped upstream of a failure - fails the
 gate.
@@ -29,8 +33,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-REQUIRED_SUCCESS = ("plan", "build", "unit-smoke", "self-test")
-UI_ALLOWED = ("success", "skipped")
+REQUIRED_SUCCESS = ("plan", "build", "unit-smoke", "ui-smoke", "self-test")
 
 
 def verdict(plan: str, build: str, unit_smoke: str, ui_smoke: str,
@@ -42,10 +45,6 @@ def verdict(plan: str, build: str, unit_smoke: str, ui_smoke: str,
     for name in REQUIRED_SUCCESS:
         if results[name] != "success":
             failures.append(f"{name} must be 'success', got {results[name]!r}")
-    if results["ui-smoke"] not in UI_ALLOWED:
-        failures.append(
-            "ui-smoke must be 'success' or 'skipped', got "
-            f"{results['ui-smoke']!r}")
     return (not failures), "; ".join(failures)
 
 

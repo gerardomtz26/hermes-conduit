@@ -992,13 +992,34 @@ def _human_report(plan: dict, discovery: dict, source: str) -> str:
     return "\n".join(out)
 
 
+_CLASS_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
 def load_smoke_suite(path: str) -> tuple:
-    """Read the curated smoke selection. Returns (unit_names, ui_names)."""
+    """Read the curated smoke selection. Returns (unit_names, ui_names).
+
+    Fails closed on anything that is not a well-formed suite: the file must be
+    a JSON object declaring non-empty `unit` and `ui` lists of plain Swift class
+    names. Defaulting an absent key to an empty list would turn a malformed
+    edit into a silently empty hosted selection.
+    """
     with open(path, encoding="utf-8") as fh:
         data = json.load(fh)
-    unit = [str(name) for name in (data.get("unit") or [])]
-    ui = [str(name) for name in (data.get("ui") or [])]
-    return unit, ui
+    if not isinstance(data, dict):
+        raise ValueError("smoke suite must be a JSON object")
+    for key in ("unit", "ui"):
+        if key not in data:
+            raise ValueError("smoke suite must declare a {0!r} list".format(key))
+        names = data[key]
+        if not isinstance(names, list) or not names:
+            raise ValueError(
+                "smoke suite {0!r} must be a non-empty list".format(key))
+        for name in names:
+            if not isinstance(name, str) or not _CLASS_NAME_RE.match(name):
+                raise ValueError(
+                    "smoke suite {0!r} names an invalid class: {1!r}".format(
+                        key, name))
+    return list(data["unit"]), list(data["ui"])
 
 
 def cmd_smoke(args) -> int:
@@ -1019,12 +1040,21 @@ def cmd_smoke(args) -> int:
             print(f"::error::{e}")
         return 1
 
-    inventory = {entry["name"] for entry in discovery["unit"]} | \
-                {entry["name"] for entry in discovery["ui"]}
-    unit, ui = load_smoke_suite(args.suite)
+    unit_inventory = {entry["name"] for entry in discovery["unit"]}
+    ui_inventory = {entry["name"] for entry in discovery["ui"]}
+    try:
+        unit, ui = load_smoke_suite(args.suite)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"::error::smoke suite unreadable: {exc}")
+        return 1
 
     problems = []
-    for target, names in (("unit", unit), ("ui", ui)):
+    # Validated per TARGET, never against the union of both: a class moved
+    # between ConduitTests/ and ConduitUITests/ would otherwise still validate
+    # while the smoke job filters it against the wrong bundle - which runs zero
+    # tests for it and silently shrinks hosted coverage.
+    for target, names, inventory in (("unit", unit, unit_inventory),
+                                     ("ui", ui, ui_inventory)):
         seen = set()
         for name in names:
             if name in seen:
@@ -1032,8 +1062,10 @@ def cmd_smoke(args) -> int:
             seen.add(name)
             if name not in inventory:
                 problems.append(
-                    f"smoke suite names a class that does not exist in the "
-                    f"inventory: {name} ({target})")
+                    f"smoke suite lists {name!r} in {target}, but it is not a "
+                    f"{target} test class")
+    for name in sorted(set(unit) & set(ui)):
+        problems.append(f"smoke suite lists {name!r} in both unit and ui")
     for e in problems:
         print(f"::error::{e}")
 

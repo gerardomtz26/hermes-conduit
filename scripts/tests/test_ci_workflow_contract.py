@@ -92,6 +92,23 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("-only-testing:ConduitUITests/", ui)
         self.assertNotIn("-test-iterations", ui)
 
+    def test_smoke_jobs_fail_closed_on_an_empty_selection(self):
+        # With no -only-testing filter, xcodebuild runs the WHOLE suite, so an
+        # emptied selection must stop the job instead of silently turning the
+        # smoke gate into the exhaustive one.
+        for job in ("unit-smoke", "ui-smoke"):
+            self.assertIn("refusing to run unfiltered", self._job_text(job),
+                          f"{job} must refuse an empty selection")
+
+    def test_unit_smoke_runs_in_bounded_sequential_batches(self):
+        # Large single invocations repeatedly watchdog-stalled on hosted
+        # macos-26 (docs/CI.md, "Sequential unit batches").
+        self.assertIn("SMOKE_BATCH_SIZE", self._job_text("unit-smoke"))
+
+    def test_no_write_only_build_metadata_artifact(self):
+        self.assertNotIn("name: build-meta", self._workflow_text(),
+                         "nothing consumes build-meta once the report job is gone")
+
     def test_no_lane_matrix_or_timing_history_machinery_remains(self):
         text = self._workflow_text()
         self.assertNotIn("fromJSON(needs.plan.outputs.matrix)", text)
@@ -107,7 +124,10 @@ class WorkflowContractTests(unittest.TestCase):
     def test_ci_gate_script_verdict_matches_spec_examples(self):
         spec = {
             ("success", "success", "success", "success", "success"): True,
-            ("success", "success", "success", "skipped", "success"): True,
+            # No hosted job is ever legitimately skipped: the plan job fails
+            # closed on an empty curated selection, so a skipped smoke job is
+            # always an upstream failure cascade - and fails the gate.
+            ("success", "success", "success", "skipped", "success"): False,
             ("success", "success", "success", "success", "failure"): False,
             ("success", "success", "failure", "success", "success"): False,
             ("success", "failure", "skipped", "skipped", "skipped"): False,
@@ -194,6 +214,51 @@ class SmokeSelectionTests(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("twice", proc.stdout)
 
+    def _run_smoke_with(self, mutate):
+        """Run `smoke` against a copy of the shipped suite after `mutate`."""
+        with open(SMOKE_SUITE, encoding="utf-8") as fh:
+            suite = json.load(fh)
+        mutate(suite)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "suite.json")
+            with open(path, "w", encoding="utf-8") as fh:
+                json.dump(suite, fh)
+            return self._run_smoke(path)
+
+    def test_a_class_in_the_wrong_target_fails_the_selection(self):
+        # Validating against the union of both inventories would let a class
+        # moved between ConduitTests/ and ConduitUITests/ through, and the smoke
+        # job would then filter it against the wrong bundle - running zero tests
+        # for it while the plan job reported success.
+        def mutate(suite):
+            suite["unit"] = list(suite["unit"]) + ["ConnectionSetupUITests"]
+
+        proc = self._run_smoke_with(mutate)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("it is not a unit test class", proc.stdout)
+
+    def test_a_missing_target_key_fails_the_selection(self):
+        def mutate(suite):
+            suite.pop("ui")
+
+        proc = self._run_smoke_with(mutate)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("must declare", proc.stdout)
+
+    def test_an_empty_target_list_fails_the_selection(self):
+        def mutate(suite):
+            suite["ui"] = []
+
+        proc = self._run_smoke_with(mutate)
+        self.assertNotEqual(proc.returncode, 0)
+
+    def test_a_non_class_name_entry_fails_the_selection(self):
+        def mutate(suite):
+            suite["unit"] = list(suite["unit"]) + ["Not A Class"]
+
+        proc = self._run_smoke_with(mutate)
+        self.assertNotEqual(proc.returncode, 0)
+
     def test_selection_output_feeds_the_smoke_jobs(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = os.path.join(tmp, "smoke.json")
@@ -227,6 +292,33 @@ class SmokeSelectionTests(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0,
                             "a smoke gate with no unit classes must not pass "
                             "silently")
+
+    def test_smoke_summary_rejects_an_empty_ui_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = os.path.join(tmp, "no-ui.json")
+            with open(doc, "w", encoding="utf-8") as fh:
+                json.dump({"unit": ["SomeExistingTests"], "ui": [],
+                           "inventory_unit": 3, "inventory_ui": 0}, fh)
+            proc = subprocess.run(
+                [sys.executable, os.path.join(SCRIPTS_DIR, "smoke-summary.py"),
+                 "--selection", doc],
+                capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0,
+                            "a smoke gate with no UI classes must not pass "
+                            "silently")
+
+    def test_smoke_summary_tolerates_absent_counts(self):
+        # Hand-built fixture: the summary must render, not print "None".
+        with tempfile.TemporaryDirectory() as tmp:
+            doc = os.path.join(tmp, "min.json")
+            with open(doc, "w", encoding="utf-8") as fh:
+                json.dump({"unit": ["SomeExistingTests"], "ui": ["OtherUITests"]}, fh)
+            proc = subprocess.run(
+                [sys.executable, os.path.join(SCRIPTS_DIR, "smoke-summary.py"),
+                 "--selection", doc],
+                capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("None", proc.stdout)
 
 
 if __name__ == "__main__":

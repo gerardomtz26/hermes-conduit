@@ -37,9 +37,9 @@ SHA). Neither substitutes for the other.
                  |
         +--------+--------+
         v                 v
-   unit-smoke         ui-smoke        (ONE test-without-building invocation
-   (32 curated        (2 curated       each, one -only-testing filter per
-    unit classes)      UI classes)     curated class; no native flake retry)
+   unit-smoke         ui-smoke        (sequential test-without-building
+   (32 curated        (2 curated       invocations, one -only-testing filter
+    unit classes)      UI classes)     per class; no native flake retry)
         |                 |
         +--------+--------+
                  v
@@ -53,8 +53,8 @@ SHA). Neither substitutes for the other.
 | `plan` | ubuntu | Inventory/planner validation (`plan-tests.py validate`), localization coverage, CI-tooling tests, and the **smoke selection** (`plan-tests.py smoke`). Cheap guard before any macOS minutes are spent. |
 | `self-test` | ubuntu | CI-tooling regression suites (planner tests, lane-runner state machine, destination lookup, gate/contract tests) — concurrent with `build`, so the minutes-long bash state-machine suite never delays macOS work nor risks the plan job's timeout. |
 | `build` | macos-26 | `build-for-testing` exactly once; `.xctestrun` portability audit; uploads products. This is the compile gate for the whole app and every test target. |
-| `unit-smoke` | macos-26 | The curated unit classes in ONE `test-without-building` invocation. |
-| `ui-smoke` | macos-26 | The curated UI classes (launch/navigation smoke) in ONE invocation. |
+| `unit-smoke` | macos-26 | The curated unit classes as sequential `test-without-building` batches of at most `SMOKE_BATCH_SIZE` (8) classes. |
+| `ui-smoke` | macos-26 | The curated UI classes (launch/navigation smoke) in one invocation. |
 | `ci-gate` | ubuntu | The single stable branch-protection verdict (`CI Gate`), aggregating the jobs above via `scripts/ci-gate.py`. |
 
 The self-test job's timeout hierarchy is load-bearing: each synthetic hang in
@@ -89,8 +89,8 @@ deterministic signal:
 | basic UI launch/navigation | `ConnectionSetupUITests`, `ProfilePickerUITests` |
 
 **Delegated to the Mac exhaustive gate** (deliberately NOT in the hosted set):
-the complete remaining inventory (105 unit + 5 UI classes today) and in
-particular the timing/performance/dormancy families —
+the complete remaining inventory (105 unit + 5 UI classes when this shape
+landed) and in particular the timing/performance/dormancy families —
 `TranscriptPerformanceFixtureTests`, `TranscriptPerfLedgerContractTests`,
 `LongContextScalingFixtureTests`, `SettledMessageIsolationTests`,
 `MarkdownRichContentHostedTests`. Those suites exist to measure scheduling and
@@ -100,8 +100,9 @@ they caught. `SmokeSelectionTests` asserts they never re-enter the hosted set.
 
 ### What the hosted gate deliberately does NOT do
 
-* **No dynamic lane fanout.** The smoke suite is one invocation per target;
-  lane balancing buys nothing at this size and made job count unpredictable.
+* **No dynamic lane fanout.** Each target runs in ONE job as a few sequential
+  batches of classes; lane balancing buys nothing at this size and made job
+  count unpredictable.
 * **No Xcode-native flake retry** (`-test-iterations` / `-retry-tests-on-failure`).
   A genuine assertion failure must fail the run — never be re-run until it
   agrees. (Contract-tested in `WorkflowContractTests`.)
@@ -114,12 +115,14 @@ they caught. `SmokeSelectionTests` asserts they never re-enter the hosted set.
 
 ### Cost
 
-Measured on the last full v2 run of main (18 jobs): **129 macOS minutes** per
-run, wall clock ~20–21 minutes, one lane at 18.8 min. The v3 shape is 6 jobs
-and two macOS test jobs of a few minutes each (plus the unchanged
-build-once job), with the Linux jobs unchanged — roughly a **5× cut in macOS
-minutes** and a much shorter tail. The exact numbers for the first v3 run are
-recorded on the PR that introduced it.
+Measured on the last full v2 run of main (18 jobs): **129.2 macOS minutes** per
+run, wall clock ~20–21 minutes, longest job 18.8 min. The v3 shape is 6 jobs:
+`plan` + `self-test` + `ci-gate` on Linux (the same work as before), and three
+macOS jobs — the unchanged compile-everything `build`, plus one `unit-smoke`
+and one `ui-smoke` job running the curated slice. The measured v3 numbers are
+recorded in the pull request that introduced this shape. macOS minutes are the
+smaller part of the win: the point is that the hosted verdict no longer depends
+on shared runners re-litigating timing-sensitive suites.
 
 ## Test discovery
 
@@ -130,7 +133,8 @@ recorded on the PR that introduced it.
 * A class is a **test class** if it directly inherits `XCTestCase` (repo
   convention) or is named `*Tests` and inherits `XCTestCase` transitively.
   This matches the XCTest runtime inventory exactly (verified against
-  `xcodebuild -enumerate-tests`: 67 unit + 1 UI classes).
+  `xcodebuild -enumerate-tests`; at the time the smoke split landed the
+  inventory stood at 137 unit + 7 UI classes).
 * Classes that merely resolve to `XCTestCase` without the above (mocks such
   as `MockGateway`, `FakeSocket`) enumerate zero tests and are excluded from
   lanes - the same behavior as the old static shard guard.
@@ -146,7 +150,9 @@ recorded on the PR that introduced it.
 > layout and the timing extractor. The **hosted** gate no longer fans
 > out into lanes; these mechanisms are what the Mac exhaustive gate
 > drives for a trusted head, and they stay documented here because they
-> are still the contract CI tooling is tested against.
+> are still the contract CI tooling is tested against. The
+> [CI Gate](#ci-gate-branch-protection) section below is the one exception: it
+> documents the **hosted** verdict, not the lane runner.
 
 ## Dynamic lanes
 
@@ -167,7 +173,7 @@ invocations. A lane is spawned only when it buys more than the 120 s wall
 tolerance. Splitting 200 s of tests into two 5-minute jobs (when the
 invocation overhead is several minutes) is a net loss; a heavy outlier class
 that dominates every possible split consolidates the suite into fewer lanes.
-Predicted imbalance is reported in the plan summary and the CI Test Report.
+Predicted imbalance is reported in the plan summary.
 
 ### Sequential unit batches
 
@@ -178,7 +184,8 @@ not hold, a 30-class lane cap did not help, the reproducing set narrowed to
 back-to-back inside ONE job on ONE runner with ONE Simulator session: only
 the `xcodebuild`/XCTest/testhost process was fresh between them). Unit
 lanes therefore execute their planner-assigned classes as **sequential
-small batches**:
+small batches**, and the hosted smoke job applies the same rule to its curated
+classes (`SMOKE_BATCH_SIZE`, fixed at 8 instead of planner-priced):
 
 * `plan-tests.py` chunks each lane's class list, **in its stored (LPT)
   order**, into batches of at most
@@ -264,14 +271,13 @@ Recovery never lets ordinary-failure retries re-execute healthy work:
   class), seeded from a full-suite xcresult measured on local hardware.
   Unseen classes get a conservative default (20 s) so a batch of new tests
   cannot all pile into one lane.
-* **Timing history** - living estimates kept in a GitHub Actions cache
-  (`timing-history-v1-*`). Only successful main runs write it; PR runs
-  consume it read-only. Missing, corrupt, or stale history simply falls back
-  to the baseline; planning correctness never depends on it.
-* `scripts/update-timing-history.py` merges fresh per-class durations with an
-  EWMA (`updated = 0.75 * previous + 0.25 * observed`), clamps extreme
-  outliers to 5x the previous estimate, takes first observations verbatim,
-  and prunes entries for classes that no longer exist.
+* **Timing history** - there is none any more. The `timing-history-v1-*`
+  Actions cache and the main-only job that wrote it were removed in CI v3: they
+  existed to rebalance the hosted lane matrix, which no longer exists.
+  `plan-tests.py` keeps its `--history` input because the planner is also what
+  the Mac exhaustive gate balances with, but nothing produces that file now;
+  estimates come from the checked-in baseline (or the planner default) and
+  planning correctness never depended on either.
 
 ## Build-once artifact fanout
 
@@ -293,14 +299,15 @@ the rest of CI v2.
 ## Failure domains
 
 1. **Ordinary test failures** never rerun healthy work. Every unit batch
-   runs with Xcode-native flake retry (`-retry-tests-on-failure
-   -test-iterations N`), which re-executes only the failing tests; if
-   failures survive those iterations the LANE FAILS on that batch - no
-   batch-level retry masquerades as recovery, and earlier batches keep
-   their recorded passes. A failing UI batch gets one **targeted retry of
-   exactly the non-passing tests** (methods when the xcresult identifies
-   them, the class otherwise); if the retry passes, the classes involved
-   are reported as runner-level flakes and the lane continues.
+   fails the lane on the batch that failed - no batch-level retry masquerades
+   as recovery, and earlier batches keep their recorded passes. A failing UI
+   batch gets one **targeted retry of exactly the non-passing tests** (methods
+   when the xcresult identifies them, the class otherwise); if the retry
+   passes, the classes involved are reported as runner-level flakes and the
+   lane continues. The lane runner still *supports* Xcode-native flake retry
+   (`-retry-tests-on-failure -test-iterations N` via `--iterations > 1`), but no
+   gate enables it any more: `local-ci-gate.sh` runs with `--iterations 1` and
+   the hosted smoke jobs use neither flag.
 2. **Unclassifiable failure** - if an invocation exits nonzero and the
    XCTest result cannot be classified (timing/result extraction failed),
    the lane FAILS immediately (the batch fails its lane; later batches are
@@ -443,29 +450,33 @@ architecture.
 
 ## Observability
 
-Every lane uploads a `lane-<lane-name>` artifact (e.g. `lane-ui-1`,
-`lane-unit-3`) containing `lane-result.json` (status, attempt chain, hung
-class / hung batch, batch-level outcomes, retried classes, predicted vs
-actual), the merged per-class timings (`observations.json`) and per-test
-attempt details (`detail.json`), and a `logs/` directory. Unit lanes log
+Every lane in the **local** exhaustive gate writes `lane-result.json` (status,
+attempt chain, hung class / hung batch, batch-level outcomes, retried classes,
+predicted vs actual), the merged per-class timings (`observations.json`) and
+per-test attempt details (`detail.json`), plus a `logs/` directory, into its run
+directory, and `local-gate.py` renders `summary.md` over them. Unit lanes log
 every batch invocation (`logs/batch-<n>-a<attempt>.log`); UI lanes log and
 name every invocation by class and attempt
 (`logs/class-<class>-a<N>.log`); both keep per-attempt `.xcresult` bundles
 for failed lanes, and on a green lane preserve both attempt bundles of any
-batch/class that needed its retry. The CI Test Report renders a
-**"Unit lane batches"** section (`batch 3/5 watchdog -> retry PASS`) so a
-stalled batch never requires reading raw Actions logs. Timing history is
-recorded per class (UI included), which is what lets the planner balance
-lanes and price batch watchdogs from real runtimes.
+batch/class that needed its retry. (The hosted `lane-<lane-name>` artifact
+upload and the CI Test Report that rendered a **"Unit lane batches"** section
+were removed with the hosted lane matrix in CI v3 — a hosted smoke failure is
+read from the job log, and the report renderer survives only as a local
+inspection subcommand.) Timing history is recorded per class (UI included),
+which is what lets the planner balance the Mac gate's lanes and price batch
+watchdogs from real runtimes.
 
 ## CI Gate (branch protection)
 
 The `CI Gate` job is the single stable required status check for branch
 protection. It passes only when:
 
-* `plan`, `build`, `self-test` and `unit-smoke` succeed, and
-* `ui-smoke` succeeds (or is skipped because the curated selection contains
-  no UI classes).
+* `plan`, `build`, `self-test`, `unit-smoke` and `ui-smoke` all succeed.
+  Nothing is ever legitimately skipped: `plan-tests.py smoke` fails closed on an
+  empty curated selection and both smoke jobs refuse to run unfiltered, so a
+  `skipped` smoke job always means an upstream failure cascade — which fails
+  the gate.
 
 Branch protection must require **CI Gate** (and nothing else from this
 workflow): the smoke jobs are implementation detail, and any job that can be
@@ -774,6 +785,5 @@ that does not exist fails the gate rather than quietly repeating nothing.
 
 ## Local run directories
 
-The CI workspace uses `ci-derived-data/`, `ci-lane/`, `ci-artifacts/`,
-`ci-timing/`, `ci-report/`, `ci-update/` (all gitignored); the same paths
-work for local rehearsal of the scripts.
+The CI workspace uses `ci-derived-data/`, `ci-lane/` and `ci-artifacts/` (all
+gitignored); the same paths work for local rehearsal of the scripts.
