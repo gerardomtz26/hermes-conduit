@@ -107,6 +107,10 @@ class SmokeJobRunnerTests(unittest.TestCase):
         env["STUB_LOG"] = self.log
         env["XCRUN_FILE"] = os.path.join(self.tmp, "fake.xctestrun")
         env["SIMULATOR_NAME"] = "iPhone 17 Pro"
+        # Exported by the "Prepare the pinned simulator destination" step, which
+        # needs macOS-only machinery (ci-lib.sh job control) - its wiring is
+        # pinned by WorkflowContractTests instead.
+        env["DESTINATION"] = "platform=iOS Simulator,id=STUB-UDID,arch=arm64"
         env.update({k: str(v) for k, v in extra.items()})
         return env
 
@@ -225,6 +229,8 @@ class SmokeJobRunnerTests(unittest.TestCase):
         script = _step_script(UNIT_STEP)
         self.assertIn('"$UNIT_CLASSES"', script)
         self.assertIn("SMOKE_BATCH_SIZE", script)
+        self.assertIn('-destination "$DESTINATION"', script,
+                      "the destination must be the one the prepare step pinned")
         self.assertNotIn("-test-iterations", script)
         self.assertNotIn("-retry-tests-on-failure", script,
                          "a genuine assertion must fail the job, not be retried")

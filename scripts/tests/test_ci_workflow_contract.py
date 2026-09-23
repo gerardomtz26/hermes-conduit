@@ -107,6 +107,21 @@ class WorkflowContractTests(unittest.TestCase):
         # macos-26 (docs/CI.md, "Sequential unit batches").
         self.assertIn("SMOKE_BATCH_SIZE", self._job_text("unit-smoke"))
 
+    def test_smoke_jobs_pin_the_simulator_destination(self):
+        # A name-only destination lets xcodebuild pick the first of several
+        # devices with that name, and a fresh runner can reach the test step
+        # before CoreSimulator has settled its device pairs - the repo's shared
+        # ci-lib.sh helpers exist for exactly that, and the build job uses them.
+        for job in ("unit-smoke", "ui-smoke"):
+            text = self._job_text(job)
+            self.assertIn("source scripts/ci-lib.sh", text, job)
+            self.assertIn("wait_for_destination_device", text, job)
+            self.assertIn("build_destination", text, job)
+            self.assertIn("reset_and_boot_simulator", text, job)
+            self.assertIn('-destination "$DESTINATION"', text, job)
+            self.assertNotIn("platform=iOS Simulator,name=", text,
+                             f"{job} must not hand xcodebuild an unpinned destination")
+
     def test_no_write_only_build_metadata_artifact(self):
         self.assertNotIn("name: build-meta", self._workflow_text(),
                          "nothing consumes build-meta once the report job is gone")

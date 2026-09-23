@@ -29,7 +29,7 @@ name: CI
 #   build      (macos)   build-for-testing exactly once; audit the .xctestrun
 #                        for absolute-path portability; upload the products.
 #   unit-smoke (macos)   the curated unit classes, as SEQUENTIAL xcodebuild
-#                        batches of at most $SMOKE_BATCH_SIZE (8) classes -
+#                        batches of at most $SMOKE_BATCH_SIZE (7) classes -
 #                        never one giant invocation.
 #   ui-smoke   (macos)   the curated UI classes, ONE invocation.
 #   ci-gate    (ubuntu)  the single stable branch-protection check.
@@ -205,6 +205,23 @@ jobs:
           python3 scripts/plan-tests.py audit-xctestrun \
             --xctestrun "$XCRUN_FILE" --workspace-root "$GITHUB_WORKSPACE"
 
+      - name: Prepare the pinned simulator destination
+        # The repo's own device handling (shared with the build job and the lane
+        # runner): wait for CoreSimulator to settle its device pairs on a fresh
+        # runner, pin the destination by UDID instead of letting xcodebuild pick
+        # the first of several devices with the same name, then boot that device
+        # before handing it to a test session. Bounded by construction - every
+        # probe and the boot carry their own deadlines and the boot is
+        # best-effort, so a device hiccup degrades to the name-based destination
+        # rather than failing the job here.
+        run: |
+          set -euo pipefail
+          source scripts/ci-lib.sh
+          wait_for_destination_device
+          build_destination
+          reset_and_boot_simulator 0
+          echo "DESTINATION=$DESTINATION" >> "$GITHUB_ENV"
+
       - name: Run the curated unit smoke suite
         # The curated classes run as SEQUENTIAL batches of at most
         # $SMOKE_BATCH_SIZE inside this one job, never as a single invocation:
@@ -215,7 +232,7 @@ jobs:
         # the Mac gate's business.
         env:
           UNIT_CLASSES: "${{ needs.plan.outputs.unit-csv }}"
-          SMOKE_BATCH_SIZE: "8"
+          SMOKE_BATCH_SIZE: "7"
         run: |
           set -euo pipefail
           # Fail closed: an empty list would expand to no -only-testing filter,
@@ -256,7 +273,7 @@ jobs:
             # script (set -e), so the group must be closed before returning.
             if ! xcodebuild test-without-building \
               -xctestrun "$XCRUN_FILE" \
-              -destination "platform=iOS Simulator,name=$SIMULATOR_NAME" \
+              -destination "$DESTINATION" \
               -parallel-testing-enabled NO \
               "${batch_args[@]}"; then
               echo "::endgroup::"
@@ -312,6 +329,18 @@ jobs:
           python3 scripts/plan-tests.py audit-xctestrun \
             --xctestrun "$XCRUN_FILE" --workspace-root "$GITHUB_WORKSPACE"
 
+      - name: Prepare the pinned simulator destination
+        # Same device handling as the unit smoke job: the UI classes are the
+        # most sensitive to which device xcodebuild picks and to a device that
+        # was never booted before the session started.
+        run: |
+          set -euo pipefail
+          source scripts/ci-lib.sh
+          wait_for_destination_device
+          build_destination
+          reset_and_boot_simulator 0
+          echo "DESTINATION=$DESTINATION" >> "$GITHUB_ENV"
+
       - name: Run the curated UI smoke suite
         # Basic launch/navigation smoke only: the full UI suite is certified by
         # the Mac local gate.
@@ -334,7 +363,7 @@ jobs:
           echo "UI smoke: ${#CLASSES[@]} classes"
           xcodebuild test-without-building \
             -xctestrun "$XCRUN_FILE" \
-            -destination "platform=iOS Simulator,name=$SIMULATOR_NAME" \
+            -destination "$DESTINATION" \
             -parallel-testing-enabled NO \
             "${ARGS[@]}"
 
