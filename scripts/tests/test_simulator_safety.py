@@ -23,12 +23,34 @@ SCAN_ROOTS = [
 
 # Identical to the host tool's AUDIT_BLOCKER (ios-ci-host), including the
 # line-level suppression marker, so the two checks cannot drift apart in
-# what they accept.
+# what they accept. `delete unavailable` is included: it deletes devices
+# whose runtime is gone - on a shared host those are OTHER projects'
+# devices, so it is just as host-wide as `all`.
 FORBIDDEN = re.compile(
-    r"\bsimctl\s+(?:-{1,2}[a-z-]+\s+)*(shutdown|erase|delete)\s+(?:[\"\x27]?all[\"\x27]?)\b",
+    r"\bsimctl\s+(?:-{1,2}[a-z-]+\s+)*(shutdown|erase|delete)\s+(?:[\"\x27]?(?:all|unavailable)[\"\x27]?)\b",
     re.IGNORECASE,
 )
 ALLOW_MARKER = "host-safety: allow"
+
+
+def logical_lines(text):
+    """Yield (first physical line number, logical line) with backslash
+    continuations joined, so a command split across lines cannot hide from
+    the scan."""
+    buf = ""
+    start = 1
+    for lineno, line in enumerate(text.splitlines(), 1):
+        buf = (buf + " " + line) if buf else line
+        if not buf:
+            continue
+        if buf.endswith("\\"):
+            buf = buf[:-1]
+            continue
+        yield start, buf
+        buf = ""
+        start = lineno + 1
+    if buf:
+        yield start, buf
 
 # This rule's own source quotes the forbidden commands in its documentation
 # and pattern; a detector must not flag itself.
@@ -55,7 +77,7 @@ class GlobalSimulatorCommandRule(unittest.TestCase):
                 except OSError:
                     continue
                 scanned += 1
-                for lineno, line in enumerate(text.splitlines(), 1):
+                for lineno, line in logical_lines(text):
                     if ALLOW_MARKER in line:
                         continue
                     match = FORBIDDEN.search(line)

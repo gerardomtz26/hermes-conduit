@@ -216,14 +216,25 @@ EOF
 
   cat > "$STUBS/ios-ci-host" <<'EOF'
 #!/bin/bash
-# Models the host coordinator as always-granting and always-quiet: `doctor`
-# self-checks clean, `acquire --hold` grants instantly and holds exactly as
-# long as its stdin stays open (the real FIFO contract the gate relies on),
-# and nothing else is ever asked of it in these fixtures.
+# Models the host coordinator for fixtures. Default mode: always-granting
+# and always-quiet - `doctor` self-checks clean, `acquire --hold` grants
+# instantly and holds exactly as long as its stdin stays open (the real
+# FIFO contract the gate relies on). IOS_CI_HOST_MODE selects the failure
+# shapes the gate must fail closed on:
+#   doctor-fail - the coordinator's self-check fails (gate must exit 2)
+#   busy        - another project holds the resource (gate must exit 3)
+if [ "${IOS_CI_HOST_MODE:-grant}" = "doctor-fail" ] && [ "${1:-}" = "doctor" ]; then
+  echo "stub doctor failure" >&2
+  exit 1
+fi
 case "${1:-}" in
   doctor|status|audit) exit 0 ;;
 esac
 if [ "${1:-}" = "acquire" ]; then
+  if [ "${IOS_CI_HOST_MODE:-grant}" = "busy" ]; then
+    echo "{\"status\": \"busy\", \"resource\": \"simulator-test\", \"owner\": {\"project\": \"VitalRoute\", \"workflow\": \"background-tests\", \"owner_pid\": 4242, \"acquired_at\": \"stub\"}, \"hint\": \"stubbed busy\"}"
+    exit 0
+  fi
   echo "{\"status\": \"acquired\", \"lease_id\": \"L-stub00000000\", \"resource\": \"simulator-test\", \"project\": \"stub\", \"simulator_udid\": null, \"acquired_at\": \"stub\", \"owner_pid\": $$, \"waited_seconds\": 0.0, \"tool_version\": \"stub\"}"
   cat > /dev/null
   exit 0
@@ -461,6 +472,64 @@ if [ -d "$WORK/gate/worktrees" ] && [ -n "$(ls -A "$WORK/gate/worktrees" 2>/dev/
 else
   ok "throwaway worktree removed"
 fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: the host lease is acquired, held, and released ---"
+assert_eq "acquisition evidence lands in the run dir" \
+  "$([ -f "$RUN1/host-lease.json" ] && echo yes || echo no)" "yes"
+assert_contains "lease id recorded" "$(cat "$RUN1/host-lease.json")" "L-stub00000000"
+if ps -Ao command= 2>/dev/null | grep -q "[i]os-ci-host acquire"; then
+  bad "a lease-holder helper survived the gate's exit"
+else
+  ok "lease-holder helper exited with the gate"
+fi
+
+echo ""
+echo "--- case: HOST BUSY refuses before any work (exit 3) ---"
+BUSY_DIR="$(new_run_dir)"
+BUSY_LOG="$WORK/gate-busy-$RANDOM.log"
+IOS_CI_HOST_MODE=busy PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 \
+  bash "$GATE" --allow-another-run --ref HEAD --gate-root "$WORK/gate-busy" \
+    --run-dir "$BUSY_DIR" >"$BUSY_LOG" 2>&1
+BUSY_EXIT=$?
+assert_eq "busy coordinator refuses with exit 3" "$BUSY_EXIT" "3"
+assert_contains "refusal names the owning project" "$BUSY_LOG" "VitalRoute"
+assert_eq "no gate-result.json for a refused run" \
+  "$([ -f "$BUSY_DIR/gate-result.json" ] && echo yes || echo no)" "no"
+assert_eq "refusal evidence retained under the gate root" \
+  "$([ -s "$WORK/gate-busy/host-lease/attempt.json" ] && echo yes || echo no)" "yes"
+
+echo ""
+echo "--- case: a broken coordinator self-check fails closed (exit 2) ---"
+DOCTOR_LOG="$WORK/gate-doctor-$RANDOM.log"
+IOS_CI_HOST_MODE=doctor-fail PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 \
+  bash "$GATE" --allow-another-run --ref HEAD --gate-root "$WORK/gate-doctor" \
+    --run-dir "$(new_run_dir)" >"$DOCTOR_LOG" 2>&1
+DOCTOR_EXIT=$?
+assert_eq "failed coordinator self-check refuses with exit 2" "$DOCTOR_EXIT" "2"
+assert_contains "the self-check failure is reported" "$DOCTOR_LOG" "self-check"
+
+echo ""
+echo "--- case: the default gate root works (no --gate-root passed) ---"
+DEF_LOG="$WORK/gate-defroot-$RANDOM.log"
+# The default GATE_ROOT is the repository's PARENT directory +/conduit-local-gate;
+# the fixture repo lives at $WORK/repo, so this stays inside the sandbox.
+PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 \
+  bash "$GATE" --allow-another-run --ref HEAD >"$DEF_LOG" 2>&1
+DEF_EXIT=$?
+if needs_extraction; then
+  if [ "$DEF_EXIT" -eq 0 ]; then
+    ok "default gate root run exits 0"
+  else
+    bad "default gate root run exited $DEF_EXIT (see $DEF_LOG)"
+    tail -n 30 "$DEF_LOG"
+  fi
+else
+  ok "default gate root run failed closed on unreadable bundles"
+fi
+assert_eq "the default run acquired the host lease" \
+  "$([ -s "$WORK/conduit-local-gate/host-lease/attempt.json" ] && echo yes || echo no)" "yes"
 
 # ---------------------------------------------------------------------------
 echo ""
