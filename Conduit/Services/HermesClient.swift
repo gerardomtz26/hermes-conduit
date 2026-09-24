@@ -47,6 +47,18 @@ private struct JsonRpcResponse: Decodable {
     let params: AnyCodable?
 }
 
+/// A server→client request: the gateway asking the app a question
+/// (`clarify`, `approval`, `sudo`, …). These carry a STRING id (`srq-<hex>`),
+/// which `JsonRpcResponse`'s integer `id` rejects — so without this shape
+/// `handleMessage` drops every one of them as undecodable and the question
+/// never reaches the screen. Internal (not private) so tests decode real
+/// gateway frames through it.
+struct JsonRpcServerRequest: Decodable {
+    let id: String
+    let method: String
+    let params: AnyCodable?
+}
+
 struct RpcError: Decodable, Error, LocalizedError {
     let code: Int?
     let message: String
@@ -294,11 +306,44 @@ struct SessionRuntimeSnapshot {
         approvalsMode = object["approvals_mode"]?.stringValue
             ?? object["approval_mode"]?.stringValue
             ?? object["approvals"]?.objectValue?["mode"]?.stringValue
+        let replayed = Self.replayedDecisions(from: object["open_requests"]?.arrayValue ?? [])
         pendingClarify = object["pending_clarify"]?.objectValue
             .flatMap { MessageNormalizer.pendingClarifyActivity(from: $0) }
+            ?? replayed.clarify
         pendingApprovalPayload = object["pending_approval"]?.objectValue
+            ?? replayed.approval
         self.inflight = inflight
         self.queued = queued
+    }
+
+    /// Decisions still open on the gateway when this client (re)attaches,
+    /// carried as `open_requests` frames instead of the retired one-shot
+    /// events: `[{id, method, params}]`. A `clarify` frame carries no request
+    /// id of its own, so its `srq-…` frame id is injected as `request_id` —
+    /// the address answers must return to and the key the card is stored
+    /// under. Only fills what the explicit snapshots did not already provide.
+    private static func replayedDecisions(
+        from openRequests: [AnyCodable]
+    ) -> (clarify: ClarifyActivity?, approval: [String: AnyCodable]?) {
+        var clarify: ClarifyActivity?
+        var approval: [String: AnyCodable]?
+        for entry in openRequests {
+            guard let frame = entry.objectValue,
+                  let method = frame["method"]?.stringValue,
+                  let id = frame["id"]?.stringValue,
+                  !id.isEmpty,
+                  var params = frame["params"]?.objectValue else { continue }
+            switch method {
+            case "clarify" where clarify == nil:
+                params["request_id"] = .string(id)
+                clarify = MessageNormalizer.pendingClarifyActivity(from: params)
+            case "approval" where approval == nil:
+                approval = params
+            default:
+                continue
+            }
+        }
+        return (clarify, approval)
     }
 }
 
@@ -599,6 +644,9 @@ final class HermesClient: ObservableObject {
     private var socketHasOpened = false
     private var openContinuation: CheckedContinuation<Void, Error>?
     private var openTimeoutTask: Task<Void, Never>?
+    /// Set once `client.capabilities {server_requests: true}` succeeded on the
+    /// CURRENT connection; cleared on every connect so a reconnect re-asserts it.
+    private var advertisedServerRequests = false
 
     let connection: HermesConnection
     let profile: String?
@@ -609,6 +657,12 @@ final class HermesClient: ObservableObject {
     var onDisconnected: (() -> Void)?
 
     static let requestTimeout: TimeInterval = 30
+    /// Prefix of every server→client request id the gateway mints
+    /// (`srq-<12 hex>`). A clarify card stored under one of these was asked as
+    /// a server→client request, so its answer goes back on the response frame
+    /// with that id — never through `clarify.respond`, which this gateway no
+    /// longer implements.
+    static let serverRequestIDPrefix = "srq-"
     static let promptSubmitTimeout: TimeInterval = 180 // 3 minutes
     static let titleGenerationTimeout: TimeInterval = 90
     /// The legacy full-transcript resume is the RPC most likely to carry the
@@ -699,6 +753,7 @@ final class HermesClient: ObservableObject {
 
         closedIntentionally = false
         socketHasOpened = false
+        advertisedServerRequests = false
         let url: URL
         do {
             url = try ConnectionURLPolicy.webSocketURL(
@@ -820,11 +875,22 @@ final class HermesClient: ObservableObject {
     }
 
     private func handleMessage(data: Data) {
-        guard let json = try? JSONDecoder().decode(JsonRpcResponse.self, from: data) else {
-            logger.error("Dropped undecodable inbound WebSocket frame (\(data.count) bytes)")
+        // Order is load-bearing: a server→client request also carries a
+        // `method`, but its STRING id makes `JsonRpcResponse` throw, so it
+        // falls through to the request decoder instead of being logged as
+        // undecodable. Responses and `event` notifications never reach it.
+        if let json = try? JSONDecoder().decode(JsonRpcResponse.self, from: data) {
+            handleRpcFrame(json)
             return
         }
+        if let request = try? JSONDecoder().decode(JsonRpcServerRequest.self, from: data) {
+            handleServerRequest(request)
+            return
+        }
+        logger.error("Dropped undecodable inbound WebSocket frame (\(data.count) bytes)")
+    }
 
+    private func handleRpcFrame(_ json: JsonRpcResponse) {
         // Handle RPC response (has id)
         if let id = json.id {
             guard let pending = pending.removeValue(forKey: id) else {
@@ -850,8 +916,142 @@ final class HermesClient: ObservableObject {
     }
 
     private func handleStreamEvent(params: AnyCodable) {
+        let object = params.objectValue ?? [:]
+        switch object["type"]?.stringValue {
+        case "gateway.ready":
+            advertiseServerRequests()
+        case "request.cancel":
+            // The gateway withdrew an open question; only that card is cleared.
+            handleRequestCancel(object)
+            return
+        default:
+            break
+        }
         if let event = StreamEventParser.parse(params: params) {
             onEvent?(event)
+        }
+    }
+
+    /// One `clarify` / `approval` / … question the gateway asks this app
+    /// (JSON-RPC request, not an event). Rendered through the same stream
+    /// events the retired `*.request` notifications used, so the cards,
+    /// merge policy and fences are unchanged; clarify answers travel back on
+    /// a response frame carrying `request.id`.
+    private func handleServerRequest(_ request: JsonRpcServerRequest) {
+        var params = request.params?.objectValue ?? [:]
+        let sessionId = params["session_id"]?.stringValue ?? ""
+
+        switch request.method {
+        case "clarify":
+            // The frame carries no request id of its own: the `srq-…` id IS
+            // the address every answer must return to, so it becomes the
+            // card's `request_id` — and its prefix is what later routes the
+            // answer to the response frame instead of `clarify.respond`.
+            if params["request_id"] == nil {
+                params["request_id"] = .string(request.id)
+            }
+            guard !sessionId.isEmpty,
+                  let activity = MessageNormalizer.clarifyActivity(from: params) else {
+                answerServerRequest(
+                    request.id,
+                    errorCode: -32602,
+                    errorMessage: "unparseable clarify request"
+                )
+                return
+            }
+            onEvent?(.clarify(sessionId: sessionId, activity: activity))
+        case "approval":
+            guard !sessionId.isEmpty,
+                  let activity = MessageNormalizer.approvalActivity(from: params, sessionId: sessionId) else {
+                answerServerRequest(
+                    request.id,
+                    errorCode: -32602,
+                    errorMessage: "unparseable approval request"
+                )
+                return
+            }
+            // Approvals keep answering through `approval.respond`; resolving
+            // that way settles this request gateway-side, same as any other
+            // surface. Only the render is new — the card used to arrive via
+            // `approval.pending` polling.
+            onEvent?(.approval(sessionId: sessionId, activity: activity))
+        default:
+            // No handler in this build (`sudo`, `secret`, vault prompts, the
+            // desktop bridges): say so with -32601 so the agent fails fast
+            // instead of waiting out the deadline on a card nobody can draw.
+            answerServerRequest(request.id, errorCode: -32601, errorMessage: "method not found")
+        }
+    }
+
+    /// Tells the gateway this build answers server→client requests. Without
+    /// the advertisement every `clarify` / `approval` request is failed BEFORE
+    /// it is sent — gateway log: "the attached client predates server→client
+    /// requests" — so the poll never reaches the screen and the tool returns
+    /// with no answer after ~0s. Sent on `gateway.ready`, which the gateway
+    /// writes as the FIRST frame of every connection, before it will answer
+    /// anything else — the same moment the shared Desktop channel uses.
+    private func advertiseServerRequests() {
+        guard !advertisedServerRequests else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                _ = try await rpc(
+                    "client.capabilities",
+                    params: ["server_requests": true],
+                    // UNSCOPED: the contract is `extra="forbid"` and would
+                    // reject the injected `profile` key with 4000.
+                    scoped: false
+                )
+                advertisedServerRequests = true
+                logger.notice("Gateway accepts server→client requests on this connection")
+            } catch {
+                logger.error("client.capabilities failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+    }
+
+    /// `request.cancel {id, method, reason}`: a withdrawn clarify clears its
+    /// card. Approvals are reconciled by the existing pending-approval
+    /// refresh, so only clarify needs the teardown here.
+    private func handleRequestCancel(_ object: [String: AnyCodable]) {
+        let payload = object["payload"]?.objectValue ?? [:]
+        guard payload["method"]?.stringValue == "clarify",
+              let id = payload["id"]?.stringValue, !id.isEmpty else { return }
+        onEvent?(.clarifyExpire(
+            sessionId: object["session_id"]?.stringValue ?? "",
+            requestId: id
+        ))
+    }
+
+    /// Settles one server→client request with a response frame bearing the
+    /// gateway's own `srq-…` id. JSONSerialization builds it: those ids are
+    /// strings, which `JsonRpcRequest` (integer ids) cannot express.
+    private func answerServerRequest(_ id: String, result: [String: Any]) {
+        sendServerRequestFrame(["jsonrpc": "2.0", "id": id, "result": result])
+    }
+
+    private func answerServerRequest(_ id: String, errorCode: Int, errorMessage: String) {
+        let error: [String: Any] = ["code": errorCode, "message": errorMessage]
+        sendServerRequestFrame([
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": error
+        ])
+    }
+
+    private func sendServerRequestFrame(_ frame: [String: Any]) {
+        guard let socket, socket.closeCode == .invalid, isConnected else { return }
+        guard JSONSerialization.isValidJSONObject(frame),
+              let data = try? JSONSerialization.data(withJSONObject: frame) else {
+            logger.error("Cannot encode server request answer")
+            return
+        }
+        socket.send(.string(String(decoding: data, as: UTF8.self))) { [weak self] error in
+            if let error {
+                self?.logger.error(
+                    "Server request answer failed: \(error.localizedDescription, privacy: .public)"
+                )
+            }
         }
     }
 
@@ -1140,6 +1340,13 @@ final class HermesClient: ObservableObject {
                 snapshotObject[key] = value
             }
         }
+        // Still-open server→client questions ride alongside them: a clarify
+        // asked while the app was detached has no one-shot event to replay and
+        // the gateway dropped `pending_clarify`, so `open_requests` is the only
+        // record of it. The snapshot parser rebuilds the cards from there.
+        if let openRequests = object["open_requests"] {
+            snapshotObject["open_requests"] = openRequests
+        }
         return SessionResumeResult(
             sessionId: resolvedId,
             storedSessionId: storedId,
@@ -1370,6 +1577,13 @@ final class HermesClient: ObservableObject {
         answer: String,
         questionId: String? = nil
     ) async throws -> ClarifyResponseOutcome {
+        if requestId.hasPrefix(Self.serverRequestIDPrefix) {
+            return try await answerServerClarify(
+                requestId: requestId,
+                answer: answer,
+                questionId: questionId
+            )
+        }
         var params: [String: Any] = [
             "request_id": requestId,
             "answer": answer
@@ -1388,6 +1602,43 @@ final class HermesClient: ObservableObject {
             $0.compactMap(\.stringValue)
         }
         return .accepted(remaining: remaining)
+    }
+
+    /// Answers a clarify that arrived as a server→client request. The frame's
+    /// `srq-…` id is the card's `request_id`, so the response frame with that
+    /// same id IS the answer for a single question (`{answer}`; `""` reads as
+    /// skip). Batch questions instead lock one at a time through
+    /// `clarify.lock`: the lock that empties `remaining` resolves the request
+    /// gateway-side, so no closing frame is needed. A non-nil `questionId` can
+    /// only come from a batch — the single-question wire shape mints a
+    /// synthetic UI id, which AppState deliberately keeps off the wire.
+    private func answerServerClarify(
+        requestId: String,
+        answer: String,
+        questionId: String?
+    ) async throws -> ClarifyResponseOutcome {
+        guard let questionId, !questionId.isEmpty else {
+            answerServerRequest(requestId, result: ["answer": answer])
+            return .accepted(remaining: nil)
+        }
+        let result = try await rpc(
+            "clarify.lock",
+            params: [
+                "request_id": requestId,
+                "question_id": questionId,
+                "answer": answer
+            ],
+            // UNSCOPED: same `extra="forbid"` contract as `client.capabilities`.
+            scoped: false
+        )
+        let object = result.objectValue ?? [:]
+        if object["status"]?.stringValue?.lowercased() == "expired" {
+            // Timeout / cancel while the card was still on screen: not an error.
+            return .expired
+        }
+        return .accepted(
+            remaining: object["remaining"]?.arrayValue?.compactMap(\.stringValue)
+        )
     }
 
     func respondToApproval(
