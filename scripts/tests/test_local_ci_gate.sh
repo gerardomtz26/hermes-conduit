@@ -214,7 +214,24 @@ fi
 exit 0
 EOF
 
-  chmod +x "$STUBS/xcodegen" "$STUBS/xcodebuild" "$STUBS/xcrun"
+  cat > "$STUBS/ios-ci-host" <<'EOF'
+#!/bin/bash
+# Models the host coordinator as always-granting and always-quiet: `doctor`
+# self-checks clean, `acquire --hold` grants instantly and holds exactly as
+# long as its stdin stays open (the real FIFO contract the gate relies on),
+# and nothing else is ever asked of it in these fixtures.
+case "${1:-}" in
+  doctor|status|audit) exit 0 ;;
+esac
+if [ "${1:-}" = "acquire" ]; then
+  echo "{\"status\": \"acquired\", \"lease_id\": \"L-stub00000000\", \"resource\": \"simulator-test\", \"project\": \"stub\", \"simulator_udid\": null, \"acquired_at\": \"stub\", \"owner_pid\": $$, \"waited_seconds\": 0.0, \"tool_version\": \"stub\"}"
+  cat > /dev/null
+  exit 0
+fi
+exit 0
+EOF
+
+  chmod +x "$STUBS/xcodegen" "$STUBS/xcodebuild" "$STUBS/xcrun" "$STUBS/ios-ci-host"
 
   # Windows (MSYS/Cygwin) cannot exec an extension-less script: Python's
   # subprocess (the timing extractor shells out to `xcrun xcresulttool`) needs
@@ -223,7 +240,7 @@ EOF
   # Windows checkout instead of silently degrading to "extraction failed".
   case "$(uname -s 2>/dev/null)" in
     MINGW*|MSYS*|CYGWIN*)
-      for name in xcodegen xcodebuild xcrun; do
+      for name in xcodegen xcodebuild xcrun ios-ci-host; do
         printf '@bash "%%~dp0%s" %%*\r\n' "$name" > "$STUBS/$name.cmd"
       done
       ;;

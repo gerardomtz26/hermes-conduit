@@ -258,6 +258,23 @@ simulator_udid() {
   return 1
 }
 
+# Shut down ONLY the lane's own device (resolved through simulator_udid).
+# Shutting down every simulator on the host in one command is FORBIDDEN in
+# automation: this Mac is a shared build host, and a host-wide shutdown
+# reaches simulators other projects and developers own - the exact
+# interference the host coordinator exists to prevent (see
+# scripts/tests/test_simulator_safety.py). When the UDID cannot be resolved
+# the shutdown is skipped with a warning: xcodebuild boots the destination
+# itself, matching this library's existing degradation.
+shutdown_own_simulator() {
+  local udid
+  if udid=$(simulator_udid) && [ -n "$udid" ]; then
+    bounded_run 60 xcrun simctl shutdown "$udid" || true
+  else
+    echo "::warning::could not resolve simulator UDID - skipping the UDID-scoped shutdown"
+  fi
+}
+
 # Reset the simulator to a known-clean state. $1 = 1 erases the device before
 # booting (used before a retry after a timed-out or infrastructure-failed
 # attempt).
@@ -272,7 +289,7 @@ simulator_udid() {
 reset_and_boot_simulator() {
   local erase="${1:-0}"
   local udid
-  bounded_run 60 xcrun simctl shutdown all || true
+  shutdown_own_simulator
   if [ "$erase" -eq 1 ]; then
     echo "::warning::erasing simulator before the retry"
     if ! udid=$(simulator_udid); then

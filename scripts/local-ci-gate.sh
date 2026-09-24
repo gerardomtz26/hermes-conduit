@@ -117,7 +117,12 @@ Options:
                              Simulator).
   -h, --help                 This text.
 
-Exit status: 0 = gate PASS, 1 = gate FAIL, 2 = usage/preflight error.
+Exit status: 0 = gate PASS, 1 = gate FAIL, 2 = usage/preflight error,
+3 = HOST BUSY (the SIMULATOR_TEST host resource is held by another
+project/workflow; the refusing owner is printed). A SIGTERM-driven exit
+during the run means the host-lease monitor detected UNCOORDINATED host
+activity and tore the run down as invalid - see host-watch.jsonl in the
+run dir; the result is not a gate verdict.
 USAGE
 }
 
@@ -235,6 +240,96 @@ for marker in project.yml ConduitTests ConduitUITests; do
   fi
 done
 
+# --- host-level SIMULATOR_TEST lease (ios-ci-host) ---------------------------
+# The per-checkout gate lock below only excludes other GATES on the same
+# checkout; it cannot see VitalRoute, SeaBag, a future project, or an agent
+# session's xcodebuild/simctl chain on this shared Mac - and two concurrent
+# chains corrupt each other's Simulator state (the launch-wedge class of
+# infrastructure failures this gate's recovery round exists to absorb). The
+# host-level coordinator closes that hole: the gate holds the SIMULATOR_TEST
+# resource for its whole duration, fail-closed.
+#
+# Mechanism: a background helper (`acquire --hold`) owns the lease and reads
+# a FIFO as stdin. This script holds the FIFO's write end (fd 3): on EVERY
+# exit path - including a SIGKILL that runs no trap - the kernel closes the
+# pipe, the helper sees EOF, and the lease is released. The helper also
+# watches for uncoordinated simulator activity (host-lease/watch.jsonl) and,
+# by release policy, SIGTERMs THIS script so the run is torn down as invalid
+# instead of being certified against a busy host.
+IOS_CI_HOST_BIN="${IOS_CI_HOST:-$(command -v ios-ci-host 2>/dev/null || true)}"
+if [ -z "$IOS_CI_HOST_BIN" ] && [ -x "$HOME/.local/bin/ios-ci-host" ]; then
+  IOS_CI_HOST_BIN="$HOME/.local/bin/ios-ci-host"
+fi
+if [ -z "$IOS_CI_HOST_BIN" ] || [ ! -x "$IOS_CI_HOST_BIN" ]; then
+  echo "local-ci-gate: the host coordinator ios-ci-host was not found (PATH, \$IOS_CI_HOST, or ~/.local/bin)" >&2
+  echo "local-ci-gate: the exhaustive gate requires host-level SIMULATOR_TEST exclusivity on the shared build Mac;" >&2
+  echo "local-ci-gate: install the coordinator (~/projects/ios-ci-host/install.sh on ios-mac); refusing to run uncoordinated" >&2
+  exit 2
+fi
+if ! "$IOS_CI_HOST_BIN" doctor >/dev/null 2>&1; then
+  echo "local-ci-gate: the host coordinator failed its self-check (run: ios-ci-host doctor)" >&2
+  exit 2
+fi
+HOST_LEASE_DIR="$GATE_ROOT/host-lease"
+mkdir -p "$HOST_LEASE_DIR"
+HOST_LEASE_FIFO="$HOST_LEASE_DIR/holder.fifo"
+HOST_LEASE_JSON="$HOST_LEASE_DIR/attempt.json"
+rm -f "$HOST_LEASE_FIFO" "$HOST_LEASE_JSON" "$HOST_LEASE_DIR/holder.err"
+if ! mkfifo "$HOST_LEASE_FIFO"; then
+  echo "local-ci-gate: cannot create the host-lease FIFO at $HOST_LEASE_FIFO" >&2
+  exit 2
+fi
+IOS_CI_HOST_CONTROLLER_PID=$$ \
+  "$IOS_CI_HOST_BIN" acquire simulator-test \
+    --project Conduit \
+    --repo "$REPO_ROOT" \
+    --workflow local-exhaustive-gate \
+    --sha "$REF" \
+    --simulator-name "$SIMULATOR_NAME" \
+    --description "Conduit local exhaustive gate" \
+    --fail-if-busy --hold \
+    --monitor "$HOST_LEASE_DIR/watch.jsonl" --on-foreign terminate \
+    < "$HOST_LEASE_FIFO" > "$HOST_LEASE_JSON" 2> "$HOST_LEASE_DIR/holder.err" &
+HOST_LEASE_HOLDER=$!
+# A broken helper would never open the FIFO's read end and the exec below
+# would block forever inside open(2); this watchdog turns that into a clean
+# death with an explanation.
+(
+  sleep 90
+  if kill -0 "$HOST_LEASE_HOLDER" 2>/dev/null && [ ! -s "$HOST_LEASE_JSON" ]; then
+    echo "local-ci-gate: the host-lease helper never completed acquisition (is ios-ci-host functional?)" >&2
+    kill -TERM "$$" 2>/dev/null || true
+  fi
+) &
+HOST_LEASE_WATCHDOG=$!
+exec 3>"$HOST_LEASE_FIFO"
+kill "$HOST_LEASE_WATCHDOG" 2>/dev/null || true
+# The helper prints exactly one flushed JSON line before holding; wait for
+# it (or for the helper to die refusing).
+HOST_LEASE_WAITED=0
+while [ ! -s "$HOST_LEASE_JSON" ]; do
+  if ! kill -0 "$HOST_LEASE_HOLDER" 2>/dev/null; then
+    break
+  fi
+  sleep 1
+  HOST_LEASE_WAITED=$(( HOST_LEASE_WAITED + 1 ))
+  if [ "$HOST_LEASE_WAITED" -ge 120 ]; then
+    echo "local-ci-gate: the host-lease helper produced no verdict within ${HOST_LEASE_WAITED}s" >&2
+    break
+  fi
+done
+if ! grep -q '"status": "acquired"' "$HOST_LEASE_JSON" 2>/dev/null; then
+  echo "local-ci-gate: HOST BUSY - the SIMULATOR_TEST host resource is not available to this gate:" >&2
+  sed 's/^/  /' "$HOST_LEASE_JSON" 2>/dev/null >&2 || true
+  sed 's/^/  /' "$HOST_LEASE_DIR/holder.err" 2>/dev/null >&2 || true
+  exec 3>&-
+  kill "$HOST_LEASE_HOLDER" 2>/dev/null || true
+  wait "$HOST_LEASE_HOLDER" 2>/dev/null || true
+  exit 3
+fi
+HOST_LEASE_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("lease_id",""))' "$HOST_LEASE_JSON" 2>/dev/null || true)"
+echo "== host lease: SIMULATOR_TEST held (lease ${HOST_LEASE_ID:-unknown}) =="
+
 # The device is pinned by name and every phase must use the SAME one: the
 # build, the lanes and the recovery round all resolve their destination
 # through ci-lib.sh, which reads this variable. It is passed EXPLICITLY to
@@ -297,6 +392,26 @@ LOCK_DIR="$GATE_ROOT/gate.lock"
 
 cleanup() {
   local status=$?
+  # Release the host SIMULATOR_TEST lease FIRST: closing fd 3 EOFs the
+  # holder helper's stdin, which releases the lease - and this works even
+  # for exit paths that reach nothing else. TERM/KILL are only a backstop
+  # for a wedged helper; the watch log is copied while it still exists.
+  if [ -n "${HOST_LEASE_HOLDER:-}" ]; then
+    exec 3>&- 2>/dev/null || true
+    local _w=0
+    while kill -0 "$HOST_LEASE_HOLDER" 2>/dev/null && [ "$_w" -lt 20 ]; do
+      sleep 0.25
+      _w=$(( _w + 1 ))
+    done
+    kill -TERM "$HOST_LEASE_HOLDER" 2>/dev/null || true
+    sleep 1
+    kill -KILL "$HOST_LEASE_HOLDER" 2>/dev/null || true
+    wait "$HOST_LEASE_HOLDER" 2>/dev/null || true
+  fi
+  if [ -n "${HOST_LEASE_DIR:-}" ] && [ -n "${RUN_DIR:-}" ] && [ -d "$RUN_DIR" ] \
+     && [ -f "$HOST_LEASE_DIR/watch.jsonl" ]; then
+    cp "$HOST_LEASE_DIR/watch.jsonl" "$RUN_DIR/host-watch.jsonl" 2>/dev/null || true
+  fi
   # Removes the canonical lock ONLY if its pid is still this process, and
   # clears an in-flight temporary lock (an interrupt mid-acquisition).
   gate_lock_release
@@ -454,6 +569,12 @@ fi
 if ! mkdir -p "$RUN_DIR"; then
   echo "local-ci-gate: cannot create the run directory $RUN_DIR (a file in the way, or an unwritable parent?)" >&2
   exit 2
+fi
+
+# Host-lease evidence travels with the run's artifacts (the watch log is
+# re-copied at cleanup time with its final contents).
+if [ -s "$HOST_LEASE_JSON" ]; then
+  cp "$HOST_LEASE_JSON" "$RUN_DIR/host-lease.json" || true
 fi
 
 GATE_STARTED_AT="$(now_iso)"
