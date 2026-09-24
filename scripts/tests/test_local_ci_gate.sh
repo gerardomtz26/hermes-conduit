@@ -494,7 +494,7 @@ IOS_CI_HOST_MODE=busy PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 \
     --run-dir "$BUSY_DIR" >"$BUSY_LOG" 2>&1
 BUSY_EXIT=$?
 assert_eq "busy coordinator refuses with exit 3" "$BUSY_EXIT" "3"
-assert_contains "refusal names the owning project" "$BUSY_LOG" "VitalRoute"
+assert_contains "refusal names the owning project" "$(cat "$BUSY_LOG")" "VitalRoute"
 assert_eq "no gate-result.json for a refused run" \
   "$([ -f "$BUSY_DIR/gate-result.json" ] && echo yes || echo no)" "no"
 assert_eq "refusal evidence retained under the gate root" \
@@ -508,7 +508,7 @@ IOS_CI_HOST_MODE=doctor-fail PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 \
     --run-dir "$(new_run_dir)" >"$DOCTOR_LOG" 2>&1
 DOCTOR_EXIT=$?
 assert_eq "failed coordinator self-check refuses with exit 2" "$DOCTOR_EXIT" "2"
-assert_contains "the self-check failure is reported" "$DOCTOR_LOG" "self-check"
+assert_contains "the self-check failure is reported" "$(cat "$DOCTOR_LOG")" "self-check"
 
 echo ""
 echo "--- case: the default gate root works (no --gate-root passed) ---"
