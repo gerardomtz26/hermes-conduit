@@ -314,7 +314,7 @@ cleanup() {
   # TERM/KILL are only a backstop for a wedged helper; the lease evidence
   # is (re-)copied into the run dir while it still exists.
   if [ -n "${HOST_LEASE_HOLDER:-}" ]; then
-    exec 3>&- 2>/dev/null || true
+    exec 3>&- || true
     local _w=0
     while kill -0 "$HOST_LEASE_HOLDER" 2>/dev/null && [ "$_w" -lt 10 ]; do
       sleep 1
@@ -595,7 +595,7 @@ while [ ! -s "$HOST_LEASE_JSON" ]; do
 done
 HOST_LEASE_STATUS="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status",""))' "$HOST_LEASE_JSON" 2>/dev/null || true)"
 if [ "$HOST_LEASE_STATUS" != "acquired" ]; then
-  exec 3>&- 2>/dev/null || true
+  exec 3>&- || true
   kill "$HOST_LEASE_HOLDER" 2>/dev/null || true
   wait "$HOST_LEASE_HOLDER" 2>/dev/null || true
   if [ "$HOST_LEASE_STATUS" = "busy" ]; then

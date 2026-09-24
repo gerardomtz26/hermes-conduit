@@ -514,9 +514,12 @@ echo ""
 echo "--- case: the default gate root works (no --gate-root passed) ---"
 DEF_LOG="$WORK/gate-defroot-$RANDOM.log"
 # The default GATE_ROOT is the repository's PARENT directory +/conduit-local-gate;
-# the fixture repo lives at $WORK/repo, so this stays inside the sandbox.
+# the fixture repo lives at $WORK/repo, so this stays inside the sandbox. The
+# fixture repo only has the 15 synthetic classes, so the default repeat
+# families are replaced by one that exists here (same as the clean-run case).
 PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 \
-  bash "$GATE" --allow-another-run --ref HEAD >"$DEF_LOG" 2>&1
+  bash "$GATE" --allow-another-run --ref HEAD \
+    --repeat-classes AlphaTests --repeat-iterations 2 >"$DEF_LOG" 2>&1
 DEF_EXIT=$?
 if needs_extraction; then
   if [ "$DEF_EXIT" -eq 0 ]; then
