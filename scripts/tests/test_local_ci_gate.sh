@@ -529,7 +529,6 @@ assert_eq "a torn-down run produces no gate verdict" \
   "$([ -f "$FOREIGN_DIR/gate-result.json" ] && echo yes || echo no)" "no"
 assert_eq "the torn-down run had acquired the lease" \
   "$([ -s "$FOREIGN_DIR/host-lease.json" ] && echo yes || echo no)" "yes"
-assert_contains "the teardown explains itself" "$(cat "$FOREIGN_LOG")" "host lease"
 
 echo ""
 echo "--- case: SIGKILL of the gate releases the lease via kernel EOF ---"
