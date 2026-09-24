@@ -9,9 +9,18 @@ import SwiftUI
 import UIKit
 
 extension ShapeStyle where Self == Color {
-    // Primary accent — amber/gold, matching the RN app's signature look
+    // Primary accent — blue (replaces the amber/gold that Gerardo disliked and
+    // that could not carry the user bubble's white text).
     static var conduitAccent: Color { .conduitAdaptiveAccent }
     static var conduitAccentSoft: Color { .conduitAdaptiveAccentSoft }
+    /// Fill of the user's own message bubble. Deliberately NOT the accent: the
+    /// accent has to stay light enough to read as text on the dark backdrop
+    /// (WCAG AA needs ≥4.5:1 there), while the bubble carries WHITE text and so
+    /// must stay dark (≤ ~0.18 luminance) — one colour cannot do both, which is
+    /// exactly why the old gold bubble failed at 2.08:1. Same values in light
+    /// and dark: white text needs its 4.5:1 in both.
+    static var conduitUserBubbleTop: Color { .conduitUserBubbleTopColor }
+    static var conduitUserBubbleBottom: Color { .conduitUserBubbleBottomColor }
     static var conduitAura: Color { Color(red: 0.38, green: 0.58, blue: 0.98) }
     // Text colors (adapt to light/dark via system colors)
     static var conduitText: Color { Color.primary }
@@ -30,15 +39,23 @@ extension Color {
 
     static let conduitAdaptiveAccent = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.88, green: 0.67, blue: 0.28, alpha: 1)
-            : UIColor(red: 0.55, green: 0.37, blue: 0.13, alpha: 1)
+            ? UIColor(red: 0.294, green: 0.518, blue: 0.941, alpha: 1)   // #4B84F0
+            : UIColor(red: 0.173, green: 0.337, blue: 0.769, alpha: 1)   // #2C56C4
     })
 
     static let conduitAdaptiveAccentSoft = Color(uiColor: UIColor { traits in
         traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.98, green: 0.83, blue: 0.48, alpha: 1)
-            : UIColor(red: 0.67, green: 0.49, blue: 0.28, alpha: 1)
+            ? UIColor(red: 0.639, green: 0.769, blue: 0.984, alpha: 1)   // #A3C4FB
+            : UIColor(red: 0.369, green: 0.525, blue: 0.910, alpha: 1)   // #5E86E8
     })
+
+    // User-bubble fill: #2C56C4 → #1E3F94, white text at 6.49:1 / 9.57:1.
+    static let conduitUserBubbleTopColor = Color(uiColor: UIColor(
+        red: 0.173, green: 0.337, blue: 0.769, alpha: 1
+    ))
+    static let conduitUserBubbleBottomColor = Color(uiColor: UIColor(
+        red: 0.118, green: 0.247, blue: 0.580, alpha: 1
+    ))
 }
 
 // MARK: - App identity

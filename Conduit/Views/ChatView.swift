@@ -1092,7 +1092,9 @@ struct UserMessageContent: View, Equatable {
         .padding(.vertical, 11)
         .background(
             LinearGradient(
-                colors: [.conduitAccent, .conduitAccent.opacity(0.76)],
+                // Own pair, not `conduitAccent`: the bubble must stay dark
+                // enough for its white text (6.49:1 → 9.57:1).
+                colors: [.conduitUserBubbleTop, .conduitUserBubbleBottom],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             ),
