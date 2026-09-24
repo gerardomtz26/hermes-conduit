@@ -14,10 +14,9 @@ settings:
     SWIFT_VERSION: "5.9"
     IPHONEOS_DEPLOYMENT_TARGET: "17.0"
     ENABLE_BITCODE: NO
-    DEVELOPMENT_TEAM: U2TH557QA8
-    CODE_SIGN_STYLE: Manual
-    MARKETING_VERSION: "0.1.4"
-    CURRENT_PROJECT_VERSION: "131"
+    CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "0.1.10"
+    CURRENT_PROJECT_VERSION: "146"
 targets:
   Conduit:
     type: application
@@ -31,14 +30,11 @@ targets:
         buildPhase: resources
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: com.milim.relay
+        PRODUCT_BUNDLE_IDENTIFIER: com.gerardomtz26.conduit.dev
         PRODUCT_NAME: Conduit
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Conduit/Info.plist
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        CODE_SIGN_IDENTITY: "Apple Distribution"
-        CODE_SIGN_ENTITLEMENTS: Conduit/Conduit.entitlements
-        PROVISIONING_PROFILE_SPECIFIER: "Conduit App Store"
   ConduitTests:
     type: bundle.unit-test
     platform: iOS
