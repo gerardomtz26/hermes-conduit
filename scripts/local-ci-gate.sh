@@ -600,16 +600,16 @@ if [ "$HOST_LEASE_STATUS" != "acquired" ]; then
   wait "$HOST_LEASE_HOLDER" 2>/dev/null || true
   if [ "$HOST_LEASE_STATUS" = "busy" ]; then
     echo "local-ci-gate: HOST BUSY - the SIMULATOR_TEST host resource is not available to this gate:" >&2
-    sed 's/^/  /' "$HOST_LEASE_JSON" 2>/dev/null >&2 || true
-    sed 's/^/  /' "$HOST_LEASE_DIR/holder.err" 2>/dev/null >&2 || true
+    sed 's/^/  /' "$HOST_LEASE_JSON" >&2 2>/dev/null || true
+    sed 's/^/  /' "$HOST_LEASE_DIR/holder.err" >&2 2>/dev/null || true
     echo "local-ci-gate: refusal evidence retained at $HOST_LEASE_DIR" >&2
     exit 3
   fi
   # No verdict at all (helper died, crashed, or produced nothing parseable)
   # is a coordinator failure - a preflight condition, not a busy host.
   echo "local-ci-gate: the host coordinator failed to grant the lease (status: '${HOST_LEASE_STATUS:-none}'):" >&2
-  sed 's/^/  /' "$HOST_LEASE_JSON" 2>/dev/null >&2 || true
-  sed 's/^/  /' "$HOST_LEASE_DIR/holder.err" 2>/dev/null >&2 || true
+  sed 's/^/  /' "$HOST_LEASE_JSON" >&2 2>/dev/null || true
+  sed 's/^/  /' "$HOST_LEASE_DIR/holder.err" >&2 2>/dev/null || true
   echo "local-ci-gate: refusal evidence retained at $HOST_LEASE_DIR" >&2
   exit 2
 fi
