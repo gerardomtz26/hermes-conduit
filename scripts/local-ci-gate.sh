@@ -317,7 +317,8 @@ cleanup() {
   fi
   # Release the host SIMULATOR_TEST lease FIRST: closing fd 3 EOFs the
   # holder helper's stdin, which releases the lease - and this works even
-  # for exit paths that reach nothing else (children never inherit fd 3).
+  # for exit paths that reach nothing else (no LONG-LIVED child keeps the
+  # write end open; short-lived probes inherit it only transiently).
   # TERM/KILL are only a backstop for a wedged helper; the lease evidence
   # is (re-)copied into the run dir while it still exists.
   if [ -n "${HOST_LEASE_HOLDER:-}" ]; then
@@ -552,9 +553,14 @@ HOST_LEASE_DIR="$GATE_ROOT/host-lease"
 mkdir -p "$HOST_LEASE_DIR"
 # Reused per run (the gate lock above serializes same-root gates); the
 # watch log APPENDS across runs on purpose - it is the host-busy evidence
-# trail - while attempt.json/holder.err are reset each run.
+# trail - rotating once past 10MB (each run's own copy in the run dir stays
+# complete); attempt.json/holder.err are reset each run.
 HOST_LEASE_FIFO="$HOST_LEASE_DIR/holder.fifo"
 HOST_LEASE_JSON="$HOST_LEASE_DIR/attempt.json"
+if [ -f "$HOST_LEASE_DIR/watch.jsonl" ] \
+   && [ "$(wc -c < "$HOST_LEASE_DIR/watch.jsonl")" -gt 10485760 ]; then
+  mv "$HOST_LEASE_DIR/watch.jsonl" "$HOST_LEASE_DIR/watch-$(date +%s).jsonl" || true
+fi
 rm -f "$HOST_LEASE_FIFO" "$HOST_LEASE_JSON" "$HOST_LEASE_DIR/holder.err"
 # 0600: on a multi-account build Mac no other local user may be able to open
 # the FIFO's read end and race the lease rendezvous.
@@ -626,6 +632,16 @@ if [ "$HOST_LEASE_STATUS" != "acquired" ]; then
   exit 2
 fi
 HOST_LEASE_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("lease_id",""))' "$HOST_LEASE_JSON" 2>/dev/null || true)"
+# "acquired" is only evidence while the holder is alive to keep holding it:
+# helper death releases the lease BY DESIGN, so a holder that exited right
+# after granting means this gate would run uncoordinated while believing
+# otherwise. Refuse instead.
+if ! kill -0 "$HOST_LEASE_HOLDER" 2>/dev/null; then
+  echo "local-ci-gate: the lease holder exited immediately after granting - refusing to run uncoordinated" >&2
+  exec 3>&- || true
+  wait "$HOST_LEASE_HOLDER" 2>/dev/null || true
+  exit 2
+fi
 echo "== host lease: SIMULATOR_TEST held (lease ${HOST_LEASE_ID:-unknown}) =="
 cp "$HOST_LEASE_JSON" "$RUN_DIR/host-lease.json" 2>/dev/null || true
 

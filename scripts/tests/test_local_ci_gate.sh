@@ -224,6 +224,9 @@ EOF
 #   doctor-fail - the coordinator's self-check fails (gate must exit 2)
 #   busy        - another project holds the resource (gate must exit 3)
 #   foreign     - the monitor signals the controller mid-run (invalid run)
+#   dead        - the helper dies without any verdict (gate must exit 2)
+# IOS_CI_HOST_PIDFILE, when set, receives the holder's pid so suite
+# assertions never have to pattern-match the shared host's process table.
 if [ "${IOS_CI_HOST_MODE:-grant}" = "doctor-fail" ] && [ "${1:-}" = "doctor" ]; then
   echo "stub doctor failure" >&2
   exit 1
@@ -236,11 +239,20 @@ if [ "${1:-}" = "acquire" ]; then
     echo "{\"status\": \"busy\", \"resource\": \"simulator-test\", \"owner\": {\"project\": \"VitalRoute\", \"workflow\": \"background-tests\", \"owner_pid\": 4242, \"acquired_at\": \"stub\"}, \"hint\": \"stubbed busy\"}"
     exit 0
   fi
+  if [ "${IOS_CI_HOST_MODE:-grant}" = "dead" ]; then
+    exit 1
+  fi
   if [ "${IOS_CI_HOST_MODE:-grant}" = "foreign" ]; then
     # Model the monitor's release-policy action: shortly after granting,
     # signal the controller (the gate) that uncoordinated activity was seen.
-    ( sleep 1; kill -TERM "${IOS_CI_HOST_CONTROLLER_PID:-0}" 2>/dev/null || true ) &
+    (
+      sleep 1
+      if [ -n "${IOS_CI_HOST_CONTROLLER_PID:-}" ]; then
+        kill -TERM "$IOS_CI_HOST_CONTROLLER_PID" 2>/dev/null || true
+      fi
+    ) &
   fi
+  [ -n "${IOS_CI_HOST_PIDFILE:-}" ] && echo $$ > "$IOS_CI_HOST_PIDFILE"
   echo "{\"status\": \"acquired\", \"lease_id\": \"L-stub00000000\", \"resource\": \"simulator-test\", \"project\": \"stub\", \"simulator_udid\": null, \"acquired_at\": \"stub\", \"owner_pid\": $$, \"waited_seconds\": 0.0, \"tool_version\": \"stub\"}"
   cat > /dev/null
   exit 0
@@ -482,10 +494,16 @@ fi
 # ---------------------------------------------------------------------------
 echo ""
 echo "--- case: the host lease is acquired, held, and released ---"
+# The stub holder records its pid so these assertions never pattern-match
+# the SHARED host's process table (a real coordinator holding a lease for
+# another project must not fail this suite).
+export IOS_CI_HOST_PIDFILE="$WORK/holder.pid"
+rm -f "$IOS_CI_HOST_PIDFILE"
 assert_eq "acquisition evidence lands in the run dir" \
   "$([ -f "$RUN1/host-lease.json" ] && echo yes || echo no)" "yes"
 assert_contains "lease id recorded" "$(cat "$RUN1/host-lease.json")" "L-stub00000000"
-if ps -Ao command= 2>/dev/null | grep -q "[i]os-ci-host acquire"; then
+HOLDER_PID="$(cat "$IOS_CI_HOST_PIDFILE" 2>/dev/null || true)"
+if [ -n "$HOLDER_PID" ] && kill -0 "$HOLDER_PID" 2>/dev/null; then
   bad "a lease-holder helper survived the gate's exit"
 else
   ok "lease-holder helper exited with the gate"
@@ -515,6 +533,16 @@ IOS_CI_HOST_MODE=doctor-fail PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 \
 DOCTOR_EXIT=$?
 assert_eq "failed coordinator self-check refuses with exit 2" "$DOCTOR_EXIT" "2"
 assert_contains "the self-check failure is reported" "$(cat "$DOCTOR_LOG")" "self-check"
+
+echo ""
+echo "--- case: a helper that dies without a verdict fails closed (exit 2) ---"
+DEAD_LOG="$WORK/gate-dead-$RANDOM.log"
+IOS_CI_HOST_MODE=dead PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 \
+  bash "$GATE" --allow-another-run --ref HEAD --gate-root "$WORK/gate-dead" \
+    --run-dir "$(new_run_dir)" >"$DEAD_LOG" 2>&1
+DEAD_EXIT=$?
+assert_eq "a verdict-less helper refuses with exit 2" "$DEAD_EXIT" "2"
+assert_contains "the refusal explains the coordinator failure" "$(cat "$DEAD_LOG")" "coordinator failed to grant"
 
 echo ""
 echo "--- case: the monitor's invalid-run teardown is not a verdict ---"
@@ -547,9 +575,10 @@ done
 assert_eq "the run acquired the lease before the kill" "$KILL_ACQUIRED" "0"
 kill -9 "$KILL_GATE_PID" 2>/dev/null || true
 wait "$KILL_GATE_PID" 2>/dev/null || true
+KILL_HOLDER_PID="$(cat "$IOS_CI_HOST_PIDFILE" 2>/dev/null || true)"
 KILL_RELEASED=1
 for i in $(seq 1 40); do
-  if ! ps -Ao command= 2>/dev/null | grep -q "[i]os-ci-host acquire"; then
+  if [ -z "$KILL_HOLDER_PID" ] || ! kill -0 "$KILL_HOLDER_PID" 2>/dev/null; then
     KILL_RELEASED=0
     break
   fi

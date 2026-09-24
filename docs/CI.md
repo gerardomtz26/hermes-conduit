@@ -604,9 +604,11 @@ duration:
   the run down as **invalid**: the gate dies by SIGTERM (exit 143), the run
   directory keeps `host-lease.json` + `host-watch.jsonl`, and the result is
   **not a gate verdict** — it must not be counted as a test failure or as a
-  pass. (After a SIGKILL of the gate — the one death no trap covers — the
-  lease still releases via kernel EOF on the FIFO; the watch log then
-  remains only under `<gate-root>/host-lease/watch.jsonl`.)
+  pass. (A SIGTERM exit before `host-lease.json` appears in the run dir means
+  the acquisition watchdog fired — the coordinator never granted — not
+  foreign activity. After a SIGKILL of the gate — the one death no trap
+  covers — the lease still releases via kernel EOF on the FIFO; the watch
+  log then remains only under `<gate-root>/host-lease/watch.jsonl`.)
 - In automation, simulator lifecycle commands are UDID-scoped only;
   host-wide `shutdown/erase/delete`-of-everything commands are rejected by
   the static rule in `scripts/tests/test_simulator_safety.py` (mirroring
