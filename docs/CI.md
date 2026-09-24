@@ -601,9 +601,12 @@ duration:
   classifies any simulator-testing activity that is not part of this gate
   as `FOREIGN` (evidence: pid, argv, ancestor chain — never which desktop
   app spawned it). Per release policy (`--on-foreign terminate`) it tears
-  the run down as **invalid**: the gate dies by SIGTERM, the run directory
-  keeps `host-lease.json` + `host-watch.jsonl`, and the result is **not a
-  gate verdict** — it must not be counted as a test failure or as a pass.
+  the run down as **invalid**: the gate dies by SIGTERM (exit 143), the run
+  directory keeps `host-lease.json` + `host-watch.jsonl`, and the result is
+  **not a gate verdict** — it must not be counted as a test failure or as a
+  pass. (After a SIGKILL of the gate — the one death no trap covers — the
+  lease still releases via kernel EOF on the FIFO; the watch log then
+  remains only under `<gate-root>/host-lease/watch.jsonl`.)
 - In automation, simulator lifecycle commands are UDID-scoped only;
   host-wide `shutdown/erase/delete`-of-everything commands are rejected by
   the static rule in `scripts/tests/test_simulator_safety.py` (mirroring

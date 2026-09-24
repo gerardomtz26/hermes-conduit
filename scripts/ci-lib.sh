@@ -82,7 +82,7 @@ run_with_deadline() {
   # group so a deadline kill takes down the command AND its children without
   # signalling this script itself.
   set -m
-  xcodebuild "$@" >"$log" 2>&1 &
+  xcodebuild "$@" >"$log" 2>&1 3>&- &
   runner=$!
   set +m
 
@@ -158,7 +158,7 @@ bounded_run() {
   local runner status grace
   BOUNDED_OUTPUT=""
   set -m
-  "$@" >"$outfile" 2>&1 &
+  "$@" >"$outfile" 2>&1 3>&- &
   runner=$!
   set +m
   local deadline=$(( $(date +%s) + budget ))

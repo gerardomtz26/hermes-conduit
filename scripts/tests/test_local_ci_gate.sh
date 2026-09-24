@@ -223,6 +223,7 @@ EOF
 # shapes the gate must fail closed on:
 #   doctor-fail - the coordinator's self-check fails (gate must exit 2)
 #   busy        - another project holds the resource (gate must exit 3)
+#   foreign     - the monitor signals the controller mid-run (invalid run)
 if [ "${IOS_CI_HOST_MODE:-grant}" = "doctor-fail" ] && [ "${1:-}" = "doctor" ]; then
   echo "stub doctor failure" >&2
   exit 1
@@ -234,6 +235,11 @@ if [ "${1:-}" = "acquire" ]; then
   if [ "${IOS_CI_HOST_MODE:-grant}" = "busy" ]; then
     echo "{\"status\": \"busy\", \"resource\": \"simulator-test\", \"owner\": {\"project\": \"VitalRoute\", \"workflow\": \"background-tests\", \"owner_pid\": 4242, \"acquired_at\": \"stub\"}, \"hint\": \"stubbed busy\"}"
     exit 0
+  fi
+  if [ "${IOS_CI_HOST_MODE:-grant}" = "foreign" ]; then
+    # Model the monitor's release-policy action: shortly after granting,
+    # signal the controller (the gate) that uncoordinated activity was seen.
+    ( sleep 1; kill -TERM "${IOS_CI_HOST_CONTROLLER_PID:-0}" 2>/dev/null || true ) &
   fi
   echo "{\"status\": \"acquired\", \"lease_id\": \"L-stub00000000\", \"resource\": \"simulator-test\", \"project\": \"stub\", \"simulator_udid\": null, \"acquired_at\": \"stub\", \"owner_pid\": $$, \"waited_seconds\": 0.0, \"tool_version\": \"stub\"}"
   cat > /dev/null
@@ -509,6 +515,48 @@ IOS_CI_HOST_MODE=doctor-fail PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 \
 DOCTOR_EXIT=$?
 assert_eq "failed coordinator self-check refuses with exit 2" "$DOCTOR_EXIT" "2"
 assert_contains "the self-check failure is reported" "$(cat "$DOCTOR_LOG")" "self-check"
+
+echo ""
+echo "--- case: the monitor's invalid-run teardown is not a verdict ---"
+FOREIGN_DIR="$(new_run_dir)"
+FOREIGN_LOG="$WORK/gate-foreign-$RANDOM.log"
+IOS_CI_HOST_MODE=foreign PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 \
+  bash "$GATE" --allow-another-run --ref HEAD --gate-root "$WORK/gate-foreign" \
+    --run-dir "$FOREIGN_DIR" >"$FOREIGN_LOG" 2>&1
+FOREIGN_EXIT=$?
+assert_eq "a monitor teardown exits 143 (SIGTERM)" "$FOREIGN_EXIT" "143"
+assert_eq "a torn-down run produces no gate verdict" \
+  "$([ -f "$FOREIGN_DIR/gate-result.json" ] && echo yes || echo no)" "no"
+assert_eq "the torn-down run had acquired the lease" \
+  "$([ -s "$FOREIGN_DIR/host-lease.json" ] && echo yes || echo no)" "yes"
+assert_contains "the teardown explains itself" "$(cat "$FOREIGN_LOG")" "host lease"
+
+echo ""
+echo "--- case: SIGKILL of the gate releases the lease via kernel EOF ---"
+KILL_DIR="$(new_run_dir)"
+KILL_LOG="$WORK/gate-kill-$RANDOM.log"
+PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 \
+  bash "$GATE" --allow-another-run --ref HEAD --gate-root "$WORK/gate-kill" \
+    --run-dir "$KILL_DIR" >"$KILL_LOG" 2>&1 &
+KILL_GATE_PID=$!
+KILL_ACQUIRED=1
+for i in $(seq 1 120); do
+  if [ -s "$KILL_DIR/host-lease.json" ]; then KILL_ACQUIRED=0; break; fi
+  if ! kill -0 "$KILL_GATE_PID" 2>/dev/null; then break; fi
+  sleep 0.5
+done
+assert_eq "the run acquired the lease before the kill" "$KILL_ACQUIRED" "0"
+kill -9 "$KILL_GATE_PID" 2>/dev/null || true
+wait "$KILL_GATE_PID" 2>/dev/null || true
+KILL_RELEASED=1
+for i in $(seq 1 40); do
+  if ! ps -Ao command= 2>/dev/null | grep -q "[i]os-ci-host acquire"; then
+    KILL_RELEASED=0
+    break
+  fi
+  sleep 0.5
+done
+assert_eq "kernel EOF released the lease holder without any trap" "$KILL_RELEASED" "0"
 
 echo ""
 echo "--- case: the default gate root works (no --gate-root passed) ---"

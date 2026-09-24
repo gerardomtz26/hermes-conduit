@@ -40,15 +40,16 @@ def logical_lines(text):
     buf = ""
     start = 1
     for lineno, line in enumerate(text.splitlines(), 1):
-        buf = (buf + " " + line) if buf else line
         if not buf:
-            continue
-        if buf.endswith("\\"):
-            buf = buf[:-1]
+            if not line.strip():
+                continue
+            start = lineno
+        buf = (buf + " " + line.strip()).rstrip() if buf else line
+        if buf.rstrip().endswith("\\"):
+            buf = buf.rstrip()[:-1]
             continue
         yield start, buf
         buf = ""
-        start = lineno + 1
     if buf:
         yield start, buf
 
@@ -58,6 +59,24 @@ EXEMPT_FILE_NAMES = {"test_simulator_safety.py"}
 
 
 class GlobalSimulatorCommandRule(unittest.TestCase):
+
+    def test_detector_flags_canonical_offenders(self):
+        """Positive controls: a regex typo that made FORBIDDEN match nothing
+        would otherwise pass the clean-tree assertion forever."""
+        cases = {
+            "xcrun simctl shutdown all": True,
+            "simctl erase 'all'": True,
+            'simctl shutdown "all"': True,
+            "xcrun simctl delete unavailable": True,
+            "xcrun simctl shutdown \\\n  all": True,
+            'xcrun simctl shutdown "$UDID" || true': False,
+            "xcrun simctl boot \"$UDID\"": False,
+            "bounded_run 60 xcrun simctl shutdown \"$udid\" || true  # host-safety: allow": False,
+        }
+        for text, expect in cases.items():
+            joined = " ".join(line for _, line in logical_lines(text))
+            self.assertEqual(bool(FORBIDDEN.search(joined)), expect,
+                             "detector misclassified: %r" % text)
 
     def test_automation_contains_no_global_simulator_lifecycle_commands(self):
         offenders = []

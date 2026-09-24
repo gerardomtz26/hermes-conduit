@@ -308,6 +308,13 @@ LOCK_DIR="$GATE_ROOT/gate.lock"
 
 cleanup() {
   local status=$?
+  # Reap the acquisition watchdog first: a TERM landing in the small window
+  # between its spawn and the post-exec kill would otherwise leave a 60s
+  # orphaned sleep behind.
+  if [ -n "${HOST_LEASE_WATCHDOG:-}" ]; then
+    kill "$HOST_LEASE_WATCHDOG" 2>/dev/null || true
+    wait "$HOST_LEASE_WATCHDOG" 2>/dev/null || true
+  fi
   # Release the host SIMULATOR_TEST lease FIRST: closing fd 3 EOFs the
   # holder helper's stdin, which releases the lease - and this works even
   # for exit paths that reach nothing else (children never inherit fd 3).
@@ -514,12 +521,14 @@ echo "simulator : $SIMULATOR_NAME"
 #
 # Mechanism: a background helper (`acquire --hold`) owns the lease and reads
 # a FIFO as stdin. This script holds the FIFO's write end (fd 3) and closes
-# that descriptor in EVERY child it spawns (`3>&-` in run_bounded,
+# that descriptor in every LONG-LIVED child it spawns (`3>&-` in run_bounded,
 # run_static_check, the build subshell, run_lane, and simulator_prep), so
 # the write end dies with THIS process: on every exit path - including a
 # SIGKILL that runs no trap - the kernel closes the pipe, the helper sees
 # EOF, and the lease is released; a surviving lane subtree can never hold
-# the host hostage by inheritance. The helper also watches for uncoordinated
+# the host hostage by inheritance. (Short-lived synchronous probes - git,
+# date, the python3 JSON parses - transiently inherit fd 3 and release it
+# on exit within milliseconds.) The helper also watches for uncoordinated
 # simulator activity (host-lease/watch.jsonl) and, by release policy,
 # SIGTERMs THIS script so the run is torn down as invalid instead of being
 # certified against a busy host; the teardown completes when the currently
@@ -547,7 +556,9 @@ mkdir -p "$HOST_LEASE_DIR"
 HOST_LEASE_FIFO="$HOST_LEASE_DIR/holder.fifo"
 HOST_LEASE_JSON="$HOST_LEASE_DIR/attempt.json"
 rm -f "$HOST_LEASE_FIFO" "$HOST_LEASE_JSON" "$HOST_LEASE_DIR/holder.err"
-if ! mkfifo "$HOST_LEASE_FIFO"; then
+# 0600: on a multi-account build Mac no other local user may be able to open
+# the FIFO's read end and race the lease rendezvous.
+if ! ( umask 077 && mkfifo "$HOST_LEASE_FIFO" ); then
   echo "local-ci-gate: cannot create the host-lease FIFO at $HOST_LEASE_FIFO" >&2
   exit 2
 fi
@@ -563,13 +574,14 @@ IOS_CI_HOST_CONTROLLER_PID=$$ \
     --monitor "$HOST_LEASE_DIR/watch.jsonl" --on-foreign terminate \
     < "$HOST_LEASE_FIFO" > "$HOST_LEASE_JSON" 2> "$HOST_LEASE_DIR/holder.err" &
 HOST_LEASE_HOLDER=$!
-# A broken helper would never open the FIFO's read end and the exec below
-# would block forever inside open(2); this watchdog turns that into a clean
-# refusal. It fires only while the verdict is still missing, kills the
-# helper too, and the traps already installed above run the full cleanup.
+# A helper that never opens the FIFO's read end (broken, or dead before its
+# stdin open completes) would leave the exec below blocked forever inside
+# open(2); this watchdog turns that into a clean refusal. It fires on the
+# MISSING VERDICT alone - a dead helper fails `kill -0`, so conditioning on
+# liveness would miss exactly the deadlock this exists to break.
 (
   sleep 60
-  if kill -0 "$HOST_LEASE_HOLDER" 2>/dev/null && [ ! -s "$HOST_LEASE_JSON" ]; then
+  if [ ! -s "$HOST_LEASE_JSON" ]; then
     echo "local-ci-gate: the host-lease helper never completed acquisition (is ios-ci-host functional?)" >&2
     kill -TERM "$HOST_LEASE_HOLDER" 2>/dev/null || true
     kill -TERM "$$" 2>/dev/null || true
@@ -593,7 +605,7 @@ while [ ! -s "$HOST_LEASE_JSON" ]; do
     break
   fi
 done
-HOST_LEASE_STATUS="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("status",""))' "$HOST_LEASE_JSON" 2>/dev/null || true)"
+HOST_LEASE_STATUS="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("status",""))' "$HOST_LEASE_JSON" 2>/dev/null || true)"
 if [ "$HOST_LEASE_STATUS" != "acquired" ]; then
   exec 3>&- || true
   kill "$HOST_LEASE_HOLDER" 2>/dev/null || true
@@ -613,7 +625,7 @@ if [ "$HOST_LEASE_STATUS" != "acquired" ]; then
   echo "local-ci-gate: refusal evidence retained at $HOST_LEASE_DIR" >&2
   exit 2
 fi
-HOST_LEASE_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("lease_id",""))' "$HOST_LEASE_JSON" 2>/dev/null || true)"
+HOST_LEASE_ID="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8")).get("lease_id",""))' "$HOST_LEASE_JSON" 2>/dev/null || true)"
 echo "== host lease: SIMULATOR_TEST held (lease ${HOST_LEASE_ID:-unknown}) =="
 cp "$HOST_LEASE_JSON" "$RUN_DIR/host-lease.json" 2>/dev/null || true
 
