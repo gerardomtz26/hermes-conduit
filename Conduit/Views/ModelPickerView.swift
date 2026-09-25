@@ -514,6 +514,8 @@ private struct ModelPickerSection<Content: View>: View {
     let tint: Color
     private let content: Content
     @Environment(\.colorScheme) private var colorScheme
+    /// Re-evaluates `sectionFoundation` when the AMOLED preference flips.
+    @AppStorage(AmoledBackground.preferenceKey) private var amoledBackground = false
 
     init(title: String, symbol: String, tint: Color, @ViewBuilder content: () -> Content) {
         self.title = title

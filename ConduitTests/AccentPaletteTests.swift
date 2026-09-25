@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 @testable import Conduit
 
 /// The colour contract behind the accent picker: every palette the app offers
@@ -82,5 +83,32 @@ final class AccentPaletteTests: XCTestCase {
             AccentPalette.gris.rawValue
         )
         XCTAssertEqual(AccentPalette.current.accentDarkHex, "#8E95A1")
+    }
+
+    /// The repaint contract. SwiftUI compares `Color(uiColor:)` by the object
+    /// it wraps, so the values the views hold must DIFFER between palettes —
+    /// otherwise a picker change renders nothing no matter how the preference
+    /// is observed (the bug that made the first AMOLED build inert).
+    func testColourValuesSwiftUIComparesChangeWithThePalette() {
+        let original = AccentPalette.current
+        defer { AccentPalette.select(original) }
+
+        AccentPalette.select(.azul)
+        let blueAccent = Color.conduitAdaptiveAccent
+        let blueBubble = Color.conduitUserBubbleTopColor
+
+        // Stable while the selection stands: same value, no render churn.
+        XCTAssertEqual(Color.conduitAdaptiveAccent, blueAccent)
+        XCTAssertEqual(Color.conduitUserBubbleTopColor, blueBubble)
+
+        AccentPalette.select(.gris)
+        XCTAssertNotEqual(
+            Color.conduitAdaptiveAccent, blueAccent,
+            "the accent value must change when the palette does"
+        )
+        XCTAssertNotEqual(
+            Color.conduitUserBubbleTopColor, blueBubble,
+            "the bubble value must change when the palette does"
+        )
     }
 }

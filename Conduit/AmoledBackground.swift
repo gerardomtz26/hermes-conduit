@@ -57,16 +57,21 @@ enum AmoledBackground {
         lock.unlock()
     }
 
+    /// The two stable objects per state. A `static let` dynamic provider
+    /// would keep the SAME object while its output changes, and SwiftUI
+    /// compares `Color(uiColor:)` by the wrapped object — the repaint never
+    /// happens (that is exactly how build 150 rendered nothing). Two fixed
+    /// instances per state give a value that changes when the flag does and
+    /// stays identical otherwise.
+    private static let blackBackdrop = UIColor.black
+    private static let dimBackdrop = UIColor(red: 0.045, green: 0.052, blue: 0.072, alpha: 1)
+    private static let blackSurface = UIColor.black
+    private static let dimSurface = UIColor(red: 0.072, green: 0.080, blue: 0.106, alpha: 1)
+
     /// Chat backdrop for the dark scheme (`ConduitBackdrop.base`).
-    static let darkBackdropUIColor = UIColor { _ in
-        isEnabled ? .black : UIColor(red: 0.045, green: 0.052, blue: 0.072, alpha: 1)
-    }
+    static var darkBackdropUIColor: UIColor { isEnabled ? blackBackdrop : dimBackdrop }
 
     /// Composer and picker-section foundation in dark mode. Their strokes
     /// (white at 0.14) keep them visible against a pure black backdrop.
-    static let darkSurfaceUIColor = UIColor { _ in
-        isEnabled
-            ? UIColor(red: 0, green: 0, blue: 0, alpha: 1)
-            : UIColor(red: 0.072, green: 0.080, blue: 0.106, alpha: 1)
-    }
+    static var darkSurfaceUIColor: UIColor { isEnabled ? blackSurface : dimSurface }
 }

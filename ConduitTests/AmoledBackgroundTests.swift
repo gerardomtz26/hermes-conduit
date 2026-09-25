@@ -1,4 +1,5 @@
 import XCTest
+import SwiftUI
 @testable import Conduit
 
 /// The AMOLED background contract: pure black when enabled, the usual
@@ -114,5 +115,23 @@ final class AmoledBackgroundTests: XCTestCase {
             1.0,
             "the two backdrops are distinct states"
         )
+    }
+
+    /// The repaint contract, and the reason build 150 changed nothing:
+    /// SwiftUI compares `Color(uiColor:)` by the wrapped object, so the value
+    /// the views hold must differ between the two states of the toggle.
+    func testColourValueSwiftUISeesChangesWithTheToggle() {
+        defer { AmoledBackground.set(false) }
+
+        AmoledBackground.set(false)
+        let backdropOff = Color(uiColor: AmoledBackground.darkBackdropUIColor)
+        let surfaceOff = Color(uiColor: AmoledBackground.darkSurfaceUIColor)
+
+        AmoledBackground.set(true)
+        let backdropOn = Color(uiColor: AmoledBackground.darkBackdropUIColor)
+        let surfaceOn = Color(uiColor: AmoledBackground.darkSurfaceUIColor)
+
+        XCTAssertNotEqual(backdropOn, backdropOff, "backdrop value must change with the toggle")
+        XCTAssertNotEqual(surfaceOn, surfaceOff, "surface value must change with the toggle")
     }
 }

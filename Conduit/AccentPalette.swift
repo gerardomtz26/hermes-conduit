@@ -145,20 +145,46 @@ enum AccentPalette: String, CaseIterable, Identifiable {
     // MARK: Colours handed to SwiftUI
 
     /// Dynamic accent: resolves per interface style against the live palette.
-    var accentUIColor: UIColor {
-        UIColor { traits in
-            Self.uiColor(traits.userInterfaceStyle == .dark ? accentDarkHex : accentLightHex)
-        }
+    /// One set of UIColors per palette, built exactly once. SwiftUI compares a
+    /// `Color(uiColor:)` by the object it wraps: a colour that has to CHANGE
+    /// must become a *different* object when the setting changes, and stay the
+    /// *same* object otherwise or every render churns. A `static let` dynamic
+    /// provider fails both halves — the object never changes even though its
+    /// output does — which is why the first AMOLED toggle rendered nothing
+    /// (measured 2026-09-24). Cache per palette and the contract holds.
+    struct PaletteColors {
+        let accent: UIColor
+        let accentSoft: UIColor
+        let bubbleTop: UIColor
+        let bubbleBottom: UIColor
     }
 
-    var accentSoftUIColor: UIColor {
-        UIColor { traits in
-            Self.uiColor(traits.userInterfaceStyle == .dark ? accentSoftDarkHex : accentSoftLightHex)
-        }
+    private static let colorsLock = NSLock()
+    private static var colorsCache: [AccentPalette: PaletteColors] = [:]
+
+    var colors: PaletteColors {
+        AccentPalette.colorsLock.lock()
+        defer { AccentPalette.colorsLock.unlock() }
+        if let cached = AccentPalette.colorsCache[self] { return cached }
+        let built = PaletteColors(
+            // Dynamic: adapts dark/light within one palette.
+            accent: UIColor { traits in
+                Self.uiColor(traits.userInterfaceStyle == .dark ? accentDarkHex : accentLightHex)
+            },
+            accentSoft: UIColor { traits in
+                Self.uiColor(traits.userInterfaceStyle == .dark ? accentSoftDarkHex : accentSoftLightHex)
+            },
+            bubbleTop: Self.uiColor(bubbleTopHex),
+            bubbleBottom: Self.uiColor(bubbleBottomHex)
+        )
+        AccentPalette.colorsCache[self] = built
+        return built
     }
 
-    var bubbleTopUIColor: UIColor { Self.uiColor(bubbleTopHex) }
-    var bubbleBottomUIColor: UIColor { Self.uiColor(bubbleBottomHex) }
+    var accentUIColor: UIColor { colors.accent }
+    var accentSoftUIColor: UIColor { colors.accentSoft }
+    var bubbleTopUIColor: UIColor { colors.bubbleTop }
+    var bubbleBottomUIColor: UIColor { colors.bubbleBottom }
 
     static func uiColor(_ hex: String) -> UIColor {
         let digits = hex.dropFirst()

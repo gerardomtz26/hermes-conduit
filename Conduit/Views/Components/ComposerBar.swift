@@ -47,6 +47,8 @@ struct ComposerBar: View {
     /// Local, device-only input preference. Defaults to off so existing
     /// users keep Return inserting a newline after updating.
     @AppStorage(ComposerReturnKey.preferenceKey) private var returnKeySends = false
+    /// Re-evaluates `composerFoundation` when the AMOLED preference flips.
+    @AppStorage(AmoledBackground.preferenceKey) private var amoledBackground = false
     @Namespace private var glassNamespace
 
     struct AsyncAttachmentContext: Equatable {

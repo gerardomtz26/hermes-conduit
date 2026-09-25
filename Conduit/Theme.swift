@@ -37,24 +37,17 @@ extension Color {
     static let conduitBackgroundColor = Color(.systemBackground)
     static let conduitSurfaceColor = Color(.secondarySystemBackground)
 
-    // Live: the provider reads `AccentPalette.current`, so a picker change in
-    // Settings repaints every surface that uses the accent without a rebuild.
-    static let conduitAdaptiveAccent = Color(uiColor: UIColor { traits in
-        AccentPalette.current.accentUIColor.resolvedColor(with: traits)
-    })
-
-    static let conduitAdaptiveAccentSoft = Color(uiColor: UIColor { traits in
-        AccentPalette.current.accentSoftUIColor.resolvedColor(with: traits)
-    })
+    /// Computed, not `static let`: the object handed to SwiftUI must be the
+    /// per-palette instance so a picker change swaps the wrapped UIColor and
+    /// the repaint actually happens (see `AccentPalette.PaletteColors`).
+    static var conduitAdaptiveAccent: Color { Color(uiColor: AccentPalette.current.colors.accent) }
+    static var conduitAdaptiveAccentSoft: Color { Color(uiColor: AccentPalette.current.colors.accentSoft) }
 
     // User-bubble fill, driven by the selected palette (#2C56C4 → #1E3F94 on
-    // the default one: white text at 6.49:1 → 9.57:1).
-    static let conduitUserBubbleTopColor = Color(uiColor: UIColor { traits in
-        AccentPalette.current.bubbleTopUIColor.resolvedColor(with: traits)
-    })
-    static let conduitUserBubbleBottomColor = Color(uiColor: UIColor { traits in
-        AccentPalette.current.bubbleBottomUIColor.resolvedColor(with: traits)
-    })
+    // the default one: white text at 6.49:1 → 9.57:1). Computed for the same
+    // reason as the accent: the wrapped object must change with the palette.
+    static var conduitUserBubbleTopColor: Color { Color(uiColor: AccentPalette.current.colors.bubbleTop) }
+    static var conduitUserBubbleBottomColor: Color { Color(uiColor: AccentPalette.current.colors.bubbleBottom) }
 }
 
 // MARK: - App identity
@@ -97,6 +90,9 @@ struct ConduitBackdrop: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hasDrifted = false
+    /// Subscribes this view to the AMOLED preference: the backdrop must
+    /// re-evaluate on its own, not rely on an ancestor re-rendering.
+    @AppStorage(AmoledBackground.preferenceKey) private var amoledBackground = false
 
     var body: some View {
         GeometryReader { proxy in
