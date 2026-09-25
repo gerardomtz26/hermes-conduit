@@ -16,7 +16,7 @@ settings:
     ENABLE_BITCODE: NO
     CODE_SIGN_STYLE: Automatic
     MARKETING_VERSION: "0.1.10"
-    CURRENT_PROJECT_VERSION: "151"
+    CURRENT_PROJECT_VERSION: "152"
 targets:
   Conduit:
     type: application

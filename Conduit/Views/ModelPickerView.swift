@@ -514,8 +514,6 @@ private struct ModelPickerSection<Content: View>: View {
     let tint: Color
     private let content: Content
     @Environment(\.colorScheme) private var colorScheme
-    /// Re-evaluates `sectionFoundation` when the AMOLED preference flips.
-    @AppStorage(AmoledBackground.preferenceKey) private var amoledBackground = false
 
     init(title: String, symbol: String, tint: Color, @ViewBuilder content: () -> Content) {
         self.title = title
@@ -541,8 +539,7 @@ private struct ModelPickerSection<Content: View>: View {
 
     private var sectionFoundation: Color {
         colorScheme == .dark
-            // #000 under AMOLED background; sections separate by their stroke.
-            ? Color(uiColor: AmoledBackground.darkSurfaceUIColor).opacity(0.96)
+            ? Color(red: 0.072, green: 0.080, blue: 0.106).opacity(0.96)
             : Color.white.opacity(0.94)
     }
 

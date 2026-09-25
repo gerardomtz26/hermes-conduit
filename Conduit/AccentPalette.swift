@@ -157,6 +157,16 @@ enum AccentPalette: String, CaseIterable, Identifiable {
         let accentSoft: UIColor
         let bubbleTop: UIColor
         let bubbleBottom: UIColor
+        /// The same `Color` struct on every render. Building a fresh
+        /// `Color(uiColor:)` per access mints a value SwiftUI may treat as
+        /// changed on every pass — extra attribute work in the middle of a
+        /// scrolling transcript, which is where stutter shows up. Built once
+        /// per palette: identical while the selection stands, different when
+        /// it changes, which is the repaint contract the tests pin.
+        let accentColor: Color
+        let accentSoftColor: Color
+        let bubbleTopColor: Color
+        let bubbleBottomColor: Color
     }
 
     private static let colorsLock = NSLock()
@@ -166,16 +176,24 @@ enum AccentPalette: String, CaseIterable, Identifiable {
         AccentPalette.colorsLock.lock()
         defer { AccentPalette.colorsLock.unlock() }
         if let cached = AccentPalette.colorsCache[self] { return cached }
+        // Dynamic: the two accents adapt dark/light within one palette.
+        let accent = UIColor { traits in
+            Self.uiColor(traits.userInterfaceStyle == .dark ? accentDarkHex : accentLightHex)
+        }
+        let accentSoft = UIColor { traits in
+            Self.uiColor(traits.userInterfaceStyle == .dark ? accentSoftDarkHex : accentSoftLightHex)
+        }
+        let bubbleTop = Self.uiColor(bubbleTopHex)
+        let bubbleBottom = Self.uiColor(bubbleBottomHex)
         let built = PaletteColors(
-            // Dynamic: adapts dark/light within one palette.
-            accent: UIColor { traits in
-                Self.uiColor(traits.userInterfaceStyle == .dark ? accentDarkHex : accentLightHex)
-            },
-            accentSoft: UIColor { traits in
-                Self.uiColor(traits.userInterfaceStyle == .dark ? accentSoftDarkHex : accentSoftLightHex)
-            },
-            bubbleTop: Self.uiColor(bubbleTopHex),
-            bubbleBottom: Self.uiColor(bubbleBottomHex)
+            accent: accent,
+            accentSoft: accentSoft,
+            bubbleTop: bubbleTop,
+            bubbleBottom: bubbleBottom,
+            accentColor: Color(uiColor: accent),
+            accentSoftColor: Color(uiColor: accentSoft),
+            bubbleTopColor: Color(uiColor: bubbleTop),
+            bubbleBottomColor: Color(uiColor: bubbleBottom)
         )
         AccentPalette.colorsCache[self] = built
         return built

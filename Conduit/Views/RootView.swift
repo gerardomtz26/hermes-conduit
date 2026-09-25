@@ -69,9 +69,6 @@ struct MainView: View {
     /// so every live colour provider resolves against the new palette. The
     /// value itself is read through `AccentPalette.current`.
     @AppStorage(AccentPalette.preferenceKey) private var accentPaletteRaw = AccentPalette.defaultPalette.rawValue
-    /// Same reason, for the AMOLED background: re-render so the backdrop and
-    /// surface providers resolve again. Read through `AmoledBackground`.
-    @AppStorage(AmoledBackground.preferenceKey) private var amoledBackgroundRaw = false
     @State private var availableWindowWidth: CGFloat = 0
     @State private var settingsPresentation: SettingsSnapshot?
     @State private var shouldPresentSettingsAfterSidebarDismissal = false

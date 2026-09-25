@@ -47,8 +47,6 @@ struct ComposerBar: View {
     /// Local, device-only input preference. Defaults to off so existing
     /// users keep Return inserting a newline after updating.
     @AppStorage(ComposerReturnKey.preferenceKey) private var returnKeySends = false
-    /// Re-evaluates `composerFoundation` when the AMOLED preference flips.
-    @AppStorage(AmoledBackground.preferenceKey) private var amoledBackground = false
     @Namespace private var glassNamespace
 
     struct AsyncAttachmentContext: Equatable {
@@ -227,9 +225,7 @@ struct ComposerBar: View {
 
     private var composerFoundation: Color {
         colorScheme == .dark
-            // #000 under AMOLED background, the usual #12141B otherwise; the
-            // white 0.14 stroke above keeps the bar readable either way.
-            ? Color(uiColor: AmoledBackground.darkSurfaceUIColor).opacity(0.96)
+            ? Color(red: 0.072, green: 0.080, blue: 0.106).opacity(0.96)
             : Color.white.opacity(0.94)
     }
 

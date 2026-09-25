@@ -37,17 +37,17 @@ extension Color {
     static let conduitBackgroundColor = Color(.systemBackground)
     static let conduitSurfaceColor = Color(.secondarySystemBackground)
 
-    /// Computed, not `static let`: the object handed to SwiftUI must be the
-    /// per-palette instance so a picker change swaps the wrapped UIColor and
-    /// the repaint actually happens (see `AccentPalette.PaletteColors`).
-    static var conduitAdaptiveAccent: Color { Color(uiColor: AccentPalette.current.colors.accent) }
-    static var conduitAdaptiveAccentSoft: Color { Color(uiColor: AccentPalette.current.colors.accentSoft) }
+    /// The stored per-palette `Color`: a picker change swaps it (repaint
+    /// happens), a steady selection returns the identical value (no render
+    /// churn in the transcript). See `AccentPalette.PaletteColors`.
+    static var conduitAdaptiveAccent: Color { AccentPalette.current.colors.accentColor }
+    static var conduitAdaptiveAccentSoft: Color { AccentPalette.current.colors.accentSoftColor }
 
     // User-bubble fill, driven by the selected palette (#2C56C4 → #1E3F94 on
     // the default one: white text at 6.49:1 → 9.57:1). Computed for the same
     // reason as the accent: the wrapped object must change with the palette.
-    static var conduitUserBubbleTopColor: Color { Color(uiColor: AccentPalette.current.colors.bubbleTop) }
-    static var conduitUserBubbleBottomColor: Color { Color(uiColor: AccentPalette.current.colors.bubbleBottom) }
+    static var conduitUserBubbleTopColor: Color { AccentPalette.current.colors.bubbleTopColor }
+    static var conduitUserBubbleBottomColor: Color { AccentPalette.current.colors.bubbleBottomColor }
 }
 
 // MARK: - App identity
@@ -90,9 +90,6 @@ struct ConduitBackdrop: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hasDrifted = false
-    /// Subscribes this view to the AMOLED preference: the backdrop must
-    /// re-evaluate on its own, not rely on an ancestor re-rendering.
-    @AppStorage(AmoledBackground.preferenceKey) private var amoledBackground = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -136,8 +133,7 @@ struct ConduitBackdrop: View {
 
     private var base: Color {
         colorScheme == .dark
-            // Pure black when AMOLED background is on, #0B0D12 otherwise.
-            ? Color(uiColor: AmoledBackground.darkBackdropUIColor)
+            ? Color(red: 0.045, green: 0.052, blue: 0.072)
             : Color(red: 0.94, green: 0.95, blue: 0.98)
     }
 }
