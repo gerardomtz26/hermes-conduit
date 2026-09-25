@@ -37,25 +37,24 @@ extension Color {
     static let conduitBackgroundColor = Color(.systemBackground)
     static let conduitSurfaceColor = Color(.secondarySystemBackground)
 
+    // Live: the provider reads `AccentPalette.current`, so a picker change in
+    // Settings repaints every surface that uses the accent without a rebuild.
     static let conduitAdaptiveAccent = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.294, green: 0.518, blue: 0.941, alpha: 1)   // #4B84F0
-            : UIColor(red: 0.173, green: 0.337, blue: 0.769, alpha: 1)   // #2C56C4
+        AccentPalette.current.accentUIColor.resolvedColor(with: traits)
     })
 
     static let conduitAdaptiveAccentSoft = Color(uiColor: UIColor { traits in
-        traits.userInterfaceStyle == .dark
-            ? UIColor(red: 0.639, green: 0.769, blue: 0.984, alpha: 1)   // #A3C4FB
-            : UIColor(red: 0.369, green: 0.525, blue: 0.910, alpha: 1)   // #5E86E8
+        AccentPalette.current.accentSoftUIColor.resolvedColor(with: traits)
     })
 
-    // User-bubble fill: #2C56C4 → #1E3F94, white text at 6.49:1 / 9.57:1.
-    static let conduitUserBubbleTopColor = Color(uiColor: UIColor(
-        red: 0.173, green: 0.337, blue: 0.769, alpha: 1
-    ))
-    static let conduitUserBubbleBottomColor = Color(uiColor: UIColor(
-        red: 0.118, green: 0.247, blue: 0.580, alpha: 1
-    ))
+    // User-bubble fill, driven by the selected palette (#2C56C4 → #1E3F94 on
+    // the default one: white text at 6.49:1 → 9.57:1).
+    static let conduitUserBubbleTopColor = Color(uiColor: UIColor { traits in
+        AccentPalette.current.bubbleTopUIColor.resolvedColor(with: traits)
+    })
+    static let conduitUserBubbleBottomColor = Color(uiColor: UIColor { traits in
+        AccentPalette.current.bubbleBottomUIColor.resolvedColor(with: traits)
+    })
 }
 
 // MARK: - App identity

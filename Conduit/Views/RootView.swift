@@ -65,6 +65,10 @@ struct RootView: View {
 struct MainView: View {
     @EnvironmentObject var appState: AppState
     @AppStorage("conduit.ipadPersistentSidebar") private var prefersPersistentSidebar = false
+    /// Exists only to re-render this subtree when the accent palette changes,
+    /// so every live colour provider resolves against the new palette. The
+    /// value itself is read through `AccentPalette.current`.
+    @AppStorage(AccentPalette.preferenceKey) private var accentPaletteRaw = AccentPalette.defaultPalette.rawValue
     @State private var availableWindowWidth: CGFloat = 0
     @State private var settingsPresentation: SettingsSnapshot?
     @State private var shouldPresentSettingsAfterSidebarDismissal = false

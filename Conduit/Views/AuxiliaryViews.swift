@@ -1544,6 +1544,53 @@ private struct AppearanceSettingsDetail: View {
     @State private var isChangingIcon = false
     init(theme: ThemePreference, saveTheme: @escaping (ThemePreference) -> Void) { self.theme = theme; self.saveTheme = saveTheme; _selected = State(initialValue: theme) }
     private var isPad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
+    /// Re-renders this picker when the palette changes anywhere else in the app.
+    @AppStorage(AccentPalette.preferenceKey) private var accentPaletteRaw = AccentPalette.defaultPalette.rawValue
+
+    private func accentChoice(_ palette: AccentPalette) -> some View {
+        let selectedPalette = AccentPalette.current
+        let isSelected = selectedPalette == palette
+        return Button {
+            withAnimation(ConduitMotion.response) { AccentPalette.select(palette) }
+            Haptics.selection()
+        } label: {
+            VStack(spacing: 6) {
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(LinearGradient(
+                        colors: [
+                            Color(uiColor: palette.bubbleTopUIColor),
+                            Color(uiColor: palette.bubbleBottomUIColor)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ))
+                    .frame(height: 26)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.18), lineWidth: 1)
+                    }
+                HStack(spacing: 3) {
+                    Text(palette.title)
+                    if isSelected {
+                        Image(systemName: "checkmark.circle.fill")
+                    }
+                }
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                Text("\(String(format: "%.1f", palette.measurement.bubbleTopOverWhite)):1")
+                    .font(.system(size: 9, weight: .regular, design: .monospaced))
+                    .foregroundStyle(Color.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+        }
+        .conduitGlassControl(
+            cornerRadius: 14,
+            tint: isSelected ? Color(uiColor: palette.accentUIColor).opacity(0.24) : .clear
+        )
+        .accessibilityLabel("\(palette.title) accent")
+    }
+
     var body: some View {
         SettingsDetailContainer {
             ConduitSettingsSection(title: AppLocalization.string("Theme"), symbol: "circle.lefthalf.filled", tint: .conduitAccent) {
@@ -1555,6 +1602,18 @@ private struct AppearanceSettingsDetail: View {
                 })) {
                     Text("Dark").tag(ThemePreference.dark); Text("Light").tag(ThemePreference.light); Text("System").tag(ThemePreference.system)
                 }.pickerStyle(.segmented)
+            }
+            ConduitSettingsSection(title: AppLocalization.string("Accent color"), symbol: "paintpalette", tint: .conduitAccent) {
+                Text("Sets the accent and your own message bubble together. Each option meets WCAG AA for its text and icons — the number is the contrast of the text on your bubble.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                ConduitGlassGroup(spacing: 8) {
+                    HStack(spacing: 8) {
+                        ForEach(AccentPalette.allCases) { palette in
+                            accentChoice(palette)
+                        }
+                    }
+                }
             }
             ConduitSettingsSection(title: AppLocalization.string("App language"), symbol: "globe", tint: .conduitAccent) {
                 Text("Choose the language Conduit’s interface uses. Speech, transcription, and provider language settings are unaffected.")
