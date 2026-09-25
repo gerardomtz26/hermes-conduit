@@ -1602,6 +1602,22 @@ private struct AppearanceSettingsDetail: View {
                 })) {
                     Text("Dark").tag(ThemePreference.dark); Text("Light").tag(ThemePreference.light); Text("System").tag(ThemePreference.system)
                 }.pickerStyle(.segmented)
+
+                Toggle(isOn: Binding(
+                    get: { AmoledBackground.isEnabled },
+                    set: { newValue in
+                        Haptics.selection()
+                        AmoledBackground.set(newValue)
+                    }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(AppLocalization.string("True black background (AMOLED)"))
+                        Text(AppLocalization.string("Pure black dark background and surfaces. White text stays at its maximum contrast; light mode is unaffected."))
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .tint(.conduitAccent)
             }
             ConduitSettingsSection(title: AppLocalization.string("Accent color"), symbol: "paintpalette", tint: .conduitAccent) {
                 Text("Sets the accent and your own message bubble together. Each option meets WCAG AA for its text and icons — the number is the contrast of the text on your bubble.")

@@ -225,7 +225,9 @@ struct ComposerBar: View {
 
     private var composerFoundation: Color {
         colorScheme == .dark
-            ? Color(red: 0.072, green: 0.080, blue: 0.106).opacity(0.96)
+            // #000 under AMOLED background, the usual #12141B otherwise; the
+            // white 0.14 stroke above keeps the bar readable either way.
+            ? Color(uiColor: AmoledBackground.darkSurfaceUIColor).opacity(0.96)
             : Color.white.opacity(0.94)
     }
 

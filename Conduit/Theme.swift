@@ -140,7 +140,8 @@ struct ConduitBackdrop: View {
 
     private var base: Color {
         colorScheme == .dark
-            ? Color(red: 0.045, green: 0.052, blue: 0.072)
+            // Pure black when AMOLED background is on, #0B0D12 otherwise.
+            ? Color(uiColor: AmoledBackground.darkBackdropUIColor)
             : Color(red: 0.94, green: 0.95, blue: 0.98)
     }
 }
