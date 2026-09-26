@@ -9,7 +9,18 @@ struct SelectableTextView: UIViewRepresentable {
     typealias UIViewType = SelectableTextViewHostView
 
     let attributedText: NSAttributedString
-    let font: UIFont
+    /// The Markdown source the text was bridged from, when there is one —
+    /// `nil` for the `NSAttributedString` and `text:` inits. Keeping it lets
+    /// `configure` re-bridge with the environment's font when the caller
+    /// passed no font (see `baseText(resolvingFont:)`), because the eager
+    /// bridge at init has no environment to resolve against.
+    let attributedSource: AttributedString?
+    /// `nil` means "no explicit font": the surface then resolves the font
+    /// from SwiftUI's Dynamic Type environment at update time
+    /// (`resolvedFont(for:)`), so a caller that omits it follows the
+    /// interface scale instead of freezing the app's content size category
+    /// at init.
+    let font: UIFont?
     let textColor: UIColor
     let lineSpacing: CGFloat
     let maximumNumberOfLines: Int
@@ -28,7 +39,8 @@ struct SelectableTextView: UIViewRepresentable {
 
     init(
         attributedText: NSAttributedString,
-        font: UIFont = .preferredFont(forTextStyle: .body),
+        source: AttributedString? = nil,
+        font: UIFont? = nil,
         textColor: UIColor = .label,
         lineSpacing: CGFloat = 0,
         maximumNumberOfLines: Int = 0,
@@ -40,6 +52,7 @@ struct SelectableTextView: UIViewRepresentable {
         selectionSegment: MarkdownSelectionSegmentDescriptor? = nil
     ) {
         self.attributedText = attributedText
+        self.attributedSource = source
         self.font = font
         self.textColor = textColor
         self.lineSpacing = lineSpacing
@@ -54,7 +67,7 @@ struct SelectableTextView: UIViewRepresentable {
 
     init(
         attributedText: AttributedString,
-        font: UIFont = .preferredFont(forTextStyle: .body),
+        font: UIFont? = nil,
         textColor: UIColor = .label,
         lineSpacing: CGFloat = 0,
         maximumNumberOfLines: Int = 0,
@@ -67,6 +80,7 @@ struct SelectableTextView: UIViewRepresentable {
     ) {
         self.init(
             attributedText: Self.bridge(attributedText, defaultFont: font, defaultColor: textColor, linkColor: linkColor),
+            source: attributedText,
             font: font,
             textColor: textColor,
             lineSpacing: lineSpacing,
@@ -82,7 +96,7 @@ struct SelectableTextView: UIViewRepresentable {
 
     init(
         text: String,
-        font: UIFont = .preferredFont(forTextStyle: .body),
+        font: UIFont? = nil,
         textColor: UIColor = .label,
         lineSpacing: CGFloat = 0,
         maximumNumberOfLines: Int = 0,
@@ -93,11 +107,12 @@ struct SelectableTextView: UIViewRepresentable {
         selectionCoordinator: MarkdownSelectionCoordinator? = nil,
         selectionSegment: MarkdownSelectionSegmentDescriptor? = nil
     ) {
+        var attributes: [NSAttributedString.Key: Any] = [.foregroundColor: textColor]
+        // With no explicit font nothing is baked: `configure` stamps the
+        // environment-resolved font on the runs instead.
+        if let font { attributes[.font] = font }
         self.init(
-            attributedText: NSAttributedString(
-                string: text,
-                attributes: [.font: font, .foregroundColor: textColor]
-            ),
+            attributedText: NSAttributedString(string: text, attributes: attributes),
             font: font,
             textColor: textColor,
             lineSpacing: lineSpacing,
@@ -139,11 +154,21 @@ struct SelectableTextView: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> SelectableTextViewHostView {
-        makeUIViewForTests(coordinator: context.coordinator)
+        makeUIViewForTests(
+            coordinator: context.coordinator,
+            dynamicTypeSize: context.environment.dynamicTypeSize
+        )
     }
 
     func updateUIView(_ uiView: SelectableTextViewHostView, context: Context) {
-        updateUIViewForTests(uiView, coordinator: context.coordinator)
+        // The environment is the only place the interface scale (and the
+        // device's own text size) is visible from here — it is what turns a
+        // font-less caller's default into the font SwiftUI is painting with.
+        updateUIViewForTests(
+            uiView,
+            coordinator: context.coordinator,
+            dynamicTypeSize: context.environment.dynamicTypeSize
+        )
     }
 
     static func dismantleUIView(_ uiView: SelectableTextViewHostView, coordinator: Coordinator) {
@@ -151,14 +176,21 @@ struct SelectableTextView: UIViewRepresentable {
     }
 
     @MainActor
-    func makeUIViewForTests(coordinator: Coordinator) -> SelectableTextViewHostView {
+    func makeUIViewForTests(
+        coordinator: Coordinator,
+        dynamicTypeSize: DynamicTypeSize = .large
+    ) -> SelectableTextViewHostView {
         let hostView = SelectableTextViewHostView(frame: .zero)
-        updateUIViewForTests(hostView, coordinator: coordinator)
+        updateUIViewForTests(hostView, coordinator: coordinator, dynamicTypeSize: dynamicTypeSize)
         return hostView
     }
 
     @MainActor
-    func updateUIViewForTests(_ uiView: SelectableTextViewHostView, coordinator: Coordinator) {
+    func updateUIViewForTests(
+        _ uiView: SelectableTextViewHostView,
+        coordinator: Coordinator,
+        dynamicTypeSize: DynamicTypeSize = .large
+    ) {
         TranscriptPerf.note(.selectableTextViewUpdate)
         coordinator.linkColor = linkColor
         coordinator.selectionCoordinator = selectionCoordinator
@@ -197,10 +229,13 @@ struct SelectableTextView: UIViewRepresentable {
         // invalidation) — skip it entirely. Selection registration below is
         // deliberately NOT part of the gate: coordinator/segment changes must
         // keep flowing without forcing text restyling.
-        let presentation = Coordinator.Presentation(view: self)
+        let presentation = Coordinator.Presentation(
+            view: self,
+            font: resolvedFont(for: dynamicTypeSize)
+        )
         let presentationIsUnchanged = coordinator.appliedPresentation == presentation
         if !presentationIsUnchanged {
-            configure(textView)
+            configure(textView, font: presentation.font)
             coordinator.appliedPresentation = presentation
             coordinator.presentationGeneration &+= 1
         }
@@ -210,11 +245,36 @@ struct SelectableTextView: UIViewRepresentable {
         uiView.mountedSelectionSegment = coordinator.selectionSegment
     }
 
+    /// The font this surface paints with at a given Dynamic Type size: an
+    /// explicit `font` wins untouched; a caller that passed none gets the
+    /// environment's body size rather than the app's frozen content size
+    /// category (`InterfaceScaleFont` is the shared bridge).
+    func resolvedFont(for dynamicTypeSize: DynamicTypeSize) -> UIFont {
+        font ?? InterfaceScaleFont.preferred(.body, for: dynamicTypeSize)
+    }
+
+    /// The text to style: the stored attributed text, or a fresh bridge from
+    /// the Markdown source when the caller passed no font — at init there is
+    /// no environment, so the eager bridge could only bake the device's body
+    /// font, while here it can bake the one SwiftUI is painting with.
+    private func baseText(resolvingFont font: UIFont) -> NSAttributedString {
+        if let attributedSource, self.font == nil {
+            return Self.bridge(
+                attributedSource,
+                defaultFont: font,
+                defaultColor: textColor,
+                linkColor: linkColor
+            )
+        }
+        return attributedText
+    }
+
     /// Extracted measurement logic so sizeThatFits and tests share one path.
     /// Applies the same default-font and paragraph-style fill that
     /// configure(_:) uses, so the measurement matches the rendered output.
-    func measureNonWrapping() -> CGSize {
-        let styledText = NSMutableAttributedString(attributedString: attributedText)
+    func measureNonWrapping(dynamicTypeSize: DynamicTypeSize = .large) -> CGSize {
+        let font = resolvedFont(for: dynamicTypeSize)
+        let styledText = NSMutableAttributedString(attributedString: baseText(resolvingFont: font))
         let fullRange = NSRange(location: 0, length: styledText.length)
 
         if fullRange.length > 0 {
@@ -244,7 +304,8 @@ struct SelectableTextView: UIViewRepresentable {
         measuredSizeCached(
             proposalWidth: proposal.width,
             textView: uiView.mountedTextView,
-            coordinator: context.coordinator
+            coordinator: context.coordinator,
+            dynamicTypeSize: context.environment.dynamicTypeSize
         )
     }
 
@@ -258,7 +319,8 @@ struct SelectableTextView: UIViewRepresentable {
     func measuredSizeCached(
         proposalWidth: CGFloat?,
         textView: UITextView,
-        coordinator: Coordinator
+        coordinator: Coordinator,
+        dynamicTypeSize: DynamicTypeSize = .large
     ) -> CGSize? {
         let key: Coordinator.MeasurementKey
         switch effectiveMeasurementMode(proposalWidth: proposalWidth) {
@@ -277,7 +339,11 @@ struct SelectableTextView: UIViewRepresentable {
            cached.key == key {
             return cached.size
         }
-        guard let size = measuredSize(proposalWidth: proposalWidth, textView: textView) else {
+        guard let size = measuredSize(
+            proposalWidth: proposalWidth,
+            textView: textView,
+            dynamicTypeSize: dynamicTypeSize
+        ) else {
             return nil
         }
         coordinator.cachedMeasurement = Coordinator.CachedMeasurement(
@@ -322,13 +388,17 @@ struct SelectableTextView: UIViewRepresentable {
     /// the measurement width is derived deterministically from the content's
     /// ideal width clamped to the table's column policy, so the first pass
     /// and every later pass report the same correct height.
-    func measuredSize(proposalWidth: CGFloat?, textView: UITextView) -> CGSize? {
+    func measuredSize(
+        proposalWidth: CGFloat?,
+        textView: UITextView,
+        dynamicTypeSize: DynamicTypeSize = .large
+    ) -> CGSize? {
         if !wrapsLines {
-            return measureNonWrapping()
+            return measureNonWrapping(dynamicTypeSize: dynamicTypeSize)
         }
 
         if let range = selfSizingWidthRange {
-            let idealWidth = max(1, measureNonWrapping().width)
+            let idealWidth = max(1, measureNonWrapping(dynamicTypeSize: dynamicTypeSize).width)
             let width = min(max(idealWidth, range.lowerBound), range.upperBound)
             return CGSize(width: width, height: Self.measuredWrappingHeight(of: textView, at: width))
         }
@@ -347,7 +417,7 @@ struct SelectableTextView: UIViewRepresentable {
         return ceil(measured.height)
     }
 
-    private func configure(_ textView: UITextView) {
+    private func configure(_ textView: UITextView, font: UIFont) {
         textView.font = font
         textView.textColor = textColor
         textView.textContainer.widthTracksTextView = wrapsLines
@@ -368,10 +438,10 @@ struct SelectableTextView: UIViewRepresentable {
         paragraphStyle.alignment = textAlignment
 
         // Single-pass styling: preserve per-run font and foregroundColor from
-        // attributedText, fill only missing attributes with the configured
+        // the source text, fill only missing attributes with the configured
         // defaults, then apply paragraph style globally. This replaces the
         // previous double-pass that applied globals then overwrote with runs.
-        let styledText = NSMutableAttributedString(attributedString: attributedText)
+        let styledText = NSMutableAttributedString(attributedString: baseText(resolvingFont: font))
         let fullRange = NSRange(location: 0, length: styledText.length)
 
         if fullRange.length > 0 {
@@ -480,16 +550,22 @@ struct SelectableTextView: UIViewRepresentable {
     /// Converts an AttributedString (from Markdown parsing) into an
     /// NSAttributedString with UIKit-compatible font traits. Exposed as
     /// internal so callers can convert without instantiating the full view.
+    /// `defaultFont` may be `nil` ("no explicit font"): the device's body
+    /// font is what gets baked then — the pre-existing behaviour, and what
+    /// the bridge tests read off `attributedText`. The mounted surface does
+    /// NOT keep it: `configure(_:font:)` re-bridges from the stored source
+    /// with the environment-resolved font whenever the caller passed none.
     static func bridge(
         _ value: AttributedString,
-        defaultFont: UIFont,
+        defaultFont: UIFont?,
         defaultColor: UIColor,
         linkColor: UIColor
     ) -> NSAttributedString {
+        let baseFont = defaultFont ?? UIFont.preferredFont(forTextStyle: .body)
         let bridged = NSMutableAttributedString(
             string: String(value.characters),
             attributes: [
-                .font: defaultFont,
+                .font: baseFont,
                 .foregroundColor: defaultColor
             ]
         )
@@ -499,7 +575,7 @@ struct SelectableTextView: UIViewRepresentable {
             guard range.length > 0 else { continue }
 
             if let intent = run.inlinePresentationIntent {
-                var runFont = defaultFont
+                var runFont = baseFont
                 if intent.contains(.stronglyEmphasized) {
                     runFont = runFont.withTraits(.traitBold)
                 }
@@ -507,7 +583,7 @@ struct SelectableTextView: UIViewRepresentable {
                     runFont = runFont.withTraits(.traitItalic)
                 }
                 if intent.contains(.code) {
-                    runFont = .monospacedSystemFont(ofSize: defaultFont.pointSize, weight: .regular)
+                    runFont = .monospacedSystemFont(ofSize: baseFont.pointSize, weight: .regular)
                 }
                 bridged.addAttribute(.font, value: runFont, range: range)
                 if intent.contains(.strikethrough) {
@@ -548,9 +624,13 @@ struct SelectableTextView: UIViewRepresentable {
             let textAlignment: NSTextAlignment
             let selfSizingWidthRange: ClosedRange<CGFloat>?
 
-            init(view: SelectableTextView) {
+            /// `font` is the RESOLVED font — the caller's explicit one, or
+            /// the environment's body size when it passed none — so an
+            /// interface-scale change is a presentation change and the
+            /// mounted text is restyled instead of staying frozen.
+            init(view: SelectableTextView, font: UIFont) {
                 self.attributedText = view.attributedText
-                self.font = view.font
+                self.font = font
                 self.textColor = view.textColor
                 self.lineSpacing = view.lineSpacing
                 self.maximumNumberOfLines = view.maximumNumberOfLines

@@ -27,10 +27,15 @@
 //
 //  Known limit, measured: the 31 fixed `.font(.system(size:))` call sites
 //  (sidebar labels, micro-captions) do not read Dynamic Type and therefore
-//  do not scale. Everything else (485 text-style call sites) does.
+//  do not scale. Everything else (485 text-style call sites) does — the
+//  SwiftUI ones through the environment, and the UIKit ones through the
+//  read side at the bottom of this file (`InterfaceScaleFont`), which is
+//  what makes `UIFont.preferredFont(forTextStyle:)` call sites follow the
+//  override instead of the app's frozen content size category.
 //
 
 import SwiftUI
+import UIKit
 
 /// The stepped interface scale. The enum POSITION (raw value) is what
 /// persists — the Dynamic Type size each step resolves to lives here so the
@@ -101,5 +106,55 @@ extension View {
         } else {
             self
         }
+    }
+}
+
+// MARK: - Read side: environment → UIFont
+
+/// The READ side of the interface scale — the reusable bridge for every
+/// call site that needs a UIKit font while SwiftUI paints the subtree.
+///
+/// Why it exists: `UIFont.preferredFont(forTextStyle:)` resolves against the
+/// app's `UIContentSizeCategory`, which the interface scale never writes —
+/// the preference writes `.dynamicTypeSize(_:)` at the app root
+/// (`conduitInterfaceScale`). SwiftUI's `\.dynamicTypeSize` environment is
+/// the value that modifier sets (and, with no modifier, the device's own
+/// text size), so reading it here is what makes UIKit-resolved fonts move
+/// with the scale, the system text size, and any other `.dynamicTypeSize`
+/// override above the call site.
+///
+/// `\.sizeCategory` is the deprecated alias of the same value — the SDK's
+/// `SwiftUICore` interface declares it
+/// `deprecated: 100000.0, renamed: "dynamicTypeSize"` — so both resolve to
+/// one trait collection; this bridge takes the key the modifier writes
+/// directly so it never depends on the alias.
+enum InterfaceScaleFont {
+    /// The trait collection `UIFont.preferredFont(forTextStyle:compatibleWith:)`
+    /// must resolve against for a font to come out at the size SwiftUI is
+    /// painting with. `UIContentSizeCategory(_: DynamicTypeSize?)` is the
+    /// SDK's own one-to-one mapping (11 sizes ↔ 11 categories), iOS 15+.
+    static func traits(for dynamicTypeSize: DynamicTypeSize) -> UITraitCollection {
+        UITraitCollection(preferredContentSizeCategory: UIContentSizeCategory(dynamicTypeSize))
+    }
+
+    /// The environment's Dynamic Type size as a UIKit font: the shared
+    /// implementation behind every `font:` argument that used to say
+    /// `.preferredFont(forTextStyle:)`. Resolves through
+    /// `ChatTypography.preferred`, so the app keeps ONE UIKit-side
+    /// resolution point.
+    static func preferred(_ style: UIFont.TextStyle, for dynamicTypeSize: DynamicTypeSize) -> UIFont {
+        ChatTypography.preferred(style, traits(for: dynamicTypeSize))
+    }
+
+    /// Fixed-design (monospaced) chrome font at the size the style has in
+    /// the environment: the `.monospacedSystemFont(ofSize:)` call sites that
+    /// used to read `pointSize` off an unscaled `UIFont.preferredFont` —
+    /// they need the SCALING font's point size, not the app category's.
+    static func monospaced(
+        _ style: UIFont.TextStyle,
+        for dynamicTypeSize: DynamicTypeSize,
+        weight: UIFont.Weight = .regular
+    ) -> UIFont {
+        .monospacedSystemFont(ofSize: preferred(style, for: dynamicTypeSize).pointSize, weight: weight)
     }
 }

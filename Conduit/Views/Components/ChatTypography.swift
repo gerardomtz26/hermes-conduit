@@ -195,7 +195,19 @@ enum ChatTypography {
         }
     }
 
-    private static func preferred(_ style: UIFont.TextStyle, _ traits: UITraitCollection?) -> UIFont {
+    /// The single UIKit-side Dynamic Type resolution point. `internal` (it
+    /// was `private`) so the interface-scale bridge in `InterfaceScale.swift`
+    /// resolves through the same call instead of repeating the
+    /// `UIFont.preferredFont(forTextStyle:compatibleWith:)` pair — the two
+    /// branches below are the whole difference between "the app's current
+    /// content size category" and "the trait collection the caller derived
+    /// from SwiftUI's environment".
+    ///
+    /// Callers that own an environment (a view, `updateUIView`) pass traits
+    /// built from it; a static resolver has no environment of its own, so
+    /// `nil` still means "whatever category the app runs at" — the bridge
+    /// takes the environment in explicitly rather than reaching for it here.
+    static func preferred(_ style: UIFont.TextStyle, _ traits: UITraitCollection?) -> UIFont {
         if let traits {
             return UIFont.preferredFont(forTextStyle: style, compatibleWith: traits)
         }

@@ -1593,6 +1593,9 @@ private struct ReviewSummaryCard: View {
     let timestamp: String
     @EnvironmentObject private var appState: AppState
     @State private var expanded = false
+    /// Dynamic Type size SwiftUI is painting this subtree with — the value
+    /// InterfaceScale writes at the app root (see `InterfaceScaleFont`).
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     private var details: [String] { activity.details?.filter { !$0.isEmpty } ?? [] }
 
@@ -1614,7 +1617,7 @@ private struct ReviewSummaryCard: View {
                             .foregroundStyle(.secondary)
                         SelectableTextView(
                             text: activity.summary,
-                            font: .preferredFont(forTextStyle: .subheadline).withTraits(.traitBold),
+                            font: InterfaceScaleFont.preferred(.subheadline, for: dynamicTypeSize).withTraits(.traitBold),
                             textColor: .label
                         )
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1639,7 +1642,7 @@ private struct ReviewSummaryCard: View {
                     ForEach(Array(details.enumerated()), id: \.offset) { _, detail in
                         SelectableTextView(
                             text: detail,
-                            font: .preferredFont(forTextStyle: .callout),
+                            font: InterfaceScaleFont.preferred(.callout, for: dynamicTypeSize),
                             textColor: .secondaryLabel
                         )
                     }
@@ -1675,6 +1678,8 @@ private struct ModelChangeSummaryCard: View {
     let model: String
     let provider: String
     let timestamp: String
+    /// See ReviewSummaryCard.
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         HStack(alignment: .center, spacing: 10) {
@@ -1691,7 +1696,7 @@ private struct ModelChangeSummaryCard: View {
                     .foregroundStyle(.secondary)
                 SelectableTextView(
                     text: "Model has been changed to \(provider)/\(model)",
-                    font: .preferredFont(forTextStyle: .subheadline).withTraits(.traitBold),
+                    font: InterfaceScaleFont.preferred(.subheadline, for: dynamicTypeSize).withTraits(.traitBold),
                     textColor: .label
                 )
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -1845,6 +1850,10 @@ private struct SettledToolCardContent: View, Equatable {
     /// Explicit Dynamic Type input — see SettledAssistantMessageContent.
     let sizeCategory: ContentSizeCategory
     @State private var expanded = false
+    /// Read at render time (not an `==` input): the fonts this card builds
+    /// come from it, and `sizeCategory` above already re-opens the gate for
+    /// every Dynamic Type change, interface scale included.
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.message == rhs.message
@@ -1895,7 +1904,7 @@ private struct SettledToolCardContent: View, Equatable {
                 if !expanded, let preview = collapsedPreview(for: tool) {
                     SelectableTextView(
                         text: preview,
-                        font: .monospacedSystemFont(ofSize: UIFont.preferredFont(forTextStyle: .caption2).pointSize, weight: .regular),
+                        font: InterfaceScaleFont.monospaced(.caption2, for: dynamicTypeSize),
                         textColor: UIColor(Color.primary.opacity(0.74)),
                         maximumNumberOfLines: 1
                     )
@@ -1913,7 +1922,7 @@ private struct SettledToolCardContent: View, Equatable {
                                     .foregroundStyle(.tertiary)
                                 SelectableTextView(
                                     text: ToolCard.truncateForDisplay(input, maxLines: 500),
-                                    font: .monospacedSystemFont(ofSize: UIFont.preferredFont(forTextStyle: .caption1).pointSize, weight: .regular),
+                                    font: InterfaceScaleFont.monospaced(.caption1, for: dynamicTypeSize),
                                     textColor: .secondaryLabel,
                                     maximumNumberOfLines: 0
                                 )
@@ -1927,7 +1936,7 @@ private struct SettledToolCardContent: View, Equatable {
                                     .foregroundStyle(.tertiary)
                                 SelectableTextView(
                                     text: ToolCard.truncateForDisplay(output, maxLines: 500),
-                                    font: .monospacedSystemFont(ofSize: UIFont.preferredFont(forTextStyle: .caption1).pointSize, weight: .regular),
+                                    font: InterfaceScaleFont.monospaced(.caption1, for: dynamicTypeSize),
                                     textColor: .secondaryLabel,
                                     maximumNumberOfLines: 0
                                 )
@@ -2027,6 +2036,9 @@ struct ClarifyCard: View {
     @ObservedObject var appLanguage = AppLanguageStore.shared
     let message: ChatMessage
     @EnvironmentObject var appState: AppState
+    /// See ReviewSummaryCard — this is the input the clarify card's header
+    /// letters were missing (Gerardo, 2026-09-26).
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     // Per-question draft state, keyed by the gateway qid: typed custom text
     // and in-progress multi-select selections. Multi-select intentionally
     // buffers locally — an RPC fires only on that question's confirm.
@@ -2047,7 +2059,7 @@ struct ClarifyCard: View {
                             .foregroundStyle(statusColor(for: clarify.status))
                         SelectableTextView(
                             text: layout.headerText(for: clarify),
-                            font: .preferredFont(forTextStyle: .subheadline).withTraits(.traitBold),
+                            font: InterfaceScaleFont.preferred(.subheadline, for: dynamicTypeSize).withTraits(.traitBold),
                             textColor: .label
                         )
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2149,6 +2161,8 @@ struct ClarifyCard: View {
 /// the legacy flat layout (the card header already carries the title).
 struct ClarifyQuestionRow: View {
     @ObservedObject var appLanguage = AppLanguageStore.shared
+    /// See ReviewSummaryCard.
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let question: ClarifyQuestion
     var showsTitle: Bool = true
     @Binding var customAnswer: String
@@ -2162,7 +2176,7 @@ struct ClarifyQuestionRow: View {
                 HStack(alignment: .top, spacing: 6) {
                     SelectableTextView(
                         text: question.question,
-                        font: .preferredFont(forTextStyle: .subheadline).withTraits(.traitBold),
+                        font: InterfaceScaleFont.preferred(.subheadline, for: dynamicTypeSize).withTraits(.traitBold),
                         textColor: .label
                     )
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -2234,7 +2248,7 @@ struct ClarifyQuestionRow: View {
                     .foregroundStyle(.green)
                 SelectableTextView(
                     text: answer,
-                    font: .preferredFont(forTextStyle: .subheadline),
+                    font: InterfaceScaleFont.preferred(.subheadline, for: dynamicTypeSize),
                     textColor: .label
                 )
             }
@@ -2418,6 +2432,8 @@ struct ApprovalCard: View {
     @ObservedObject var appLanguage = AppLanguageStore.shared
     let message: ChatMessage
     @EnvironmentObject var appState: AppState
+    /// See ReviewSummaryCard.
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var confirmAlways = false
 
     var body: some View {
@@ -2433,7 +2449,7 @@ struct ApprovalCard: View {
                             .foregroundStyle(statusColor(for: approval.status))
                         SelectableTextView(
                             text: approval.description,
-                            font: .preferredFont(forTextStyle: .subheadline).withTraits(.traitBold),
+                            font: InterfaceScaleFont.preferred(.subheadline, for: dynamicTypeSize).withTraits(.traitBold),
                             textColor: .label
                         )
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -2455,7 +2471,7 @@ struct ApprovalCard: View {
                 if !approval.command.isEmpty {
                     SelectableTextView(
                         text: approval.command,
-                        font: .monospacedSystemFont(ofSize: UIFont.preferredFont(forTextStyle: .caption1).pointSize, weight: .regular),
+                        font: InterfaceScaleFont.monospaced(.caption1, for: dynamicTypeSize),
                         textColor: .label,
                         maximumNumberOfLines: 5
                     )

@@ -106,6 +106,18 @@ struct ComposerPasteTextView: UIViewRepresentable {
             editorIdentity: editorIdentity,
             to: uiView
         )
+        // The composer's font follows the environment (interface scale and
+        // the device's own text size); `makeUIView` can only seed a first
+        // value from the app's content size category. Applied only when it
+        // actually changed so an ordinary update never rewrites the text
+        // view's typing attributes under the caret.
+        let environmentFont = InterfaceScaleFont.preferred(
+            .body,
+            for: context.environment.dynamicTypeSize
+        )
+        if uiView.font != environmentFont {
+            uiView.font = environmentFont
+        }
         // Layout is requested on text change and editability flip only;
         // bounds changes re-layout automatically through layoutSubviews.
         if uiView.isEditable != enabled {
