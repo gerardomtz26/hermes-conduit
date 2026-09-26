@@ -98,6 +98,37 @@ if [ "${1:-}" = "-version" ]; then
   exit 0
 fi
 echo "xcodebuild stub: $*"
+# FAKE_XCODEBUILD_SLEEP makes one invocation long-lived, and records its pid:
+# that is what the tear-down case needs to prove no test chain survives the
+# gate's exit (the stub invocation, like the real xcodebuild, is put in its own
+# process group by ci-lib.sh, so it is the process a naive teardown misses).
+if [ -n "${FAKE_XCODEBUILD_SLEEP:-}" ]; then
+  if [ -n "${FAKE_XCODEBUILD_PIDS:-}" ]; then
+    printf '%s\n' "$$" >> "$FAKE_XCODEBUILD_PIDS"
+  fi
+  sleep "$FAKE_XCODEBUILD_SLEEP"
+fi
+# Per-DEVICE invocation trace, for the cases that must prove only one
+# xcodebuild chain is ever active on one device (the two-worker fan-out, and
+# the --workers 1 serial fallback, where both workers share the primary
+# device). The destination carries the UDID, and the stub holds it briefly so
+# that two chains which ARE concurrent overlap in the recorded interval
+# instead of racing past each other within the same second.
+if [ -n "${FAKE_DEVICE_TRACE:-}" ]; then
+  trace_device=""
+  for a in "$@"; do
+    case "$a" in
+      *"Simulator,id="*) rest="${a#*id=}"; trace_device="${rest%%,*}" ;;
+    esac
+  done
+  if [ -n "$trace_device" ]; then
+    trace_start=$(date +%s)
+    dwell="${FAKE_DEVICE_DWELL:-0}"
+    [ "$dwell" -gt 0 ] && sleep "$dwell"
+    printf '%s\t%s\t%s\n' "$trace_device" "$trace_start" "$(date +%s)" \
+      >> "$FAKE_DEVICE_TRACE"
+  fi
+fi
 bundle=""
 target="ConduitTests"
 classes=""
@@ -160,11 +191,18 @@ for c in $classes; do
 done
 [ -n "$extra_node" ] && { nodes="$nodes$sep{\"nodeType\": \"Test Suite\", \"name\": \"System Failures\", \"result\": \"Failed\",
   \"children\": [$extra_node]}"; }
-cat > "$FAKE_CANNED" <<DOC
+# Per-BUNDLE (so concurrent workers cannot cross-contaminate) plus the legacy
+# shared path for cases that assert on it.
+if [ -n "$bundle" ]; then
+  cat > "$bundle.canned.json" <<DOC
 {"testNodes": [{"nodeType": "Test Plan", "name": "Conduit", "result": "Passed",
   "children": [{"nodeType": "Test bundle", "name": "$target", "result": "$result",
     "children": [$nodes]}]}]}
 DOC
+  if [ -n "${FAKE_CANNED:-}" ]; then
+    cp "$bundle.canned.json" "$FAKE_CANNED" 2>/dev/null
+  fi
+fi
 case "$mode" in
   crash) echo "Simulator device failed to launch com.milim.relay (stub)"; exit 65 ;;
   fail) echo "Test Case 'testSomething' failed (stub)"; exit 65 ;;
@@ -177,7 +215,20 @@ EOF
 #!/bin/bash
 if [ "$1" = "xcresulttool" ]; then
   # `xcresulttool get test-results tests --path <bundle>`: serve what the
-  # xcodebuild stub wrote for that invocation.
+  # xcodebuild stub wrote for THAT invocation. The per-bundle file is what
+  # makes the fixture safe for concurrent workers: a single shared canned
+  # document would let one worker's extraction read the other worker's
+  # verdict. FAKE_CANNED stays as the fallback for cases that pre-seed it.
+  canned_path=""
+  prev=""
+  for a in "$@"; do
+    [ "$prev" = "--path" ] && canned_path="$a"
+    prev="$a"
+  done
+  if [ -n "$canned_path" ] && [ -f "$canned_path.canned.json" ]; then
+    cat "$canned_path.canned.json"
+    exit 0
+  fi
   cat "$FAKE_CANNED" 2>/dev/null || exit 0
   exit 0
 fi
@@ -185,13 +236,34 @@ fi
     if [ "$2" = "create" ]; then
       # Model `simctl create`: it prints a runtime notice BEFORE the UDID, so
       # the gate has to match the UUID rather than take the whole output. A
-      # test can remove the gate device from the listing below to exercise
-      # this path.
+      # test can remove the gate devices from the listing below to exercise
+      # this path. The UDID is derived from the requested NAME, so two workers
+      # creating their own devices get two DISTINCT devices - a fixture that
+      # handed both workers the same UDID would hide exactly the defect the
+      # gate's "two workers, two devices" refusal exists for.
       echo "No runtime specified, using 'iOS 26.5 (26.5 - 23F77) - com.apple.CoreSimulator.SimRuntime.iOS-26-5'"
-      echo "6D08B063-B890-4D18-893B-D1E89E119919"
+      case "${3:-}" in
+        "Conduit CI Gate 2") echo "7E7E7E7E-1111-2222-3333-444444444444" ;;
+        *) echo "6D08B063-B890-4D18-893B-D1E89E119919" ;;
+      esac
       exit 0
     fi
     if [ "$2 $3 $4" = "list devices available" ]; then
+      if [ -n "${FAKE_SIMCTL_DUPLICATE:-}" ]; then
+        # Two devices sharing the pinned name across runtimes: the gate must
+        # REFUSE to shut either down rather than pick one.
+        cat <<'DEV'
+{"devices" : {"com.apple.CoreSimulator.SimRuntime.iOS-26-0" : [
+  { "udid" : "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
+    "name" : "iPhone 17 Pro", "state" : "Booted" },
+  { "udid" : "6D08B063-B890-4D18-893B-D1E89E119919",
+    "name" : "Conduit CI Gate", "state" : "Shutdown" }],
+ "com.apple.CoreSimulator.SimRuntime.iOS-26-5" : [
+  { "udid" : "99999999-8888-7777-6666-555555555555",
+    "name" : "Conduit CI Gate", "state" : "Shutdown" }]}}
+DEV
+        exit 0
+      fi
       if [ -n "${FAKE_NO_GATE_DEVICE:-}" ]; then
         cat <<'DEV'
 {"devices" : {"com.apple.CoreSimulator.SimRuntime.iOS-26-0" : [
@@ -204,7 +276,9 @@ DEV
   { "udid" : "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
     "name" : "iPhone 17 Pro", "state" : "Booted" },
   { "udid" : "6D08B063-B890-4D18-893B-D1E89E119919",
-    "name" : "Conduit CI Gate", "state" : "Shutdown" }]}}
+    "name" : "Conduit CI Gate", "state" : "Shutdown" },
+  { "udid" : "7E7E7E7E-1111-2222-3333-444444444444",
+    "name" : "Conduit CI Gate 2", "state" : "Shutdown" }]}}
 DEV
       fi
       exit 0
@@ -214,7 +288,53 @@ fi
 exit 0
 EOF
 
-  chmod +x "$STUBS/xcodegen" "$STUBS/xcodebuild" "$STUBS/xcrun"
+  cat > "$STUBS/ios-ci-host" <<'EOF'
+#!/bin/bash
+# Models the host coordinator for fixtures. Default mode: always-granting
+# and always-quiet - `doctor` self-checks clean, `acquire --hold` grants
+# instantly and holds exactly as long as its stdin stays open (the real
+# FIFO contract the gate relies on). IOS_CI_HOST_MODE selects the failure
+# shapes the gate must fail closed on:
+#   doctor-fail - the coordinator's self-check fails (gate must exit 2)
+#   busy        - another project holds the resource (gate must exit 3)
+#   foreign     - the monitor signals the controller mid-run (invalid run)
+#   dead        - the helper dies without any verdict (gate must exit 2)
+# IOS_CI_HOST_PIDFILE, when set, receives the holder's pid so suite
+# assertions never have to pattern-match the shared host's process table.
+if [ "${IOS_CI_HOST_MODE:-grant}" = "doctor-fail" ] && [ "${1:-}" = "doctor" ]; then
+  echo "stub doctor failure" >&2
+  exit 1
+fi
+case "${1:-}" in
+  doctor|status|audit) exit 0 ;;
+esac
+if [ "${1:-}" = "acquire" ]; then
+  if [ "${IOS_CI_HOST_MODE:-grant}" = "busy" ]; then
+    echo "{\"status\": \"busy\", \"resource\": \"simulator-test\", \"owner\": {\"project\": \"VitalRoute\", \"workflow\": \"background-tests\", \"owner_pid\": 4242, \"acquired_at\": \"stub\"}, \"hint\": \"stubbed busy\"}"
+    exit 0
+  fi
+  if [ "${IOS_CI_HOST_MODE:-grant}" = "dead" ]; then
+    exit 1
+  fi
+  if [ "${IOS_CI_HOST_MODE:-grant}" = "foreign" ]; then
+    # Model the monitor's release-policy action: shortly after granting,
+    # signal the controller (the gate) that uncoordinated activity was seen.
+    (
+      sleep 1
+      if [ -n "${IOS_CI_HOST_CONTROLLER_PID:-}" ]; then
+        kill -TERM "$IOS_CI_HOST_CONTROLLER_PID" 2>/dev/null || true
+      fi
+    ) &
+  fi
+  [ -n "${IOS_CI_HOST_PIDFILE:-}" ] && echo $$ > "$IOS_CI_HOST_PIDFILE"
+  echo "{\"status\": \"acquired\", \"lease_id\": \"L-stub00000000\", \"resource\": \"simulator-test\", \"project\": \"stub\", \"simulator_udid\": null, \"acquired_at\": \"stub\", \"owner_pid\": $$, \"waited_seconds\": 0.0, \"tool_version\": \"stub\"}"
+  cat > /dev/null
+  exit 0
+fi
+exit 0
+EOF
+
+  chmod +x "$STUBS/xcodegen" "$STUBS/xcodebuild" "$STUBS/xcrun" "$STUBS/ios-ci-host"
 
   # Windows (MSYS/Cygwin) cannot exec an extension-less script: Python's
   # subprocess (the timing extractor shells out to `xcrun xcresulttool`) needs
@@ -223,7 +343,7 @@ EOF
   # Windows checkout instead of silently degrading to "extraction failed".
   case "$(uname -s 2>/dev/null)" in
     MINGW*|MSYS*|CYGWIN*)
-      for name in xcodegen xcodebuild xcrun; do
+      for name in xcodegen xcodebuild xcrun ios-ci-host; do
         printf '@bash "%%~dp0%s" %%*\r\n' "$name" > "$STUBS/$name.cmd"
       done
       ;;
@@ -333,8 +453,14 @@ run_gate() { # extra args...
   # XCODEBUILD_POLL_INTERVAL_S keeps the watchdog polling cheap: the stub
   # xcodebuild exits instantly, and CI's own suite shrinks the cadence for
   # the same reason.
+  #
+  # --unit-batch-max-classes 7 is pinned HERE (not left to the gate's default)
+  # on purpose: this fixture's 15 classes are sized so that a 7-class cap makes
+  # THREE batches, which is what keeps the continuation path reachable (a lane
+  # that stops on batch 2 still has a batch it never reached). A case that
+  # wants the gate's own default passes --unit-batch-max-classes explicitly.
   PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 CONDUIT_PERF_TRACE=1 \
-    bash "$GATE" --allow-another-run "$@" >"$RUN_LOG" 2>&1
+    bash "$GATE" --allow-another-run --unit-batch-max-classes 7 "$@" >"$RUN_LOG" 2>&1
 }
 
 new_run_dir() { printf '%s\n' "$WORK/run-$RANDOM-$RANDOM"; }
@@ -378,13 +504,23 @@ echo "result-bundle extraction exercised here: $([ "$EXTRACTION_SUPPORTED" -eq 1
 
 FIXTURE_HEAD="$(git -C "$WORK/repo" rev-parse HEAD)"
 export FAKE_CANNED="$WORK/canned.json"
+# The stub holder records its pid here. Exported BEFORE the first gate run so
+# the holder-exit assertions below test the holder that actually served that
+# run - and asserted non-empty, so a stub regression that stops writing the
+# pidfile cannot silently turn the check into a vacuous pass.
+export IOS_CI_HOST_PIDFILE="$WORK/holder.pid"
+rm -f "$IOS_CI_HOST_PIDFILE"
 
 # ---------------------------------------------------------------------------
 echo ""
-echo "--- case: clean run ---"
+echo "--- case: clean run (on the DEFAULT gate root) ---"
+# Deliberately NO --gate-root: the default (repo parent +/conduit-local-gate
+# = $WORK/conduit-local-gate, inside this sandbox) must work - a lease block
+# placed before the GATE_ROOT default would die at mkfifo /host-lease/... .
+# This run doubles as the default-gate-root regression.
 RUN1="$(new_run_dir)"
 CLEAN_EXIT=0
-run_gate --ref HEAD --gate-root "$WORK/gate" --run-dir "$RUN1" \
+run_gate --ref HEAD --run-dir "$RUN1" \
     --repeat-classes AlphaTests --repeat-iterations 2 || CLEAN_EXIT=$?
 if needs_extraction; then
   if [ "$CLEAN_EXIT" -eq 0 ]; then
@@ -439,11 +575,133 @@ assert_contains "human summary names the tested commit" \
   "$(cat "$RUN1/summary.md")" "$FIXTURE_HEAD"
 assert_eq "build metadata moved into the run dir" \
   "$([ -f "$RUN1/build/build.log" ] && echo yes || echo no)" "yes"
-if [ -d "$WORK/gate/worktrees" ] && [ -n "$(ls -A "$WORK/gate/worktrees" 2>/dev/null)" ]; then
-  bad "throwaway worktree was left behind"
+# The clean run uses the DEFAULT gate root, so its worktree-leak check must
+# inspect that root (later explicit-root runs keep their own checks).
+if [ -d "$WORK/conduit-local-gate/worktrees" ] && [ -n "$(ls -A "$WORK/conduit-local-gate/worktrees" 2>/dev/null)" ]; then
+  bad "throwaway worktree was left behind (default root)"
 else
-  ok "throwaway worktree removed"
+  ok "throwaway worktree removed (default root)"
 fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: the host lease is acquired, held, and released ---"
+# IOS_CI_HOST_PIDFILE was exported before the run that produced $RUN1, so
+# this is the holder that actually served that run.
+assert_eq "acquisition evidence lands in the run dir" \
+  "$([ -f "$RUN1/host-lease.json" ] && echo yes || echo no)" "yes"
+assert_contains "lease id recorded" "$(cat "$RUN1/host-lease.json")" "L-stub00000000"
+HOLDER_PID="$(cat "$IOS_CI_HOST_PIDFILE" 2>/dev/null || true)"
+assert_eq "the holder recorded its pid (non-vacuous regression)" \
+  "$([ -n "$HOLDER_PID" ] && echo yes || echo no)" "yes"
+if [ -n "$HOLDER_PID" ] && kill -0 "$HOLDER_PID" 2>/dev/null; then
+  bad "a lease-holder helper survived the gate's exit (pid $HOLDER_PID)"
+else
+  ok "lease-holder helper exited with the gate"
+fi
+
+echo ""
+echo "--- case: HOST BUSY refuses before any work (exit 3) ---"
+BUSY_DIR="$(new_run_dir)"
+BUSY_LOG="$WORK/gate-busy-$RANDOM.log"
+IOS_CI_HOST_MODE=busy PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 \
+  bash "$GATE" --allow-another-run --ref HEAD --gate-root "$WORK/gate-busy" \
+    --run-dir "$BUSY_DIR" >"$BUSY_LOG" 2>&1
+BUSY_EXIT=$?
+assert_eq "busy coordinator refuses with exit 3" "$BUSY_EXIT" "3"
+assert_contains "refusal names the owning project" "$(cat "$BUSY_LOG")" "VitalRoute"
+assert_eq "no gate-result.json for a refused run" \
+  "$([ -f "$BUSY_DIR/gate-result.json" ] && echo yes || echo no)" "no"
+assert_eq "refusal evidence retained under the gate root" \
+  "$([ -s "$WORK/gate-busy/host-lease/attempt.json" ] && echo yes || echo no)" "yes"
+
+echo ""
+echo "--- case: a broken coordinator self-check fails closed (exit 2) ---"
+DOCTOR_LOG="$WORK/gate-doctor-$RANDOM.log"
+IOS_CI_HOST_MODE=doctor-fail PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 \
+  bash "$GATE" --allow-another-run --ref HEAD --gate-root "$WORK/gate-doctor" \
+    --run-dir "$(new_run_dir)" >"$DOCTOR_LOG" 2>&1
+DOCTOR_EXIT=$?
+assert_eq "failed coordinator self-check refuses with exit 2" "$DOCTOR_EXIT" "2"
+assert_contains "the self-check failure is reported" "$(cat "$DOCTOR_LOG")" "self-check"
+
+echo ""
+echo "--- case: a helper that dies without a verdict fails closed (exit 2) ---"
+DEAD_LOG="$WORK/gate-dead-$RANDOM.log"
+IOS_CI_HOST_MODE=dead PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 \
+  bash "$GATE" --allow-another-run --ref HEAD --gate-root "$WORK/gate-dead" \
+    --run-dir "$(new_run_dir)" >"$DEAD_LOG" 2>&1
+DEAD_EXIT=$?
+assert_eq "a verdict-less helper refuses with exit 2" "$DEAD_EXIT" "2"
+assert_contains "the refusal explains the coordinator failure" "$(cat "$DEAD_LOG")" "coordinator failed to grant"
+
+echo ""
+echo "--- case: an ambiguous simulator name fails closed ---"
+DUP_LOG="$WORK/gate-dup-$RANDOM.log"
+FAKE_SIMCTL_DUPLICATE=1 PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 \
+  bash "$GATE" --allow-another-run --ref HEAD --gate-root "$WORK/gate-dup" \
+    --run-dir "$(new_run_dir)" >"$DUP_LOG" 2>&1
+DUP_EXIT=$?
+assert_eq "ambiguous device name fails closed with exit 2" "$DUP_EXIT" "2"
+assert_contains "the refusal names the ambiguity" "$(cat "$DUP_LOG")" "is ambiguous"
+assert_contains "nothing was run against the ambiguous device" "$(cat "$DUP_LOG")" "refusing to run"
+
+echo ""
+echo "--- case: the monitor's invalid-run teardown is not a verdict ---"
+FOREIGN_DIR="$(new_run_dir)"
+FOREIGN_LOG="$WORK/gate-foreign-$RANDOM.log"
+IOS_CI_HOST_MODE=foreign PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 \
+  bash "$GATE" --allow-another-run --ref HEAD --gate-root "$WORK/gate-foreign" \
+    --run-dir "$FOREIGN_DIR" >"$FOREIGN_LOG" 2>&1
+FOREIGN_EXIT=$?
+assert_eq "a monitor teardown exits 143 (SIGTERM)" "$FOREIGN_EXIT" "143"
+assert_eq "a torn-down run produces no gate verdict" \
+  "$([ -f "$FOREIGN_DIR/gate-result.json" ] && echo yes || echo no)" "no"
+assert_eq "the torn-down run had acquired the lease" \
+  "$([ -s "$FOREIGN_DIR/host-lease.json" ] && echo yes || echo no)" "yes"
+
+echo ""
+echo "--- case: SIGKILL of the gate releases the lease via kernel EOF ---"
+KILL_DIR="$(new_run_dir)"
+KILL_LOG="$WORK/gate-kill-$RANDOM.log"
+# A fresh pidfile proves the holder recorded by the assertions below served
+# THIS run, not an earlier one.
+rm -f "$IOS_CI_HOST_PIDFILE"
+PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 \
+  bash "$GATE" --allow-another-run --ref HEAD --gate-root "$WORK/gate-kill" \
+    --run-dir "$KILL_DIR" >"$KILL_LOG" 2>&1 &
+KILL_GATE_PID=$!
+KILL_ACQUIRED=1
+for i in $(seq 1 120); do
+  if [ -s "$KILL_DIR/host-lease.json" ] && [ -s "$IOS_CI_HOST_PIDFILE" ]; then
+    KILL_ACQUIRED=0
+    break
+  fi
+  if ! kill -0 "$KILL_GATE_PID" 2>/dev/null; then break; fi
+  sleep 0.5
+done
+assert_eq "the run acquired the lease before the kill" "$KILL_ACQUIRED" "0"
+kill -9 "$KILL_GATE_PID" 2>/dev/null || true
+wait "$KILL_GATE_PID" 2>/dev/null || true
+KILL_HOLDER_PID="$(cat "$IOS_CI_HOST_PIDFILE" 2>/dev/null || true)"
+assert_eq "the killed run's holder recorded its pid" \
+  "$([ -n "$KILL_HOLDER_PID" ] && echo yes || echo no)" "yes"
+KILL_RELEASED=1
+for i in $(seq 1 40); do
+  if [ -z "$KILL_HOLDER_PID" ] || ! kill -0 "$KILL_HOLDER_PID" 2>/dev/null; then
+    KILL_RELEASED=0
+    break
+  fi
+  sleep 0.5
+done
+assert_eq "kernel EOF released the lease holder without any trap" "$KILL_RELEASED" "0"
+
+# The default gate root is already proven by the CLEAN RUN (it ran without
+# --gate-root, on $WORK/conduit-local-gate); this only re-asserts the lease
+# evidence landed there - a separate full gate run would spend the hosted
+# self-test job's time ceiling for no extra coverage.
+assert_eq "the default root run acquired the host lease" \
+  "$([ -s "$WORK/conduit-local-gate/host-lease/attempt.json" ] && echo yes || echo no)" "yes"
 
 # ---------------------------------------------------------------------------
 echo ""
@@ -891,6 +1149,340 @@ else
 fi
 assert_contains "the refusal explains why" "$(cat "$RUN_LOG")" "another gate is running"
 rm -rf "$WORK/gate/gate.lock"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: merge mode is complete coverage WITHOUT the repeat layer ---"
+# The mode decides the repeat DEFAULT, never the unit/UI coverage: a merge run
+# still executes the complete suites, and its artifact says so. It is NOT
+# partial - narrowing is not what happened; the mode's coverage is what it is.
+RUN21="$(new_run_dir)"
+MERGE_EXIT=0
+run_gate --mode merge --ref HEAD --gate-root "$WORK/gate-mode" \
+    --run-dir "$RUN21" >/dev/null 2>&1 || MERGE_EXIT=$?
+GATE21="$RUN21/gate-result.json"
+if needs_extraction; then
+  assert_eq "a merge run passes its own coverage" "$MERGE_EXIT" "0"
+  assert_eq "the result states the mode" \
+    "$(json_get "$GATE21" 'doc["mode"]')" "merge"
+  assert_eq "the complete unit suite ran" \
+    "$(json_get "$GATE21" 'doc["unit"]["classes_observed"]')" "15"
+  assert_eq "the complete UI suite ran" \
+    "$(json_get "$GATE21" 'doc["ui"]["classes_observed"]')" "1"
+  assert_eq "static checks ran" \
+    "$(json_get "$GATE21" 'len(doc["static_checks"])')" "3"
+  assert_eq "the coverage block says the repeat layer is absent" \
+    "$(json_get "$GATE21" 'doc["coverage"]["repeat_policy"]')" "False"
+  assert_eq "the repeat policy is recorded as not enabled" \
+    "$(json_get "$GATE21" 'doc["focused_repeats"]["enabled"]')" "False"
+  assert_eq "no repetition ran" \
+    "$(json_get "$GATE21" 'doc["focused_repeats"]["executions"]')" "0"
+  # A merge run is complete for what it claims; marking it partial would
+  # misdescribe it AND hide the real reason a release head still needs a
+  # release run on this SHA.
+  assert_eq "a merge run is not a partial run" \
+    "$(json_get "$GATE21" 'doc["partial"]')" "False"
+  assert_contains "the summary names the mode and its limits" \
+    "$(cat "$RUN21/summary.md")" "NO repeat/stress policy"
+else
+  skip "merge mode's verdict and coverage"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: release mode keeps the repeat policy (the mode only sets the default) ---"
+RUN22="$(new_run_dir)"
+RELEASE_EXIT=0
+run_gate --mode release --ref HEAD --gate-root "$WORK/gate-mode" \
+    --run-dir "$RUN22" --repeat-classes AlphaTests --repeat-iterations 1 \
+    >/dev/null 2>&1 || RELEASE_EXIT=$?
+GATE22="$RUN22/gate-result.json"
+if needs_extraction; then
+  assert_eq "the release run passes" "$RELEASE_EXIT" "0"
+  assert_eq "the result states the mode" \
+    "$(json_get "$GATE22" 'doc["mode"]')" "release"
+  assert_eq "the repeat layer ran" \
+    "$(json_get "$GATE22" 'doc["focused_repeats"]["executions"]')" "1"
+else
+  skip "release mode's repeat coverage"
+fi
+# An explicit repeat request wins over the merge default: the mode is a
+# default, not a prohibition.
+RUN23="$(new_run_dir)"
+MERGE_REPEAT_EXIT=0
+run_gate --mode merge --ref HEAD --gate-root "$WORK/gate-mode" \
+    --run-dir "$RUN23" --repeat-classes AlphaTests --repeat-iterations 1 \
+    >/dev/null 2>&1 || MERGE_REPEAT_EXIT=$?
+if needs_extraction; then
+  assert_eq "an explicit repeat request is honored in merge mode" \
+    "$(json_get "$RUN23/gate-result.json" 'doc["focused_repeats"]["executions"]')" "1"
+else
+  skip "merge mode with an explicit repeat request"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: the SHA registry is per MODE, not per SHA ---"
+# merge then release for one SHA is the normal flow and must stay possible;
+# each mode on its own is still single-shot.
+RUN24="$(new_run_dir)"
+PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 CONDUIT_PERF_TRACE=1 \
+  bash "$GATE" --mode merge --allow-another-run --ref HEAD \
+    --gate-root "$WORK/gate-mode-registry" --run-dir "$RUN24" \
+    --repeat-classes "" >/dev/null 2>&1 || true
+RUN25="$(new_run_dir)"
+MERGE_AGAIN=0
+PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 CONDUIT_PERF_TRACE=1 \
+  bash "$GATE" --mode merge --ref HEAD --gate-root "$WORK/gate-mode-registry" \
+    --run-dir "$RUN25" --repeat-classes "" >/dev/null 2>&1 || MERGE_AGAIN=$?
+assert_eq "a second merge run for the same SHA is refused" "$MERGE_AGAIN" "2"
+RUN26="$(new_run_dir)"
+RELEASE_AFTER_MERGE=0
+PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 CONDUIT_PERF_TRACE=1 \
+  bash "$GATE" --mode release --ref HEAD --gate-root "$WORK/gate-mode-registry" \
+    --run-dir "$RUN26" --repeat-classes "" >/dev/null 2>&1 || RELEASE_AFTER_MERGE=$?
+if [ "$RELEASE_AFTER_MERGE" -eq 2 ]; then
+  bad "a release run was refused because a MERGE result already existed"
+else
+  ok "a release run is allowed after a merge result exists (the merge is weaker)"
+fi
+RUN27="$(new_run_dir)"
+RELEASE_AGAIN=0
+PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 CONDUIT_PERF_TRACE=1 \
+  bash "$GATE" --mode merge --ref HEAD --gate-root "$WORK/gate-mode-registry" \
+    --run-dir "$RUN27" --repeat-classes "" >/dev/null 2>&1 || RELEASE_AGAIN=$?
+assert_eq "and a merge run is refused once a release result exists" "$RELEASE_AGAIN" "2"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: two workers, two devices, one run ---"
+# The gate fans the unit work and the UI work out over two project-owned
+# devices. The evidence has to prove: every worker ran to completion, each on
+# the device the run assigned it, with each lane's OWN artifact naming it too.
+RUN28="$(new_run_dir)"
+TWO_EXIT=0
+run_gate --ref HEAD --gate-root "$WORK/gate-workers" --run-dir "$RUN28" \
+    --repeat-classes "" >/dev/null 2>&1 || TWO_EXIT=$?
+GATE28="$RUN28/gate-result.json"
+assert_eq "both workers were recorded" \
+  "$(wc -l < "$RUN28/workers.tsv" | tr -d ' ')" "2"
+assert_eq "the unit worker holds the first device" \
+  "$(awk -F'\t' '$1=="unit" {print $3}' "$RUN28/workers.tsv")" \
+  "6D08B063-B890-4D18-893B-D1E89E119919"
+assert_eq "the ui worker holds the second device" \
+  "$(awk -F'\t' '$1=="ui" {print $3}' "$RUN28/workers.tsv")" \
+  "7E7E7E7E-1111-2222-3333-444444444444"
+assert_eq "each worker ran to completion" \
+  "$(awk -F'\t' '$6!="1" {print $1}' "$RUN28/workers.tsv" | wc -l | tr -d ' ')" "0"
+assert_eq "both workers' logs were kept" \
+  "$([ -s "$RUN28/workers/unit/worker.log" ] && [ -s "$RUN28/workers/ui/worker.log" ] && echo yes || echo no)" "yes"
+if needs_extraction; then
+  assert_eq "the fanned-out run passes" "$TWO_EXIT" "0"
+  assert_eq "the result records both workers" \
+    "$(json_get "$GATE28" 'len(doc["workers"])')" "2"
+  assert_eq "the second device is recorded" \
+    "$(json_get "$GATE28" 'doc["simulator2"]["udid"]')" \
+    "7E7E7E7E-1111-2222-3333-444444444444"
+  assert_eq "each lane's own artifact names its worker's device" \
+    "$(json_get "$GATE28" 'doc["timing"]["lanes"]["ui"]["simulator"]["udid"]')" \
+    "7E7E7E7E-1111-2222-3333-444444444444"
+  assert_eq "the unit lane names the unit device" \
+    "$(json_get "$GATE28" 'doc["timing"]["lanes"]["unit"]["simulator"]["udid"]')" \
+    "6D08B063-B890-4D18-893B-D1E89E119919"
+else
+  skip "the fanned-out run's verdict"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: two workers may not be given one device ---"
+RUN29="$(new_run_dir)"
+SAME_DEVICE_EXIT=0
+run_gate --ref HEAD --gate-root "$WORK/gate-workers" --run-dir "$RUN29" \
+    --repeat-classes "" --second-simulator "Conduit CI Gate" \
+    >/dev/null 2>&1 || SAME_DEVICE_EXIT=$?
+assert_eq "one device for two workers is refused (exit 2)" "$SAME_DEVICE_EXIT" "2"
+assert_contains "the refusal explains the two-device requirement" \
+  "$(cat "$RUN_LOG")" "--second-simulator must differ from --simulator"
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: one worker runs both suites on the primary device ---"
+RUN30="$(new_run_dir)"
+ONE_EXIT=0
+run_gate --workers 1 --ref HEAD --gate-root "$WORK/gate-workers" \
+    --run-dir "$RUN30" --repeat-classes "" >/dev/null 2>&1 || ONE_EXIT=$?
+if needs_extraction; then
+  assert_eq "the one-worker run passes" "$ONE_EXIT" "0"
+  assert_eq "it still ran the complete unit suite" \
+    "$(json_get "$RUN30/gate-result.json" 'doc["unit"]["classes_observed"]')" "15"
+  assert_eq "both workers ran on the PRIMARY device" \
+    "$(json_get "$RUN30/gate-result.json" 'len({w["device"]["udid"] for w in doc["workers"]})')" "1"
+  assert_eq "no second device is recorded" \
+    "$(json_get "$RUN30/gate-result.json" 'doc["simulator2"]')" "None"
+else
+  skip "the one-worker run's verdict"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: only one xcodebuild chain is ever active on one device ---"
+# The whole point of the worker split is that two test chains never drive one
+# device. The stub records (device, start, end) per invocation and holds the
+# device briefly, so an OVERLAP is visible instead of two instant invocations
+# racing past each other inside one second. Both directions are checked: two
+# workers on two devices (allowed, and each device must still be serial) and
+# one worker pair on ONE device (must be strictly serial).
+overlap_report() { # $1 = trace file, $2 = label
+  python3 - "$1" "$2" <<'PY'
+import collections, sys
+rows = []
+with open(sys.argv[1], encoding="utf-8") as fh:
+    for line in fh:
+        parts = line.rstrip("\n").split("\t")
+        if len(parts) == 3:
+            rows.append((parts[0], int(parts[1]), int(parts[2])))
+by_device = collections.defaultdict(list)
+for device, start, end in rows:
+    by_device[device].append((start, end))
+problems = []
+for device, spans in by_device.items():
+    spans.sort()
+    # Strictly inside counts as an overlap: with whole-second stamps a
+    # serialized pair can TOUCH (next start == previous end) and must not be
+    # reported, while two invocations that started in the same second (or
+    # between each other's start and end) are genuinely concurrent.
+    for (s1, e1), (s2, e2) in zip(spans, spans[1:]):
+        if s2 < e1:
+            problems.append("{0}: {1}-{2} overlaps {3}-{4}".format(device, s1, e1, s2, e2))
+devices = sorted(by_device)
+print("{0}\t{1}\t{2}\t{3}".format(
+    sys.argv[2], len(rows), len(devices), "; ".join(problems)))
+PY
+}
+
+FAKE_DEVICE_TRACE="$WORK/device-trace-2.tsv"
+export FAKE_DEVICE_TRACE FAKE_DEVICE_DWELL=2
+: > "$FAKE_DEVICE_TRACE"
+RUN31="$(new_run_dir)"
+run_gate --ref HEAD --gate-root "$WORK/gate-workers" --run-dir "$RUN31" \
+    --repeat-classes "" >/dev/null 2>&1 || true
+TRACE2="$(overlap_report "$FAKE_DEVICE_TRACE" "two-workers")"
+assert_eq "the two-worker run overlapped no device" \
+  "$(printf '%s' "$TRACE2" | cut -f4)" ""
+assert_eq "and it used both devices" "$(printf '%s' "$TRACE2" | cut -f3)" "2"
+unset FAKE_DEVICE_TRACE FAKE_DEVICE_DWELL
+
+FAKE_DEVICE_TRACE="$WORK/device-trace-1.tsv"
+export FAKE_DEVICE_TRACE FAKE_DEVICE_DWELL=2
+: > "$FAKE_DEVICE_TRACE"
+RUN32="$(new_run_dir)"
+run_gate --workers 1 --ref HEAD --gate-root "$WORK/gate-workers" \
+    --run-dir "$RUN32" --repeat-classes "" >/dev/null 2>&1 || true
+TRACE1="$(overlap_report "$FAKE_DEVICE_TRACE" "one-worker")"
+assert_eq "the serial fallback overlapped no device either" \
+  "$(printf '%s' "$TRACE1" | cut -f4)" ""
+assert_eq "and used exactly one device" "$(printf '%s' "$TRACE1" | cut -f3)" "1"
+unset FAKE_DEVICE_TRACE FAKE_DEVICE_DWELL
+if needs_extraction; then
+  assert_eq "the serial fallback still covered the whole unit suite" \
+    "$(json_get "$RUN32/gate-result.json" 'doc["unit"]["classes_observed"]')" "15"
+else
+  skip "the serial fallback's coverage"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: --static-serial still runs (and does not wait on the lease holder) ---"
+# The static phase joins its three checks EXPLICITLY. A bare `wait` would also
+# join the long-lived ios-ci-host lease holder in the foreground path - a
+# process that cannot exit until the gate does - so this case hangs forever
+# instead of failing.
+RUN33="$(new_run_dir)"
+SERIAL_EXIT=0
+if run_gate --static-serial --ref HEAD --gate-root "$WORK/gate-workers" \
+    --run-dir "$RUN33" --repeat-classes "" >/dev/null 2>&1; then
+  SERIAL_EXIT=0
+else
+  SERIAL_EXIT=$?
+fi
+if needs_extraction; then
+  assert_eq "--static-serial completes and passes" "$SERIAL_EXIT" "0"
+  assert_eq "its static checks all ran" \
+    "$(json_get "$RUN33/gate-result.json" 'len(doc["static_checks"])')" "3"
+  assert_eq "and the phase records that it was NOT overlapped" \
+    "$(json_get "$RUN33/static/phase.json" 'doc["details"]["overlapped_with_lanes"]')" "false"
+else
+  skip "--static-serial's verdict"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: merge mode accepts an explicit repeat request with release defaults ---"
+# Naming repeat classes with --mode merge asks for the repeat layer; the mode
+# must not silently turn it into zero iterations just because the iteration
+# COUNT was left at its default.
+RUN34="$(new_run_dir)"
+MERGE_REPEAT_DEFAULT_EXIT=0
+run_gate --mode merge --ref HEAD --gate-root "$WORK/gate-mode" \
+    --run-dir "$RUN34" --repeat-classes AlphaTests >/dev/null 2>&1 \
+    || MERGE_REPEAT_DEFAULT_EXIT=$?
+if needs_extraction; then
+  assert_eq "merge + explicit classes passes" "$MERGE_REPEAT_DEFAULT_EXIT" "0"
+  assert_eq "the repetitions used the release default (3)" \
+    "$(json_get "$RUN34/gate-result.json" 'doc["focused_repeats"]["iterations_per_class"]')" "3"
+  assert_eq "and all three ran" \
+    "$(json_get "$RUN34/gate-result.json" 'doc["focused_repeats"]["executions"]')" "3"
+else
+  skip "merge mode with an explicit repeat request"
+fi
+
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- case: a tear-down leaves no live test chain behind ---"
+# The teardown must reach the xcodebuild invocation, which ci-lib.sh puts in
+# its OWN process group (run_with_deadline's `set -m`, the idiom that lets its
+# watchdog kill a whole invocation). Signalling a worker's group alone reaches
+# the worker and the lane runner but NOT that grandchild - the process actually
+# holding the device - so this case asserts the recorded invocation pids are
+# gone after the gate is TERMed.
+export FAKE_XCODEBUILD_SLEEP=120
+export FAKE_XCODEBUILD_PIDS="$WORK/teardown-pids.txt"
+: > "$FAKE_XCODEBUILD_PIDS"
+RUN35="$(new_run_dir)"
+PATH="$STUBS:$PATH" XCODEBUILD_POLL_INTERVAL_S=1 CONDUIT_PERF_TRACE=1 \
+  bash "$GATE" --allow-another-run --unit-batch-max-classes 7 --ref HEAD \
+    --gate-root "$WORK/gate-teardown" --run-dir "$RUN35" \
+    --repeat-classes "" >"$WORK/teardown.log" 2>&1 &
+TEARDOWN_GATE=$!
+_wait=0
+while [ ! -s "$FAKE_XCODEBUILD_PIDS" ] && [ "$_wait" -lt 200 ]; do
+  sleep 0.1
+  _wait=$(( _wait + 1 ))
+done
+if [ -s "$FAKE_XCODEBUILD_PIDS" ]; then
+  ok "a stub invocation was in flight before the tear-down"
+else
+  bad "no stub invocation started; the tear-down case cannot prove anything"
+fi
+kill -TERM "$TEARDOWN_GATE" 2>/dev/null
+wait "$TEARDOWN_GATE" 2>/dev/null
+# Bounded settle, then every recorded invocation pid must be gone.
+_deadline=$(( $(date +%s) + 20 ))
+_alive=1
+while [ "$(date +%s)" -lt "$_deadline" ]; do
+  _alive=0
+  while IFS= read -r _xp; do
+    [ -z "$_xp" ] && continue
+    kill -0 "$_xp" 2>/dev/null && _alive=$(( _alive + 1 ))
+  done < "$FAKE_XCODEBUILD_PIDS"
+  [ "$_alive" -eq 0 ] && break
+  sleep 1
+done
+assert_eq "no xcodebuild invocation survived the tear-down" "$_alive" "0"
+assert_contains "the tear-down reported the surviving process it reaped" \
+  "$(cat "$WORK/teardown.log")" "terminating a surviving run process"
+unset FAKE_XCODEBUILD_SLEEP FAKE_XCODEBUILD_PIDS
 
 echo ""
 echo "=== $pass_count passed, $fail_count failed, $skip_count skipped ==="
