@@ -455,11 +455,16 @@ final class TranscriptPerformanceFixtureTests: XCTestCase {
             return
         }
 
-        // Drain the re-creation's own trailing row work, then snapshot, so
-        // vacuity gate 2 can attribute bubble-body re-runs to the streaming
-        // publish alone. Gate 1 returns on the first pass where ChatView's
-        // body ran, which can be before the re-created rows finish.
-        guard PerformanceFixtureWait.settleUntilCountersQuiet(quietFor: 1.2) else {
+        // Drain the re-creation's own trailing row work (forcing layout
+        // each turn, as gate 2's wait will) before the snapshot, so gate 2
+        // credits the streaming publish rather than re-creation work that
+        // had not landed yet. Gate 1 returns on the first pass where
+        // ChatView's body ran, which can be before the re-created rows
+        // finish.
+        guard PerformanceFixtureWait.settleUntilCountersQuiet(
+            quietFor: 1.2,
+            pumpingLayoutOf: host.view
+        ) else {
             XCTFail("post-re-creation counters never quieted; vacuity gate 2 could not attribute the publish on this runner")
             return
         }

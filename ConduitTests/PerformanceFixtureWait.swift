@@ -55,13 +55,21 @@ enum PerformanceFixtureWait {
     @discardableResult
     static func settleUntilCountersQuiet(
         quietFor: TimeInterval = 1.0,
-        cap: TimeInterval = 45.0
+        cap: TimeInterval = 45.0,
+        pumpingLayoutOf view: UIView? = nil
     ) -> Bool {
         var quietForElapsed: TimeInterval = 0
         var elapsed: TimeInterval = 0
         var last = allCounters()
         let step: TimeInterval = 0.1
         while elapsed < cap {
+            // Optional per-turn layout pass: a deferred hosting update
+            // that only a forced layout flushes would otherwise land AFTER
+            // the quiet window closes (see eventually(pumpingLayoutOf:)).
+            if let view {
+                view.setNeedsLayout()
+                view.layoutIfNeeded()
+            }
             RunLoop.current.run(until: Date().addingTimeInterval(step))
             elapsed += step
             let current = allCounters()
