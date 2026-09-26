@@ -199,7 +199,8 @@ final class TranscriptPerformanceFixtureTests: XCTestCase {
     /// root is a genuinely DIFFERENT value (same discipline as the
     /// isolation suite's ChurnableRoot, whose churn changes `ambient`).
     /// A non-Equatable root is expected to re-run its body on every
-    /// re-assignment anyway (see SettledGateHarnessRow), so this only keeps
+    /// re-assignment anyway (the invariant SettledGateHarnessRow's doc
+    /// states), so the field is inert today and only keeps
     /// the churn observable if an equality fast-path ever applies to an
     /// otherwise identical value. The release-gate flake itself was the
     /// bare run-loop wait; see the vacuity gates' layout-pumping waits.
@@ -505,7 +506,10 @@ final class TranscriptPerformanceFixtureTests: XCTestCase {
         // asserting; a non-quiet post-churn hierarchy would make the
         // snapshot below race in-flight commits, so the failsafe must
         // fail the test (the helper's contract), not be discarded.
-        let postChurnSettled = PerformanceFixtureWait.settleUntilCountersQuiet(quietFor: 1.2)
+        let postChurnSettled = PerformanceFixtureWait.settleUntilCountersQuiet(
+            quietFor: 1.2,
+            pumpingLayoutOf: host.view
+        )
         guard postChurnSettled else {
             XCTFail("post-churn counters never quieted; the dormancy snapshot would race in-flight commits on this runner")
             return

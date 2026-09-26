@@ -56,24 +56,32 @@ enum PerformanceFixtureWait {
     static func settleUntilCountersQuiet(
         quietFor: TimeInterval = 1.0,
         cap: TimeInterval = 45.0,
-        pumpingLayoutOf view: UIView? = nil
+        pumpingLayoutOf view: UIView? = nil,
+        pumpFor: TimeInterval = 1.0
     ) -> Bool {
         var quietForElapsed: TimeInterval = 0
         var elapsed: TimeInterval = 0
         var last = allCounters()
         let step: TimeInterval = 0.1
         while elapsed < cap {
-            // Optional per-turn layout pass: a deferred hosting update
-            // that only a forced layout flushes would otherwise land AFTER
-            // the quiet window closes (see eventually(pumpingLayoutOf:)).
-            if let view {
+            // Optional layout pump for the first `pumpFor` seconds only: it
+            // flushes a deferred hosting update that only a forced layout
+            // would land (see eventually(pumpingLayoutOf:)). Bounded, and
+            // the quiet window only counts once pumping stops, because a
+            // forced layout can itself wake the lazy prefetcher — pumping
+            // for the whole drain could keep renewing the work it waits on.
+            let pumping = view != nil && elapsed < pumpFor
+            if pumping, let view {
                 view.setNeedsLayout()
                 view.layoutIfNeeded()
             }
             RunLoop.current.run(until: Date().addingTimeInterval(step))
             elapsed += step
             let current = allCounters()
-            if current == last {
+            if pumping {
+                quietForElapsed = 0
+                last = current
+            } else if current == last {
                 quietForElapsed += step
                 if quietForElapsed >= quietFor { return true }
             } else {
