@@ -194,8 +194,20 @@ final class TranscriptPerformanceFixtureTests: XCTestCase {
     /// identity STRUCTURAL across the churn re-creation — same discipline
     /// as the isolation suite's ChurnableRoot — so the preference-churn
     /// regression cannot depend on AnyView same-type identity preservation.
+    ///
+    /// `generation` exists only so a re-created root is a genuinely
+    /// DIFFERENT value (same discipline as the isolation suite's
+    /// ChurnableRoot, whose churn changes `ambient`). Re-assigning a root
+    /// whose only field is the same AppState reference hands SwiftUI an
+    /// equal value it may prune, so whether ChatView's body re-ran was left
+    /// to incidental invalidations — deterministic in isolation, but the
+    /// vacuity guard timed out under release-gate lane load. A changed
+    /// field forces the root's body to re-run and rebuild ChatView. It is
+    /// not read by `body`, so the rendered hierarchy and row identity are
+    /// unchanged.
     private struct PinnedChatRoot: View {
         let appState: AppState
+        var generation = 0
 
         var body: some View {
             DormancyHarnessEnvironment.applying(
@@ -424,16 +436,18 @@ final class TranscriptPerformanceFixtureTests: XCTestCase {
             )
             return
         }
-        host.rootView = PinnedChatRoot(appState: appState)
+        host.rootView = PinnedChatRoot(appState: appState, generation: host.rootView.generation + 1)
         host.view.setNeedsLayout()
         host.view.layoutIfNeeded()
-        // Snapshot AFTER the re-creation so vacuity gate 2 can attribute the
-        // bubble-body re-runs to the streaming publish, not to the
-        // re-creation itself.
-        let bubblesAfterRecreation = TranscriptPerf.settledMessageBubbleBodyEvaluations
-
         // Vacuity gate 1: the re-creation must have re-run ChatView's body.
-        let chatViewReran = PerformanceFixtureWait.eventually {
+        // Pump layout every turn, not just the run loop: under lane load
+        // the hosting update can sit behind a deferred commit that a bare
+        // run-loop turn never forces (the SwiftUI async-commit pitfall
+        // streamTicks already guards against).
+        let chatViewReran = PerformanceFixtureWait.eventually(
+            pumpingLayoutOf: host.view,
+            cap: 30.0
+        ) {
             TranscriptPerf.chatViewBodyEvaluations > 0
         }
         guard chatViewReran else {
@@ -443,6 +457,12 @@ final class TranscriptPerformanceFixtureTests: XCTestCase {
             )
             return
         }
+
+        // Snapshot AFTER the re-creation has provably landed (gate 1 pumps
+        // layout until it has) so vacuity gate 2 can attribute the
+        // bubble-body re-runs to the streaming publish, not to the
+        // re-creation itself.
+        let bubblesAfterRecreation = TranscriptPerf.settledMessageBubbleBodyEvaluations
 
         // A streaming publish tick in the same window: the publish
         // invalidation re-runs the settled rows' body chains THROUGH the
@@ -458,7 +478,10 @@ final class TranscriptPerformanceFixtureTests: XCTestCase {
         // body chains BEYOND what the re-creation itself did (AssistantBubble
         // bodies note through the publish) — otherwise the dormancy
         // assertions measure a pruned update, not a consulted gate.
-        let rowsReran = PerformanceFixtureWait.eventually {
+        let rowsReran = PerformanceFixtureWait.eventually(
+            pumpingLayoutOf: host.view,
+            cap: 30.0
+        ) {
             TranscriptPerf.settledMessageBubbleBodyEvaluations > bubblesAfterRecreation
         }
         guard rowsReran else {

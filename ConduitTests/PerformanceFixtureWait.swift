@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 @testable import Conduit
 
 /// Shared deterministic-wait support for the performance fixtures.
@@ -92,5 +93,24 @@ enum PerformanceFixtureWait {
             if condition() { return true }
         }
         return condition()
+    }
+
+    /// `eventually`, but forcing a layout pass on `view` before every turn.
+    /// Use when the awaited work is a hosting-controller update (a root
+    /// reassignment or a published change): a bare run-loop turn only
+    /// drains whatever commit SwiftUI already scheduled, and on a loaded
+    /// runner that commit can be deferred past the cap. A forced layout
+    /// makes each turn flush pending view updates itself.
+    @discardableResult
+    static func eventually(
+        pumpingLayoutOf view: UIView,
+        cap: TimeInterval = 10.0,
+        _ condition: () -> Bool
+    ) -> Bool {
+        eventually(cap: cap) {
+            view.setNeedsLayout()
+            view.layoutIfNeeded()
+            return condition()
+        }
     }
 }
