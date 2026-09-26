@@ -176,24 +176,23 @@ struct ChatView: View {
     }
 
     /// Test-only seam for the dormancy fixtures (PR #201 review): ChatView
-    /// re-writes `\.chatTextSize` at its own root from the shared
-    /// @AppStorage preference — an environment write no OUTER harness pin
-    /// can dominate (the nearer write wins). When non-nil, that inner write
-    /// resolves to this value instead, so shared preference state cannot
-    /// leak into (or churn) a measured fixture. Production never sets it
-    /// (nil) and the preference decides exactly as before.
+    /// re-writes `\.chatTextSize` at its own root — an environment write no
+    /// OUTER harness pin can dominate (the nearer write wins). When non-nil,
+    /// that inner write resolves to this value instead, so harness state
+    /// cannot churn a measured fixture at the point that decides the rows'
+    /// gate input. Production never sets it (nil), so the value below is
+    /// `.default` exactly as `ChatTextSizeEnvironmentKey`'s own default is.
     var chatTextSizeOverride: ChatTextSize? = nil
 
-    /// The chat-only text-size preference (issue #85). Local, device-only
-    /// @AppStorage like ComposerReturnKey — never synced to Hermes or the
-    /// profile. Injected once here so every transcript Markdown path
-    /// (settled, streaming, large-document, tables, code) resolves the same
-    /// typography, while non-chat subtrees keep the `.default` environment
-    /// value and today's appearance.
-    @AppStorage(ChatTypography.preferenceKey) private var chatTextSizeRaw = ChatTypography.defaultSize.rawValue
-
+    /// The chat text-size value this subtree renders with. The Settings
+    /// slider was retired with the interface-scale selector (Gerardo,
+    /// 2026-09-26 — one control, the iOS one), so production is ALWAYS
+    /// `.default`: there is no stored preference to read anymore, and a
+    /// user who once moved the old slider is not frozen at that size.
+    /// `.default` is `ChatTextSizeEnvironmentKey`'s own default, so every
+    /// subtree that never receives this injection agrees with the chat.
     private var chatTextSize: ChatTextSize {
-        chatTextSizeOverride ?? ChatTypography.resolve(rawValue: chatTextSizeRaw)
+        chatTextSizeOverride ?? .default
     }
 
     var body: some View {

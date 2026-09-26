@@ -872,7 +872,6 @@ struct ChatSettingsDetail: View {
             ),
             trailingSection: AnyView(
                 VStack(spacing: 14) {
-                    ChatTextSizeSettings()
                     ComposerReturnKeySettings()
                     DeviceHapticsSettings()
                 }
@@ -891,62 +890,6 @@ struct ChatSettingsDetail: View {
         .init(key: "display.memory_notifications", label: AppLocalization.string("Self-improvement updates"), help: AppLocalization.string("Choose whether Conduit follows Hermes, always shows, or never shows maintenance updates."), control: .labeledOptions([(value: "default", label: AppLocalization.string("Use Hermes default")), (value: "on", label: AppLocalization.string("Always show")), (value: "off", label: AppLocalization.string("Never show"))], defaultValue: "default")),
         .init(key: "agent.image_input_mode", label: AppLocalization.string("Image attachments"), help: AppLocalization.string("How Hermes supplies images to a model."), control: .options(["auto", "native", "text"], defaultValue: "auto")),
     ]
-    }
-}
-
-/// Local, device-only chat text-size preference (issue #85). Stored in
-/// UserDefaults via @AppStorage with the same lifetime as
-/// ComposerReturnKey — never part of the Hermes profile configuration and
-/// never synchronized anywhere. A five-position stepped slider: the change
-/// is live (the visible transcript re-renders as the slider moves), there
-/// is no Save button, and `Default` keeps today's appearance.
-private struct ChatTextSizeSettings: View {
-    @ObservedObject var appLanguage = AppLanguageStore.shared
-    @AppStorage(ChatTypography.preferenceKey) private var chatTextSizeRaw = ChatTypography.defaultSize.rawValue
-
-    private var selected: ChatTextSize {
-        ChatTypography.resolve(rawValue: chatTextSizeRaw)
-    }
-
-    var body: some View {
-        ConduitSettingsSection(
-            title: AppLocalization.string("Chat text size"),
-            symbol: "textformat.size",
-            tint: .conduitAura
-        ) {
-            Text("Readable conversation content only — messages, lists, tables, and code. Buttons, timestamps, and the rest of the interface keep their size, and iOS Dynamic Type still applies on top.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("A")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .accessibilityHidden(true)
-                    Spacer()
-                    Text("A")
-                        .font(.system(size: 22, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .accessibilityHidden(true)
-                }
-                Slider(
-                    value: Binding(
-                        get: { Double(selected.rawValue) },
-                        set: { chatTextSizeRaw = Int($0.rounded()) }
-                    ),
-                    in: 0...Double(ChatTextSize.allCases.count - 1),
-                    step: 1
-                )
-                .tint(.conduitAccent)
-                .accessibilityLabel("Chat text size")
-                .accessibilityValue(selected.displayName)
-                .accessibilityHint("Five steps from smallest to largest. Applies to conversation text immediately.")
-                Text(selected.displayName)
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .center)
-            }
-        }
     }
 }
 
@@ -1542,9 +1485,6 @@ private struct AppearanceSettingsDetail: View {
     @AppStorage("conduit.ipadPersistentSidebar") private var iPadPersistentSidebar = false
     @State private var selected: ThemePreference
     @State private var isChangingIcon = false
-    /// Re-renders the picker when the interface scale changes anywhere else
-    /// (the app root reads the same key to apply the override).
-    @AppStorage(InterfaceScale.preferenceKey) private var interfaceScaleRaw = InterfaceScale.defaultScale.rawValue
     init(theme: ThemePreference, saveTheme: @escaping (ThemePreference) -> Void) { self.theme = theme; self.saveTheme = saveTheme; _selected = State(initialValue: theme) }
     private var isPad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
     /// Re-renders this picker when the palette changes anywhere else in the app.
@@ -1618,20 +1558,6 @@ private struct AppearanceSettingsDetail: View {
                         }
                     }
                 }
-            }
-            ConduitSettingsSection(title: AppLocalization.string("Interface scale"), symbol: "textformat.size", tint: .conduitAccent) {
-                Text("Scales the whole interface — sidebar, chat, controls — on top of the iPad's own text size. System applies no override and renders exactly as before.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                Picker("Interface scale", selection: Binding(
-                    get: { InterfaceScale.resolve(rawValue: interfaceScaleRaw) },
-                    set: { Haptics.selection(); interfaceScaleRaw = $0.rawValue }
-                )) {
-                    ForEach(InterfaceScale.allCases, id: \.self) { scale in
-                        Text(scale.displayName).tag(scale)
-                    }
-                }
-                .pickerStyle(.segmented)
             }
             ConduitSettingsSection(title: AppLocalization.string("App language"), symbol: "globe", tint: .conduitAccent) {
                 Text("Choose the language Conduit’s interface uses. Speech, transcription, and provider language settings are unaffected.")

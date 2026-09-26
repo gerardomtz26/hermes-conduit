@@ -12,9 +12,6 @@ struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.dismissWindow) private var dismissWindow
     @State private var isPrimaryWindow = false
-    /// Exists only to re-render this tree when the interface scale changes;
-    /// the value itself is read through `InterfaceScale.resolve`.
-    @AppStorage(InterfaceScale.preferenceKey) private var interfaceScaleRaw = InterfaceScale.defaultScale.rawValue
 
     var body: some View {
         ZStack {
@@ -62,11 +59,6 @@ struct RootView: View {
                 ConduitWindowClaimKeeper.releaseClaim()
             }
         }
-        // Outermost modifier on purpose: login, chat, sidebar and every sheet
-        // presented from this tree inherit the Dynamic Type override from
-        // here. `.system` applies no override at all, so the default renders
-        // exactly as it did before the preference existed.
-        .conduitInterfaceScale(InterfaceScale.resolve(rawValue: interfaceScaleRaw))
     }
 }
 

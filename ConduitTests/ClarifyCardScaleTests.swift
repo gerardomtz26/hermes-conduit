@@ -3,21 +3,21 @@ import UIKit
 import XCTest
 @testable import Conduit
 
-/// Gerardo's report (2026-09-26): moving Interface scale (Ajustes →
-/// Apariencia) resizes the chat messages, but the clarify card's own letters
-/// stay the same size.
+/// Gerardo's report (2026-09-26): raising the text size resizes the chat
+/// messages, but the clarify card's own letters stay the same size.
 ///
 /// The card hands its body text to UIKit through `SelectableTextView`, whose
 /// font is `UIFont.preferredFont(forTextStyle:)` — a UIKit API that reads the
-/// app's content-size category, not SwiftUI's `.dynamicTypeSize` environment,
-/// which is what the interface scale actually writes
-/// (`InterfaceScale.conduitInterfaceScale`). The header, every question title
+/// app's content-size category, not SwiftUI's `\.dynamicTypeSize` environment,
+/// which is what actually moves (the iOS text-size slider; the app has no
+/// selector of its own anymore). The gap is closed by the read-side bridge
+/// (`InterfaceScaleFont`). The header, every question title
 /// and the question body go through that path (`ChatView.swift` ClarifyCard /
 /// ClarifyQuestionRow); the small SwiftUI `.caption` labels do not.
 ///
-/// So: mount the SAME card under the two scales the selector offers, and the
-/// fonts its text views end up with must grow. This fails while the card's
-/// letters ignore the scale, which is exactly what Gerardo sees on the iPad.
+/// So: mount the SAME card at the two Dynamic Type sizes, and the fonts its
+/// text views end up with must grow. This fails while the card's letters
+/// ignore the environment, which is exactly what Gerardo sees on the iPad.
 @MainActor
 final class ClarifyCardScaleTests: XCTestCase {
     private var window: UIWindow?

@@ -2537,16 +2537,6 @@
         }
       }
     },
-    "Chat text size" : {
-      "localizations" : {
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "translated",
-            "value" : "对话字号"
-          }
-        }
-      }
-    },
     "Check pairing status" : {
       "localizations" : {
         "zh-Hans" : {
