@@ -101,10 +101,16 @@ enum PerformanceFixtureWait {
     /// drains whatever commit SwiftUI already scheduled, and on a loaded
     /// runner that commit can be deferred past the cap. A forced layout
     /// makes each turn flush pending view updates itself.
+    ///
+    /// Side effect: every turn runs `setNeedsLayout()`/`layoutIfNeeded()`
+    /// on `view` BEFORE evaluating `condition`, so the condition must not
+    /// rely on no layout happening. The default cap is longer than plain
+    /// `eventually`'s because hosting updates are what a loaded release-gate
+    /// lane delays; it is still only a failsafe.
     @discardableResult
     static func eventually(
         pumpingLayoutOf view: UIView,
-        cap: TimeInterval = 10.0,
+        cap: TimeInterval = 30.0,
         _ condition: () -> Bool
     ) -> Bool {
         eventually(cap: cap) {
