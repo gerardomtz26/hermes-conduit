@@ -1175,6 +1175,87 @@ final class MessageNormalizerTests: XCTestCase {
         ]))
     }
 
+    // MARK: - Clarify tool-row duplicates
+
+    private func clarifyActivity(question: String) -> ClarifyActivity {
+        MessageNormalizer.pendingClarifyActivity(from: [
+            "request_id": .string("req-dup"),
+            "questions": .array([
+                .object([
+                    "qid": .string("q0"),
+                    "question": .string(question),
+                    "choices": .array([.string("Azul"), .string("Verde")])
+                ])
+            ])
+        ])!
+    }
+
+    private func clarifyToolRow(id: String, question: String) -> ChatMessage {
+        ChatMessage(
+            id: id, role: .tool, content: "", timestamp: "",
+            tool: ToolActivity(
+                id: "\(id)-call",
+                name: "clarify",
+                input: "{\"questions\":[{\"question\":\"\(question)\",\"choices\":[\"Azul\",\"Verde\"]}]}",
+                output: nil,
+                status: .complete
+            )
+        )
+    }
+
+    func testDroppingClarifyToolDuplicatesRemovesTheRawCallBesideItsCard() {
+        // Resumed transcript: the gateway history carries the tool CALL (raw
+        // argument JSON) and the presentation cache restores the card for the
+        // same questions. Only the card renders, so the row must leave — live
+        // turns never created it in the first place.
+        let activity = clarifyActivity(question: "¿Cómo se ve esta encuesta?")
+        let card = ChatMessage(
+            id: "clarify-req-dup", role: .clarify,
+            content: activity.displayQuestion, timestamp: "", clarify: activity
+        )
+        let terminalRow = ChatMessage(
+            id: "t-other", role: .tool, content: "", timestamp: "",
+            tool: ToolActivity(id: "c-other", name: "terminal", input: "ls", output: nil, status: .complete)
+        )
+
+        let filtered = MessageNormalizer.droppingClarifyToolDuplicates([
+            clarifyToolRow(id: "t-clarify", question: "¿Cómo se ve esta encuesta?"),
+            card,
+            terminalRow
+        ])
+
+        XCTAssertEqual(
+            filtered.map(\.id), ["clarify-req-dup", "t-other"],
+            "The clarify tool row goes; the card and unrelated tool rows stay"
+        )
+    }
+
+    func testDroppingClarifyToolDuplicatesKeepsARowNoCardCovers() {
+        // An answered clarify whose card the transcript no longer carries has
+        // only this row left: dropping it would erase the exchange entirely.
+        let row = clarifyToolRow(id: "t-clarify", question: "¿Cómo se ve esta encuesta?")
+
+        XCTAssertEqual(
+            MessageNormalizer.droppingClarifyToolDuplicates([row]).map(\.id), ["t-clarify"],
+            "Without a card covering its questions the row is the only record and stays"
+        )
+    }
+
+    func testDroppingClarifyToolDuplicatesKeepsARowFromADifferentClarify() {
+        let activity = clarifyActivity(question: "¿Otra pregunta?")
+        let card = ChatMessage(
+            id: "clarify-other", role: .clarify,
+            content: activity.displayQuestion, timestamp: "", clarify: activity
+        )
+        let row = clarifyToolRow(id: "t-clarify", question: "¿Cómo se ve esta encuesta?")
+
+        XCTAssertEqual(
+            MessageNormalizer.droppingClarifyToolDuplicates([row, card]).map(\.id),
+            ["t-clarify", "clarify-other"],
+            "Matching is per question text: a card for another clarify hides nothing"
+        )
+    }
+
     func testNotificationPayloadBatchClarifyDeduplicatesIdentities() {
         // Duplicate qids and duplicate choice values collapse (first wins) —
         // they would render as duplicate Identifiable rows and answer

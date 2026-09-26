@@ -2536,6 +2536,40 @@ enum MessageNormalizer {
         return collapseDuplicateInterruptCorrections(in: messages)
     }
 
+    /// Drops the history row that carries the `clarify` tool CALL whenever a
+    /// clarify card covering the same questions is in the transcript.
+    ///
+    /// The two render the same exchange twice: the card shows the questions
+    /// as answer controls, the tool row shows the raw argument JSON (the
+    /// `ToolCard`). Live turns never create that row — AppState skips
+    /// `toolStart` for clarify — so a resumed transcript must not bring it
+    /// back while the card is on screen. A row no card covers (an answered
+    /// clarify the card no longer carries) is KEPT: it is the only record of
+    /// that exchange left in the transcript. Pure: same input, same output,
+    /// no mutation of the caller's array.
+    static func droppingClarifyToolDuplicates(_ messages: [ChatMessage]) -> [ChatMessage] {
+        var coveredQuestions: [String] = []
+        for message in messages where message.role == .clarify {
+            guard let clarify = message.clarify else { continue }
+            for question in clarify.questions where !question.question.isEmpty {
+                coveredQuestions.append(question.question)
+            }
+        }
+        guard !coveredQuestions.isEmpty else { return messages }
+
+        var kept: [ChatMessage] = []
+        kept.reserveCapacity(messages.count)
+        for message in messages {
+            if message.role == .tool, let tool = message.tool, tool.name.lowercased() == "clarify" {
+                let haystack = (tool.input ?? "") + "\n" + (tool.output ?? "")
+                let coveredByCard = coveredQuestions.contains { haystack.contains($0) }
+                if coveredByCard { continue }
+            }
+            kept.append(message)
+        }
+        return kept
+    }
+
     /// `display_content` is the authoritative visible payload whenever the
     /// field exists — including an explicit empty string, JSON null, or an
     /// odd scalar, all of which resolve to authoritative empty text rather

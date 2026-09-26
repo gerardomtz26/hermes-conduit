@@ -5923,7 +5923,12 @@ final class AppState: ObservableObject {
             includePendingApprovals: restorePendingDecisionCards,
             includePendingTools: result.snapshot.running != false
         )
-        messages = mergeCachedReviews(into: restored, sessionId: result.sessionId)
+        // The restored transcript can carry BOTH the clarify card and the
+        // history row of the same tool call; only the card renders, so the
+        // raw-JSON duplicate leaves here (see droppingClarifyToolDuplicates).
+        messages = MessageNormalizer.droppingClarifyToolDuplicates(
+            mergeCachedReviews(into: restored, sessionId: result.sessionId)
+        )
         if result.snapshot.running == false {
             sessionPresentationCache.removePendingTools(
                 profile: presentationProfile(for: result.sessionId),
@@ -16089,6 +16094,16 @@ final class AppState: ObservableObject {
     ///   existence proves the request is still active, so a locally sticky
     ///   expired flag yields to it.
     private func applyClarifyActivity(
+        _ activity: ClarifyActivity,
+        source: ClarifyActivitySource
+    ) {
+        applyClarifyActivityCard(activity, source: source)
+        // A card now covers these questions: the history row that carries the
+        // same clarify tool call (raw argument JSON) must not render beside it.
+        messages = MessageNormalizer.droppingClarifyToolDuplicates(messages)
+    }
+
+    private func applyClarifyActivityCard(
         _ activity: ClarifyActivity,
         source: ClarifyActivitySource
     ) {
