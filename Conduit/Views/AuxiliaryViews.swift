@@ -1542,6 +1542,9 @@ private struct AppearanceSettingsDetail: View {
     @AppStorage("conduit.ipadPersistentSidebar") private var iPadPersistentSidebar = false
     @State private var selected: ThemePreference
     @State private var isChangingIcon = false
+    /// Re-renders the picker when the interface scale changes anywhere else
+    /// (the app root reads the same key to apply the override).
+    @AppStorage(InterfaceScale.preferenceKey) private var interfaceScaleRaw = InterfaceScale.defaultScale.rawValue
     init(theme: ThemePreference, saveTheme: @escaping (ThemePreference) -> Void) { self.theme = theme; self.saveTheme = saveTheme; _selected = State(initialValue: theme) }
     private var isPad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
     /// Re-renders this picker when the palette changes anywhere else in the app.
@@ -1615,6 +1618,20 @@ private struct AppearanceSettingsDetail: View {
                         }
                     }
                 }
+            }
+            ConduitSettingsSection(title: AppLocalization.string("Interface scale"), symbol: "textformat.size", tint: .conduitAccent) {
+                Text("Scales the whole interface — sidebar, chat, controls — on top of the iPad's own text size. System applies no override and renders exactly as before.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Picker("Interface scale", selection: Binding(
+                    get: { InterfaceScale.resolve(rawValue: interfaceScaleRaw) },
+                    set: { Haptics.selection(); interfaceScaleRaw = $0.rawValue }
+                )) {
+                    ForEach(InterfaceScale.allCases, id: \.self) { scale in
+                        Text(scale.displayName).tag(scale)
+                    }
+                }
+                .pickerStyle(.segmented)
             }
             ConduitSettingsSection(title: AppLocalization.string("App language"), symbol: "globe", tint: .conduitAccent) {
                 Text("Choose the language Conduit’s interface uses. Speech, transcription, and provider language settings are unaffected.")
