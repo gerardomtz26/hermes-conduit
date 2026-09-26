@@ -16965,7 +16965,11 @@ final class AppState: ObservableObject {
             activeAgents = count
 
         case .delegateAgent(_, let activity):
-            if let index = delegateAgents.firstIndex(where: { $0.id == activity.id }) {
+            // A finished agent leaves the list instead of lingering until the
+            // app restarts; a failure stays on screen so it can be read.
+            if activity.status == .completed {
+                delegateAgents.removeAll { $0.id == activity.id }
+            } else if let index = delegateAgents.firstIndex(where: { $0.id == activity.id }) {
                 var updated = activity
                 let existing = delegateAgents[index]
                 updated.goal = activity.goal == "Delegate agent" ? existing.goal : activity.goal

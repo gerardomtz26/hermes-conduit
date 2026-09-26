@@ -430,6 +430,41 @@ final class StreamEventParserTests: XCTestCase {
         XCTAssertEqual(activity.status, .failed)
     }
 
+    // MARK: - delegate agents: the gateway's real payload
+
+    /// The gateway sends `subagent_id` / `child_session_id` and never
+    /// `id` / `agent_id` (tui_gateway/tool_progress.py). Falling back to a
+    /// fresh UUID minted a NEW card on every event, so the completion could
+    /// never match the running one and finished agents kept counting as
+    /// working until the app restarted.
+    func testSubagentCompleteUsesGatewayIdentityKeys() {
+        let event = parse(#"""
+        {"type": "subagent.complete", "session_id": "s1", "payload": {"subagent_id": "sa-7", "child_session_id": "child-1", "status": "completed", "summary": "Done"}}
+        """#)
+        guard case .delegateAgent(_, let activity) = event else {
+            return XCTFail("Expected delegateAgent")
+        }
+        XCTAssertEqual(activity.id, "sa-7")
+        XCTAssertEqual(activity.status, .completed)
+        XCTAssertEqual(activity.summary, "Done")
+    }
+
+    /// `error` and `timeout` are terminal states of the gateway's contract
+    /// and were read as `.running` (rawValue miss → `?? .running`), so a
+    /// dead agent stayed painted as working.
+    func testSubagentTerminalStatusesFromGatewayMapToFailed() {
+        for raw in ["error", "timeout"] {
+            let json = """
+            {"type": "subagent.progress", "session_id": "s1", "payload": {"subagent_id": "sa-7", "status": "\(raw)"}}
+            """
+            guard case .delegateAgent(_, let activity) = parse(json) else {
+                return XCTFail("Expected delegateAgent for status \(raw)")
+            }
+            XCTAssertEqual(activity.status, .failed,
+                           "gateway status \(raw) is terminal, not running")
+        }
+    }
+
     // MARK: - clarify.request
 
     func testClarifyWithStringChoices() {

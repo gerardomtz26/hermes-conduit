@@ -157,7 +157,15 @@ enum StreamEventParser {
     }
 
     private static func delegateAgentActivity(from payload: [String: AnyCodable], eventType: String) -> DelegateAgentActivity {
-        let id = payload["id"]?.stringValue ?? payload["agent_id"]?.stringValue ?? UUID().uuidString
+        // The wire keys a subagent by `subagent_id` — regenerated per child as
+        // `sa-<index>-<hex>` and stamped on every relayed event by
+        // tui_gateway/tool_progress.py — and never sends `id` / `agent_id`.
+        // The UUID fallback minted a fresh identity on every frame, so a
+        // completion could never match the running card and finished agents
+        // kept counting as working until the app was restarted.
+        let id = payload["id"]?.stringValue ?? payload["agent_id"]?.stringValue
+            ?? payload["subagent_id"]?.stringValue ?? payload["child_session_id"]?.stringValue
+            ?? UUID().uuidString
         let statusValue = payload["status"]?.stringValue ?? {
             if eventType.contains("fail") { return "failed" }
             if eventType.contains("interrupt") { return "interrupted" }
@@ -165,7 +173,12 @@ enum StreamEventParser {
             if eventType.contains("spawn") { return "queued" }
             return "running"
         }()
-        let status = DelegateAgentActivity.Status(rawValue: statusValue.lowercased()) ?? .running
+        let normalized = statusValue.lowercased()
+        // `error` and `timeout` are terminal states of the gateway's status
+        // contract; the rawValue miss read both as `.running`, which painted a
+        // dead agent as a working one.
+        let status = DelegateAgentActivity.Status(rawValue: normalized)
+            ?? (normalized == "error" || normalized == "timeout" ? .failed : .running)
         let text = payload["text"]?.stringValue ?? payload["message"]?.stringValue ?? payload["summary"]?.stringValue ?? ""
         let kind: DelegateAgentActivity.StreamLine.Kind = eventType.contains("tool") ? .tool : eventType.contains("thinking") ? .thinking : eventType.contains("progress") ? .progress : .summary
         let lines = text.isEmpty ? [] : [DelegateAgentActivity.StreamLine(kind: kind, text: text, isError: status == .failed)]
