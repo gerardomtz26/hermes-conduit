@@ -5,39 +5,39 @@ A native iOS client for [Hermes Agent](https://github.com/NousResearch/hermes-ag
 [![App Store](https://img.shields.io/badge/App_Store-Hermes_Conduit-blue)](https://apps.apple.com/us/app/hermes-conduit/id6790977764)
 [![Website](https://img.shields.io/badge/Website-hermesconduit.app-blue)](https://hermesconduit.app)
 
-<!-- ===== SECCIÓN DEL FORK · no existe en el original ===== -->
-## Diferencias con el original (fork de gerardomtz26)
+<!-- ===== FORK SECTION · does not exist upstream ===== -->
+## Differences from the original (gerardomtz26's fork)
 
-Este clon de [kaishi00/hermes-conduit](https://github.com/kaishi00/hermes-conduit) se trabaja en la rama **`build-local`**; el `main` de este repo no lleva trabajo propio, es solo espejo del `main` del original (por eso el aviso de «153 commits atrás»: no es una copia desfasada, es una rama que no se mueve). Los `.ipa` se firman con cuenta de desarrollo gratuita en esta máquina y se reparten por iCloud, no por la App Store.
+This clone of [kaishi00/hermes-conduit](https://github.com/kaishi00/hermes-conduit) is worked on the **`build-local`** branch; this repo's `main` carries no work of its own — it is only a mirror of the original's `main`, so if GitHub ever shows it "N commits behind", that is why: it is a snapshot of the original, not a lagging copy. The `.ipa` builds are signed with a free local developer account and distributed over iCloud, not through the App Store.
 
-Estado medido el **2026-09-26**: `build-local` va **22 commits delante** del original (21 propios + el merge de alineación) y **75 detrás**. Última alineación: **2026-09-25** (`826a3bb`, trajo 78 commits del original).
+Measured 2026-09-26: `build-local` runs **22 commits ahead** of the original (21 of its own plus the alignment merge) and **75 behind**. Last alignment: **2026-09-25** (`826a3bb`, which brought 78 commits from the original).
 
-### Lo que este repo tiene y el original no
+### What this repo has that the original doesn't
 
-| Área | Diferencia |
+| Area | Difference |
 |---|---|
-| Clarify | Arreglo del contrato `server→client requests` (build 147): las fichas de clarify se contestan y llegan en vivo desde el gateway, no solo como JSON del historial; la fila de herramienta cruda ya no se dibuja junto a la ficha. Tests propios: `ServerRequestTests`. |
-| Colores | Acento azul con una burbuja que sí sostiene texto blanco, selector de 5 paletas en Ajustes → Apariencia con contrato de contraste WCAG (`AccentPaletteTests` es el contrato). El modo AMOLED existió (builds 150–152) y se retiró. |
-| Escala de texto | `InterfaceScaleFont` puentea el Dynamic Type del ambiente a las ~17 llamadas UIKit a `preferredFont`; los selectores propios de escala se retiraron — el slider de iOS es el único mando. |
-| Markdown | Las tarjetas asentadas releen el dynamic type del ambiente (cierra el rojo viejo de SettledMessageIsolation). |
-| Subagentes | Las tarjetas de delegados se identifican por el `subagent_id` del gateway: las terminadas se retiran solas en vez de quedarse hasta reiniciar. |
-| Interfaz | Barra flotante Liquid Glass en la conversación (build 158); navegación por píldora chats · kanban · subagentes con punto de actividad en vivo, y retiro de la sidebar persistente de iPad (build 159). |
-| Pruebas ciegas al fork | 3 tests leen el `Info.plist` del bundle anfitrión en vez del id original `com.milim.relay` (orientaciones de iPad/iPhone y ATS de Tailscale); `SidebarLayoutTests` se retiró junto con la sidebar. |
+| Clarify | Fix for the `server→client requests` contract (build 147): clarify cards are answered and arrive live from the gateway instead of only showing up as history JSON; the raw tool row no longer renders beside the card. Own tests: `ServerRequestTests`. |
+| Colors | Blue accent with a bubble fill that can actually carry white text, plus a 5-palette picker in Settings → Appearance under a WCAG contrast contract (`AccentPaletteTests` is the contract). AMOLED mode existed (builds 150–152) and was retired. |
+| Text scale | `InterfaceScaleFont` bridges the environment's Dynamic Type into the ~17 UIKit `preferredFont` call sites; the custom scale selectors were retired — the iOS slider is the only size control. |
+| Markdown | Settled cards re-read the environment's dynamic type (closes the long-standing SettledMessageIsolation red). |
+| Subagents | Delegate cards are keyed by the gateway's `subagent_id`: finished ones drop off on their own instead of lingering until relaunch. |
+| Interface | Floating Liquid Glass bar over the conversation (build 158); segment-control navigation — chats · kanban · subagents with a live activity dot — and the persistent iPad sidebar retired (build 159). |
+| Fork-blind tests | 3 tests read the host bundle's `Info.plist` instead of the original `com.milim.relay` id (iPad/iPhone orientations and the Tailscale ATS rule); `SidebarLayoutTests` was retired along with the sidebar. |
 
-### Lo que el original tiene y aquí falta (75 commits · medido 2026-09-26)
+### What the original has that here is missing (75 commits · measured 2026-09-26)
 
-Entran con la próxima alineación (merge, nunca rebase):
+They land with the next alignment (a merge, never a rebase):
 
-- **Chat sin conexión** (issue-99, #223/#227/#229): copia offline de transcripciones que sobrevive a cambio de cuenta o de dashboard, y filas guardadas que no caen al cerrar la sesión.
-- **Medios** (#195/#225/#226): vista previa a pantalla completa con guardar y compartir; previsualizaciones más ligeras de memoria e hilo principal.
-- **Voz**: recuperación del motor de audio — los errores −10868 se clasifican recuperables, los engines arrancan limpios y el reset de media-services ya no truena.
-- **Compositor** (#194): el micrófono aparece solo si el perfil tiene voz habilitada; un solo slot mic/enviar.
-- **Notificaciones** (#228): sonido de aprobación y de entrada (`attention_sound`).
-- Correcciones de scroll (overshoot), del gate de tamaño de texto, consulta de menciones ASCII-only y etiquetas de Group Chat. El CI (`.github/workflows/ci.yml`) ya está al día — no falta.
+- **Offline chat** (issue-99, #223/#227/#229): an offline copy of transcripts that survives account or dashboard switches, and saved rows that don't drop when a session closes.
+- **Media** (#195/#225/#226): full-screen previews with save and share; previews that are lighter on memory and the main thread.
+- **Voice**: audio-engine recovery — −10868 errors are classified as recoverable, engines start clean, and the media-services reset no longer blows up.
+- **Composer** (#194): the microphone only appears when the profile has voice enabled; a single mic/send slot.
+- **Notifications** (#228): approval and input sounds (`attention_sound`).
+- Fixes for scroll (overshoot), the text-size gate, an ASCII-only mention query, and Group Chat labels. CI (`.github/workflows/ci.yml`) is already up to date — nothing missing there.
 
-> Esta sección pertenece al fork: si un merge con el original conflictúa aquí, se conserva esta versión y solo se actualizan sus cifras.
+> This section belongs to the fork: if a merge with the original conflicts here, keep this version and only update its numbers.
 
-<!-- ===== FIN SECCIÓN DEL FORK ===== -->
+<!-- ===== END FORK SECTION ===== -->
 
 ## What it does
 
