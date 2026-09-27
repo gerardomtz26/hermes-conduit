@@ -286,6 +286,34 @@ final class AppStateVoiceCapabilityTests: XCTestCase {
         XCTAssertFalse(appState.showsComposerVoiceButton)
     }
 
+    // MARK: - Shared mic/send trailing slot (#194)
+
+    func testEmptyIdleComposerOffersVoiceInTheTrailingSlot() {
+        XCTAssertEqual(
+            ComposerBar.trailingControl(action: .unavailable, showsVoiceButton: true),
+            .voice
+        )
+    }
+
+    func testEmptyComposerWithoutVoiceKeepsTheActionButton() {
+        XCTAssertEqual(
+            ComposerBar.trailingControl(action: .unavailable, showsVoiceButton: false),
+            .action
+        )
+    }
+
+    /// A sendable draft or a live turn always owns the slot, so Send, Stop,
+    /// Steer and Interrupt are never hidden behind the mic.
+    func testSendableOrRunningStatesTakeTheTrailingSlot() {
+        for action in [ComposerAction.send, .stop, .steer, .interrupt] {
+            XCTAssertEqual(
+                ComposerBar.trailingControl(action: action, showsVoiceButton: true),
+                .action,
+                "\(action) must not be replaced by the mic"
+            )
+        }
+    }
+
     private var readySnapshot: VoiceCapabilitySnapshot {
         VoiceCapabilitySnapshot(
             isGatewayConnected: true,

@@ -18177,16 +18177,19 @@ final class AppState: ObservableObject {
 
     var canStartVoiceConversation: Bool { voiceUnavailableReason == nil }
 
-    /// Whether the composer shows its voice button at all. Voice the user
-    /// never enabled for this profile is hidden so the text field gets the
-    /// width back (#194). Once enabled, the button stays and shows its
+    /// Whether the composer offers its voice button (in the trailing slot it
+    /// shares with send). Voice the user never enabled for this profile is
+    /// not offered, so an empty composer shows the action button instead
+    /// (#194). Once enabled, the button stays and shows its
     /// disabled state for transient or provider problems. This reads the
     /// persisted per-profile preference rather than `isVoiceEnabled`, which
     /// is reset while a connection re-establishes (the button must not blink
     /// out then) and lags a profile switch until capabilities reload. The
     /// key is scoped to the current connection, so this only bridges
-    /// reconnects to the same gateway. Re-renders ride `activeProfile` and
-    /// `setVoiceEnabled`'s `isVoiceEnabled` publish, the only writer.
+    /// reconnects to the same gateway (with no connection the key falls back
+    /// to a "disconnected" bucket, but no composer is shown then). Re-renders
+    /// ride `activeProfile` and the `isVoiceEnabled` publish in
+    /// `setVoiceEnabled`, the only writer of the persisted key.
     var showsComposerVoiceButton: Bool {
         defaults.bool(forKey: voiceEnabledPreferenceKey(profile: activeProfile))
     }
