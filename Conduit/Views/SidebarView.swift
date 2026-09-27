@@ -90,6 +90,13 @@ struct SidebarView: View {
                                 } label: {
                                     Label(tab.displayName, systemImage: tab.icon)
                                         .font(.caption.weight(.semibold))
+                                        // One line, never wrapped: Spanish
+                                        // labels ("Sesiones", "Kanban")
+                                        // broke to two lines at the 320 pt
+                                        // card (build 162). Scale down only
+                                        // if it still doesn't fit.
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.8)
                                         .frame(maxWidth: .infinity)
                                         .frame(height: 40)
                                         .foregroundStyle(selectedTab == tab ? .primary : .secondary)

@@ -199,9 +199,11 @@ struct MainView: View {
         .overlay {
             if appState.showSidebar {
                 ZStack(alignment: .topLeading) {
-                    // Light scrim: the conversation stays visible beside the
-                    // card, and tapping anywhere outside closes the panel.
-                    Color.black.opacity(0.12)
+                    // The conversation stays visible beside the card, but
+                    // dim enough that its white text stops fighting the
+                    // panel's list (0.12 was measured too weak for
+                    // legibility, build 162). Tap outside closes.
+                    Color.black.opacity(0.30)
                         .ignoresSafeArea()
                         .onTapGesture { closeSessionsPanel() }
                         .transition(.opacity)

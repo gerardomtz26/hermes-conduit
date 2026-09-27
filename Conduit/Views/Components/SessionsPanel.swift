@@ -22,10 +22,11 @@
 import SwiftUI
 
 struct SessionsPanel: View {
-    /// One number tunes the card's width — the four drawer tabs need ~70
-    /// pt each, and the conversation name sits at x = 24 with the card
-    /// hanging 12 from the leading edge. Narrower (≈230) squeezes the tabs.
-    static let panelWidth: CGFloat = 320
+    /// One number tunes the card's width: the four drawer tabs carry
+    /// SPANISH labels ("Sesiones" ≈ 62 pt + icon) and need ~88 pt each at
+    /// 356 — narrower and they wrap to two lines (seen on Gerardo's iPad
+    /// at 320, build 162). The name sits at x = 24, card hangs 12.
+    static let panelWidth: CGFloat = 356
 
     let namespace: Namespace.ID
     /// The same string the source pill showed (session title or room name).
@@ -42,9 +43,15 @@ struct SessionsPanel: View {
                 .scrollContentBackground(.hidden)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        // Liquid Glass card: the conversation refracts through the panel
-        // instead of being covered by an opaque field — that is what makes
-        // it read as floating BESIDE the chat instead of replacing it.
+        // Near-solid base UNDER the glass: the conversation behind is busy
+        // white text, and pure glass let it bleed through the empty upper
+        // area of the card (measured on Gerardo's iPad, build 162 — the
+        // complaint was legibility). 90% keeps the glass rim and the
+        // refraction at the edges while the list stays readable; this is
+        // the number to tune if it still feels see-through (or too flat).
+        .background(Color.conduitBackground.opacity(0.90))
+        // Liquid Glass card: the conversation still refracts at the edges —
+        // that is what keeps it floating BESIDE the chat, not replacing it.
         .conduitGlassSurface(cornerRadius: 26, tint: .conduitAccent.opacity(0.05))
         .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
