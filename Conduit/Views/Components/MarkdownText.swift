@@ -2662,7 +2662,7 @@ enum MarkdownParser {
         value.range(of: #"^https?://\S+\.(png|jpe?g|gif|webp)(\?\S*)?$"#, options: [.regularExpression, .caseInsensitive]) != nil ? value : nil
     }
     static func gatewayMediaPath(_ value: String) -> String? {
-        guard value.range(of: #"^MEDIA:\s*\S+\.[A-Za-z0-9]+(\?\S*)?$"#, options: [.regularExpression]) != nil else { return nil }
+        guard value.range(of: #"^MEDIA:\s*\S+\.[A-Za-z0-9]+(\?\S*)?$"#, options: [.regularExpression, .caseInsensitive]) != nil else { return nil }
         let path = String(value.dropFirst("MEDIA:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !path.isEmpty, GatewayMediaKind(path: path) != nil else { return nil }
         return path
