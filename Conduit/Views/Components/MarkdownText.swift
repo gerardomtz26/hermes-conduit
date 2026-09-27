@@ -1651,22 +1651,41 @@ private struct RemoteMarkdownImage: View {
     let alt: String
     let gatewayMediaDataURL: ((String) async -> String?)?
     @State private var gatewayImage: UIImage?
+    @State private var gatewayImageData: Data?
     @State private var gatewayLoadFailed = false
+    @State private var openingRemote = false
 
     private var isGatewayMedia: Bool { url.hasPrefix("MEDIA:") }
     private var gatewayPath: String {
         String(url.dropFirst("MEDIA:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
     }
+    /// Non-image gateway media (video, audio, documents) renders as a card
+    /// and is only fetched when opened, so scrolling past a video never
+    /// downloads it.
+    private var gatewayFileKind: GatewayMediaKind? {
+        guard isGatewayMedia, let kind = GatewayMediaKind(path: gatewayPath), kind != .image else { return nil }
+        return kind
+    }
 
     var body: some View {
         Group {
-            if isGatewayMedia {
+            if let gatewayFileKind {
+                GatewayMediaFileCard(
+                    path: gatewayPath,
+                    name: alt,
+                    kind: gatewayFileKind,
+                    gatewayMediaDataURL: gatewayMediaDataURL
+                )
+            } else if isGatewayMedia {
                 gatewayMediaContent
             } else {
                 AsyncImage(url: URL(string: url), transaction: .init(animation: .easeInOut(duration: 0.2))) { phase in
             switch phase {
             case .success(let image):
                 image.resizable().scaledToFit().frame(maxHeight: 360).clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                    .overlay { if openingRemote { ProgressView() } }
+                    .opensMediaPreview(openRemoteImage)
+                    .accessibilityLabel(alt.isEmpty ? Text("Image") : Text(verbatim: alt))
             case .failure:
                 WebFallbackImage(url: url, alt: alt)
             default:
@@ -1678,17 +1697,20 @@ private struct RemoteMarkdownImage: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .task(id: url) {
-            guard isGatewayMedia else { return }
+            guard isGatewayMedia, gatewayFileKind == nil else { return }
             gatewayImage = nil
+            gatewayImageData = nil
             gatewayLoadFailed = false
             guard let gatewayMediaDataURL, !gatewayPath.isEmpty,
                   let dataURL = await gatewayMediaDataURL(gatewayPath),
                   !Task.isCancelled,
-                  let image = image(fromDataURL: dataURL) else {
+                  let data = DataURLLimits.decodeBase64DataURL(dataURL, prefix: "data:image/"),
+                  let image = UIImage(data: data) else {
                 guard !Task.isCancelled else { return }
                 gatewayLoadFailed = true
                 return
             }
+            gatewayImageData = data
             gatewayImage = image
         }
     }
@@ -1701,6 +1723,11 @@ private struct RemoteMarkdownImage: View {
                 .scaledToFit()
                 .frame(maxHeight: 360)
                 .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
+                .opensMediaPreview {
+                    guard let gatewayImageData else { return }
+                    MediaPreviewPresenter.shared.present(data: gatewayImageData, filename: gatewayPath)
+                }
+                .accessibilityLabel(alt.isEmpty ? Text("Image") : Text(verbatim: alt))
         } else if gatewayLoadFailed {
             Label(alt.isEmpty ? AppLocalization.string("Image unavailable") : AppLocalization.string("\(alt) unavailable"), systemImage: "photo.badge.exclamationmark")
                 .font(.footnote.weight(.semibold))
@@ -1722,9 +1749,81 @@ private struct RemoteMarkdownImage: View {
         .padding(12)
     }
 
-    private func image(fromDataURL value: String) -> UIImage? {
-        guard let data = DataURLLimits.decodeBase64DataURL(value, prefix: "data:image/") else { return nil }
-        return UIImage(data: data)
+    /// AsyncImage keeps only the rendered image, so the original bytes are
+    /// fetched again (usually from URLCache) to share them at full quality.
+    private func openRemoteImage() {
+        guard !openingRemote, let destination = WebFallbackImageDestination.resolve(url) else { return }
+        openingRemote = true
+        Task {
+            _ = await MediaPreviewPresenter.shared.presentRemote(url: destination, fallbackName: alt.isEmpty ? "image" : alt)
+            openingRemote = false
+        }
+    }
+}
+
+/// Inline card for a gateway video, audio clip or document. Tapping fetches
+/// the file through the authenticated dashboard and opens it full screen.
+private struct GatewayMediaFileCard: View {
+    @ObservedObject var appLanguage = AppLanguageStore.shared
+    let path: String
+    let name: String
+    let kind: GatewayMediaKind
+    let gatewayMediaDataURL: ((String) async -> String?)?
+    @State private var loading = false
+    @State private var failed = false
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: failed ? "exclamationmark.triangle.fill" : kind.systemImage)
+                .font(.title2)
+                .foregroundStyle(failed ? Color.secondary : Color.conduitAccent)
+                .frame(width: 44, height: 44)
+                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(verbatim: displayName)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text(verbatim: failed ? AppLocalization.string("Couldn't open this file") : kind.label)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            if loading {
+                ProgressView()
+            } else {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: 360, alignment: .leading)
+        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 13, style: .continuous).strokeBorder(Color.secondary.opacity(0.18), lineWidth: 1)
+        }
+        .accessibilityElement(children: .combine)
+        .opensMediaPreview(open)
+    }
+
+    private var displayName: String {
+        name.isEmpty ? MediaPreviewPresenter.sanitizedFilename(path) : name
+    }
+
+    private func open() {
+        guard !loading, let gatewayMediaDataURL else { return }
+        loading = true
+        failed = false
+        Task {
+            defer { loading = false }
+            guard let dataURL = await gatewayMediaDataURL(path),
+                  let data = DataURLLimits.decodeBase64DataURL(dataURL),
+                  MediaPreviewPresenter.shared.present(data: data, filename: path) else {
+                failed = true
+                return
+            }
+        }
     }
 }
 
@@ -2562,10 +2661,11 @@ enum MarkdownParser {
     private static func directImageURL(_ value: String) -> String? {
         value.range(of: #"^https?://\S+\.(png|jpe?g|gif|webp)(\?\S*)?$"#, options: [.regularExpression, .caseInsensitive]) != nil ? value : nil
     }
-    private static func gatewayMediaPath(_ value: String) -> String? {
-        guard value.range(of: #"^MEDIA:\s*\S+\.(png|jpe?g|gif|webp|bmp|heic)(\?\S*)?$"#, options: [.regularExpression, .caseInsensitive]) != nil else { return nil }
+    static func gatewayMediaPath(_ value: String) -> String? {
+        guard value.range(of: #"^MEDIA:\s*\S+\.[A-Za-z0-9]+(\?\S*)?$"#, options: [.regularExpression]) != nil else { return nil }
         let path = String(value.dropFirst("MEDIA:".count)).trimmingCharacters(in: .whitespacesAndNewlines)
-        return path.isEmpty ? nil : path
+        guard !path.isEmpty, GatewayMediaKind(path: path) != nil else { return nil }
+        return path
     }
     private static func mediaName(_ path: String) -> String {
         path.split(whereSeparator: { $0 == "/" || $0 == "\\" }).last.map(String.init) ?? "Image"

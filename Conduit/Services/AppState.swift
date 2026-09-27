@@ -17892,8 +17892,11 @@ final class AppState: ObservableObject {
                 path: endpoint,
                 maxResponseBytes: DataURLLimits.maxJSONResponseBytes
             )
+            // Any media type: inline images check for `data:image/`
+            // themselves, while video, audio and document previews (#195)
+            // take whatever the gateway returns.
             guard let dataURL = result["dataUrl"] as? String,
-                  DataURLLimits.isBoundedBase64DataURL(dataURL, prefix: "data:image/") else { return nil }
+                  DataURLLimits.isBoundedBase64DataURL(dataURL) else { return nil }
             return dataURL
         } catch is CancellationError {
             return nil
