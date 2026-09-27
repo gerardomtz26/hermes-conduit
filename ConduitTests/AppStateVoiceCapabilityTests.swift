@@ -228,16 +228,24 @@ final class AppStateVoiceCapabilityTests: XCTestCase {
         XCTAssertFalse(appState.showsComposerVoiceButton)
     }
 
-    func testComposerShowsVoiceButtonWhenVoiceIsEnabled() {
-        let appState = makeAppState(snapshot: readySnapshot)
+    func testComposerShowsVoiceButtonOnceVoiceIsEnabled() async {
+        let appState = makeAppState(snapshot: readySnapshot, isVoiceEnabled: false)
+        let didEnable = await appState.setVoiceEnabled(true)
+        XCTAssertTrue(didEnable)
 
         XCTAssertTrue(appState.showsComposerVoiceButton)
     }
 
     /// Enabled voice with a broken provider keeps the (disabled) button, so
     /// the user can still see something needs fixing.
-    func testComposerKeepsVoiceButtonWhenEnabledVoiceIsUnavailable() {
-        let appState = makeAppState(snapshot: .unavailable)
+    func testComposerKeepsVoiceButtonWhenEnabledVoiceIsUnavailable() async {
+        let appState = makeAppState(snapshot: readySnapshot, isVoiceEnabled: false)
+        _ = await appState.setVoiceEnabled(true)
+        appState.installVoiceCapabilityStateForTesting(
+            bridge: DashboardTicketBridge(baseURL: "https://example.com"),
+            snapshot: .unavailable,
+            isVoiceEnabled: true
+        )
 
         XCTAssertFalse(appState.canStartVoiceConversation)
         XCTAssertTrue(appState.showsComposerVoiceButton)
@@ -247,8 +255,7 @@ final class AppStateVoiceCapabilityTests: XCTestCase {
     /// persisted preference keeps the button from blinking out meanwhile.
     func testPersistedVoicePreferenceKeepsButtonThroughReconnectReset() async {
         let appState = makeAppState(snapshot: readySnapshot, isVoiceEnabled: false)
-        let didEnable = await appState.setVoiceEnabled(true)
-        XCTAssertTrue(didEnable)
+        _ = await appState.setVoiceEnabled(true)
 
         appState.installVoiceCapabilityStateForTesting(
             bridge: DashboardTicketBridge(baseURL: "https://example.com"),
@@ -257,6 +264,18 @@ final class AppStateVoiceCapabilityTests: XCTestCase {
         )
 
         XCTAssertTrue(appState.showsComposerVoiceButton)
+    }
+
+    /// Switching away from a voice-enabled profile must not leak its state
+    /// while `isVoiceEnabled` still holds the previous profile's value.
+    func testSwitchingToNeverEnabledProfileHidesVoiceButton() async {
+        let appState = makeAppState(snapshot: readySnapshot, isVoiceEnabled: false)
+        _ = await appState.setVoiceEnabled(true)
+
+        appState.setActiveProfileForTesting("other-profile")
+
+        XCTAssertTrue(appState.isVoiceEnabled)
+        XCTAssertFalse(appState.showsComposerVoiceButton)
     }
 
     func testDisablingVoiceHidesComposerVoiceButton() async {
