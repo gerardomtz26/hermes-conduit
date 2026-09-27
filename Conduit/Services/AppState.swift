@@ -4397,7 +4397,9 @@ final class AppState: ObservableObject {
             // its old in-memory session. Tear it down before presenting login.
             dashboardTicketBridge?.invalidate()
             dashboardTicketBridge = nil
-            if keepOfflineChatInsteadOfSignIn(ConnectionFailureClassifier.classify(error)) { return }
+            let failure = ConnectionFailureClassifier.classify(error)
+            if keepOfflineChatInsteadOfSignIn(failure) { return }
+            wipeOfflineChatCacheForSignIn(after: failure, dashboardID: dashboardID)
             isConnecting = false
             isConnected = false
             showLogin = true
@@ -4756,6 +4758,7 @@ final class AppState: ObservableObject {
         guard let dashboardID = resolveDashboardID(forURL: baseURL, registerIfMissing: true) else {
             return false
         }
+        prepareInteractiveSignIn(dashboardID: dashboardID)
         let storedTokens = KeychainHelper.loadNativeOAuthTokens(dashboardID: dashboardID)
         let previousTokens = storedTokens == result.tokens ? result.previousTokens : storedTokens
         KeychainHelper.saveNativeOAuthTokens(result.tokens, dashboardID: dashboardID)
@@ -5336,6 +5339,7 @@ final class AppState: ObservableObject {
     ) -> Bool {
         guard restoreOwnsFlow(switchGeneration) else { return false }
         if keepOfflineChatInsteadOfSignIn(failure) { return true }
+        wipeOfflineChatCacheForSignIn(after: failure, dashboardID: activeDashboardID)
         lastConnectionFailure = failure
         showLogin = true
         pendingLoginFailure = .presenting(failure)
@@ -5386,6 +5390,28 @@ final class AppState: ObservableObject {
                 await executeReconnect(purpose: purpose)
             }
         }
+    }
+
+    /// An authentication failure means the saved copy can no longer be tied
+    /// to a signed-in account: the next sign-in may be a DIFFERENT account on
+    /// the same dashboard, so the dashboard's files go too — not just the
+    /// in-memory copy. Unreachable-server failures keep them (they are what
+    /// the copy exists for).
+    private func wipeOfflineChatCacheForSignIn(after failure: ConnectionFailure, dashboardID: UUID?) {
+        guard !Self.failureKeepsOfflineChat(failure), let dashboardID else { return }
+        wipeOfflineChatCache(dashboardID: dashboardID)
+    }
+
+    /// Every interactive sign-in (password, dashboard web login, native
+    /// OAuth) starts from no saved copy for that dashboard: the account
+    /// signing in may not be the one whose conversations were saved.
+    func prepareInteractiveSignIn(baseURL: String) {
+        prepareInteractiveSignIn(dashboardID: resolveDashboardID(forURL: baseURL, registerIfMissing: false))
+    }
+
+    private func prepareInteractiveSignIn(dashboardID: UUID?) {
+        guard let dashboardID else { return }
+        wipeOfflineChatCache(dashboardID: dashboardID)
     }
 
     /// Opens sign-in from the offline copy. The copy leaves the screen (and

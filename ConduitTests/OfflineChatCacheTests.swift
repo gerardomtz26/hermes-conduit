@@ -338,6 +338,35 @@ final class OfflineChatCacheTests: XCTestCase {
         XCTAssertEqual(appState.turnState, .reconnecting)
     }
 
+    /// Account boundary: A's saved conversations must never be presented to
+    /// B on the same dashboard. A's credentials are rejected (files wiped),
+    /// B signs in interactively (files wiped again before connect), and a
+    /// later offline cold launch finds nothing of A's.
+    func testAuthFailureThenOtherAccountSignInNeverPresentsTheFirstAccountsCopy() {
+        let (appState, store, dashboard) = makeAppState()
+        seedCopy(store, dashboard: dashboard) // account A
+
+        _ = appState.presentCredentialRestoreFailure(.authenticationRejected, switchGeneration: nil)
+        XCTAssertNil(store.load(dashboardID: dashboard, profile: "default"),
+                     "An authentication failure wipes the dashboard's saved files")
+
+        seedCopy(store, dashboard: dashboard) // anything left behind by A
+        appState.prepareInteractiveSignIn(baseURL: "https://one.example") // account B signs in
+
+        let (relaunched, _, _) = makeAppState(sharing: store, dashboard: dashboard)
+        relaunched.presentOfflineChatIfAvailable(dashboardID: dashboard)
+        XCTAssertNil(relaunched.offlineChatPresentation, "B's offline cold launch must not show A's transcript")
+    }
+
+    func testUnreachableFailureKeepsTheSavedFiles() {
+        let (appState, store, dashboard) = makeAppState()
+        seedCopy(store, dashboard: dashboard)
+
+        _ = appState.presentCredentialRestoreFailure(.offline, switchGeneration: nil)
+
+        XCTAssertNotNil(store.load(dashboardID: dashboard, profile: "default"))
+    }
+
     func testUnreachableRestoreWithoutACopyGoesToSignIn() {
         let (appState, _, _) = makeAppState()
         appState.showLogin = false

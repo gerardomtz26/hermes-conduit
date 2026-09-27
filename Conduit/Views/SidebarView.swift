@@ -199,8 +199,9 @@ struct SessionList: View {
                     .background(Color.conduitAccent, in: RoundedRectangle(cornerRadius: 14))
                 }
                 .buttonStyle(.plain)
-                .disabled(appState.turnState == .synchronizing)
-                .opacity(appState.turnState == .synchronizing ? 0.6 : 1)
+                // The saved copy has no live gateway to create a chat on.
+                .disabled(appState.turnState == .synchronizing || appState.offlineChatPresentation != nil)
+                .opacity(appState.turnState == .synchronizing || appState.offlineChatPresentation != nil ? 0.6 : 1)
 
                 Menu {
                     Button {
