@@ -1831,11 +1831,12 @@ final class AppState: ObservableObject {
               turnState != .synchronizing,
               !messages.isEmpty,
               let dashboardID = activeDashboardID,
-              let sessionID = offlineChatDurableSessionID() else { return }
+              let identities = offlineChatIdentities() else { return }
         offlineChatCache.record(
             dashboardID: dashboardID,
             profile: activeProfile,
-            sessionID: sessionID,
+            sessionID: offlineChatDurableSessionID(identities: identities),
+            identities: identities,
             title: activeSessionTitle,
             messages: messages,
             sessions: sessions
@@ -1847,18 +1848,25 @@ final class AppState: ObservableObject {
     /// alias) — the same `storedSessionId ?? id` that keys the saved session
     /// list — so a server that reports distinct runtime and stored ids still
     /// lines the transcript up with its sidebar row.
-    private func offlineChatDurableSessionID() -> String? {
+    /// Nil when the live catalog has no row for this conversation: the store
+    /// then resolves the key from its saved session list, or skips the write.
+    private func offlineChatDurableSessionID(identities: Set<String>) -> String? {
+        let row = sessions.first { session in
+            identities.contains(session.id)
+                || session.storedSessionId.map(identities.contains) == true
+                || !identities.isDisjoint(with: session.alternateIds)
+        }
+        return row.map { $0.storedSessionId ?? $0.id }
+    }
+
+    /// Every identity the on-screen conversation is known under.
+    private func offlineChatIdentities() -> Set<String>? {
         guard let active = ChatScrollIdentityNormalization.sessionID(
             activeChatScrollSessionIdentity.canonicalSessionID ?? activeSessionId
         ) else { return nil }
-        var candidates = acceptedIdentitySessionIDs(forRequested: active)
-        candidates.formUnion(activeChatScrollSessionIdentity.equivalentSessionIDs)
-        let row = sessions.first { session in
-            candidates.contains(session.id)
-                || session.storedSessionId.map(candidates.contains) == true
-                || !candidates.isDisjoint(with: session.alternateIds)
-        }
-        return row.map { $0.storedSessionId ?? $0.id } ?? active
+        var identities = acceptedIdentitySessionIDs(forRequested: active)
+        identities.formUnion(activeChatScrollSessionIdentity.equivalentSessionIDs)
+        return identities
     }
 
     /// Cold launch: present the saved copy for the active dashboard until the
@@ -1929,6 +1937,8 @@ final class AppState: ObservableObject {
         guard newValue != activeProfile else { return }
         activeProfile = newValue
         presentationCacheProfileEpoch &+= 1
+        // The saved copy belongs to the outgoing profile's scope.
+        dismissOfflineChatPresentation()
     }
 
 #if DEBUG

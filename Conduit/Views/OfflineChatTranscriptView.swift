@@ -9,7 +9,6 @@ import SwiftUI
 
 struct OfflineChatTranscriptView: View {
     let presentation: OfflineChatPresentation
-    @EnvironmentObject var appState: AppState
 
     var body: some View {
         VStack(spacing: 0) {

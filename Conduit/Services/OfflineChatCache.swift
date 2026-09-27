@@ -62,21 +62,39 @@ struct OfflineCachedSession: Codable, Equatable, Identifiable {
     let updatedLabel: String
     let lastActivityAt: TimeInterval?
     let source: SessionSource
+    /// The row's other identities (runtime id, catalog aliases), so a
+    /// transcript recorded while the live catalog is empty can still be
+    /// keyed by this durable `id`.
+    let aliases: [String]
 
-    init(id: String, title: String, updatedLabel: String, lastActivityAt: TimeInterval?, source: SessionSource) {
+    init(
+        id: String,
+        title: String,
+        updatedLabel: String,
+        lastActivityAt: TimeInterval?,
+        source: SessionSource,
+        aliases: [String] = []
+    ) {
         self.id = id
         self.title = title
         self.updatedLabel = updatedLabel
         self.lastActivityAt = lastActivityAt
         self.source = source
+        self.aliases = aliases
     }
 
     init(_ summary: SessionSummary) {
-        id = summary.storedSessionId ?? summary.id
+        let durable = summary.storedSessionId ?? summary.id
+        id = durable
         title = summary.title
         updatedLabel = summary.updatedLabel
         lastActivityAt = summary.lastActivityAt
         source = summary.source
+        aliases = ([summary.id] + summary.alternateIds).filter { $0 != durable }
+    }
+
+    func matches(_ identities: Set<String>) -> Bool {
+        identities.contains(id) || !identities.isDisjoint(with: aliases)
     }
 }
 
@@ -155,13 +173,21 @@ final class OfflineChatCacheStore {
         return snapshot
     }
 
-    /// Records the newest page of `messages` for `sessionID` (moved to the
-    /// front of the recent list) together with the current session list.
-    /// An empty storable transcript records nothing for that session.
+    /// Records the newest page of `messages` (moved to the front of the
+    /// recent list) together with the current session list.
+    ///
+    /// The transcript is keyed by the conversation's DURABLE id — the same
+    /// key as its saved session-list row — so the sidebar always lines up
+    /// with it: `sessionID` when the caller resolved it from the live
+    /// catalog, otherwise the saved row matching any of `identities`. With
+    /// neither, nothing is written. Older transcripts stored under the
+    /// conversation's other identities are dropped. An empty storable
+    /// transcript records nothing.
     func record(
         dashboardID: UUID,
         profile: String,
-        sessionID: String,
+        sessionID: String?,
+        identities: Set<String> = [],
         title: String,
         messages: [ChatMessage],
         sessions: [SessionSummary],
@@ -172,17 +198,24 @@ final class OfflineChatCacheStore {
         guard !rows.isEmpty else { return }
         var snapshot = load(dashboardID: dashboardID, profile: profile)
             ?? OfflineChatSnapshot(lastSessionID: nil, sessions: [], transcripts: [])
-        snapshot.transcripts.removeAll { $0.sessionID == sessionID }
+        let catalog = sessions.filter { $0.source != .cron && !$0.isArchived }
+        if !catalog.isEmpty {
+            snapshot.sessions = Array(catalog.prefix(Self.maxSessions).map(OfflineCachedSession.init))
+        }
+        var allIdentities = identities
+        if let sessionID { allIdentities.insert(sessionID) }
+        guard let sessionID = sessionID
+            ?? snapshot.sessions.first(where: { $0.matches(allIdentities) })?.id else { return }
+        if let row = snapshot.sessions.first(where: { $0.id == sessionID }) {
+            allIdentities.formUnion(row.aliases)
+        }
+        snapshot.transcripts.removeAll { $0.sessionID == sessionID || allIdentities.contains($0.sessionID) }
         snapshot.transcripts.insert(
             OfflineCachedTranscript(sessionID: sessionID, title: title, savedAt: now, messages: Array(rows)),
             at: 0
         )
         snapshot.transcripts = Array(snapshot.transcripts.prefix(Self.maxTranscripts))
         snapshot.lastSessionID = sessionID
-        let catalog = sessions.filter { $0.source != .cron && !$0.isArchived }
-        if !catalog.isEmpty {
-            snapshot.sessions = Array(catalog.prefix(Self.maxSessions).map(OfflineCachedSession.init))
-        }
         write(snapshot, dashboardID: dashboardID, profile: profile)
     }
 

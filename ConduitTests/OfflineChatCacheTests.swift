@@ -256,6 +256,7 @@ final class OfflineChatCacheTests: XCTestCase {
 
     func testRecordsOnlyConnectedAuthoritativeState() throws {
         let (appState, store, dashboard) = makeAppState()
+        appState.sessions = [session("stored-a")]
         appState.activeSessionId = "stored-a"
         appState.messages = [ChatMessage(id: "live", role: .user, content: "Live", timestamp: "1")]
 
@@ -296,10 +297,74 @@ final class OfflineChatCacheTests: XCTestCase {
         XCTAssertTrue(presentation.snapshot.sessions.contains { $0.id == displayed })
     }
 
+    /// Recording while the live catalog is empty (not loaded yet) resolves
+    /// the key from the saved session list's aliases, drops the transcript
+    /// stored under the conversation's other id, and keeps the sidebar row
+    /// matching its transcript.
+    func testRecordWithEmptyCatalogKeysTranscriptByTheSavedRow() throws {
+        let (appState, store, dashboard) = makeAppState()
+        var row = session("runtime-1")
+        row.storedSessionId = "stored-1"
+        store.record(
+            dashboardID: dashboard,
+            profile: "default",
+            sessionID: "stored-1",
+            title: "One",
+            messages: [ChatMessage(id: "old", role: .user, content: "Old", timestamp: "1")],
+            sessions: [row]
+        )
+        // A transcript an earlier build stored under the runtime id.
+        store.record(
+            dashboardID: dashboard,
+            profile: "default",
+            sessionID: "runtime-1",
+            title: "One",
+            messages: [ChatMessage(id: "orphan", role: .user, content: "Orphan", timestamp: "1")],
+            sessions: []
+        )
+
+        appState.sessions = []
+        appState.activeSessionId = "runtime-1"
+        appState.messages = [ChatMessage(id: "new", role: .user, content: "New", timestamp: "2")]
+        appState.isConnected = true
+        appState.recordOfflineChatCopy()
+
+        let snapshot = try XCTUnwrap(store.load(dashboardID: dashboard, profile: "default"))
+        XCTAssertEqual(snapshot.sessions.map(\.id), ["stored-1"], "An empty catalog never erases the saved list")
+        XCTAssertEqual(snapshot.transcript(for: "stored-1")?.messages.map(\.id), ["new"])
+        XCTAssertNil(snapshot.transcript(for: "runtime-1"), "The differently keyed transcript is dropped")
+        XCTAssertEqual(snapshot.lastSessionID, "stored-1")
+        XCTAssertTrue(snapshot.sessions.contains { snapshot.transcript(for: $0.id) != nil })
+    }
+
+    func testRecordWithNoResolvableDurableIdWritesNothing() {
+        let (appState, store, dashboard) = makeAppState()
+        appState.sessions = []
+        appState.activeSessionId = "runtime-unknown"
+        appState.messages = [ChatMessage(id: "live", role: .user, content: "Live", timestamp: "1")]
+        appState.isConnected = true
+
+        appState.recordOfflineChatCopy()
+
+        XCTAssertNil(store.load(dashboardID: dashboard, profile: "default"))
+    }
+
+    func testProfileChangeDismissesTheCopy() {
+        let (appState, store, dashboard) = makeAppState()
+        seedCopy(store, dashboard: dashboard)
+        appState.presentOfflineChatIfAvailable(dashboardID: dashboard)
+        XCTAssertNotNil(appState.offlineChatPresentation)
+
+        appState.setActiveProfileForTesting("work")
+
+        XCTAssertNil(appState.offlineChatPresentation, "A copy saved for one profile never shows under another")
+    }
+
     func testBackgroundFlushRecordsTheOnScreenConversation() throws {
         let (appState, store, dashboard) = makeAppState()
         appState.connection = HermesConnection(baseUrl: "https://one.example", ticket: "ticket")
         appState.isConnected = true
+        appState.sessions = [session("stored-a")]
         appState.activeSessionId = "stored-a"
         appState.messages = [ChatMessage(id: "live", role: .assistant, content: "Answer", timestamp: "1")]
 
