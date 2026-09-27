@@ -1782,6 +1782,16 @@
         }
       }
     },
+    "Approval & input sound" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "审批和输入提示音"
+          }
+        }
+      }
+    },
     "Approval cards in pushes" : {
       "localizations" : {
         "zh-Hans" : {
@@ -9820,12 +9830,22 @@
         }
       }
     },
-    "Play a sound with notifications" : {
+    "Play a sound when a turn or task finishes" : {
       "localizations" : {
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "通知时播放提示音"
+            "value" : "回合或任务完成时播放提示音"
+          }
+        }
+      }
+    },
+    "Play a sound when Hermes is waiting on you" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "Hermes 等待你操作时播放提示音"
           }
         }
       }
