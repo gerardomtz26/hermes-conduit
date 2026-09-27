@@ -10,10 +10,6 @@ import SwiftUI
 struct SidebarView: View {
     @EnvironmentObject var appState: AppState
     let onRequestSettings: () -> Void
-    /// Drawer mode keeps the current modal-sheet behavior; persistent mode
-    /// renders the same content as a fixed root-layout column with no close
-    /// control and no dismissal.
-    var presentation: SidebarPresentation = .drawer
     @AppStorage("conduit.sidebarTab") private var selectedTabRaw = SidebarTab.sessions.rawValue
 
     private var selectedTab: SidebarTab {
@@ -73,17 +69,15 @@ struct SidebarView: View {
                             .conduitGlassControl(cornerRadius: 18)
                             .accessibilityLabel("Settings")
 
-                            if presentation == .drawer {
-                                Button {
-                                    dismiss()
-                                } label: {
-                                    Image(systemName: "xmark")
-                                        .font(.system(size: 15, weight: .semibold))
-                                        .frame(width: 44, height: 44)
-                                }
-                                .conduitGlassControl(cornerRadius: 18)
-                                .accessibilityLabel("Close sessions")
+                            Button {
+                                dismiss()
+                            } label: {
+                                Image(systemName: "xmark")
+                                    .font(.system(size: 15, weight: .semibold))
+                                    .frame(width: 44, height: 44)
                             }
+                            .conduitGlassControl(cornerRadius: 18)
+                            .accessibilityLabel("Close sessions")
                         }
                     }
 

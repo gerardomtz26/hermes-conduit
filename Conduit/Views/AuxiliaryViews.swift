@@ -1482,11 +1482,9 @@ private struct AppearanceSettingsDetail: View {
     @ObservedObject var appLanguage = AppLanguageStore.shared
     let theme: ThemePreference
     let saveTheme: (ThemePreference) -> Void
-    @AppStorage("conduit.ipadPersistentSidebar") private var iPadPersistentSidebar = false
     @State private var selected: ThemePreference
     @State private var isChangingIcon = false
     init(theme: ThemePreference, saveTheme: @escaping (ThemePreference) -> Void) { self.theme = theme; self.saveTheme = saveTheme; _selected = State(initialValue: theme) }
-    private var isPad: Bool { UIDevice.current.userInterfaceIdiom == .pad }
     /// Re-renders this picker when the palette changes anywhere else in the app.
     @AppStorage(AccentPalette.preferenceKey) private var accentPaletteRaw = AccentPalette.defaultPalette.rawValue
 
@@ -1620,15 +1618,6 @@ private struct AppearanceSettingsDetail: View {
                 }
             }
 
-            if isPad {
-                ConduitSettingsSection(title: AppLocalization.string("Layout"), symbol: "sidebar.left", tint: .conduitAura) {
-                    Toggle("Persistent session sidebar", isOn: $iPadPersistentSidebar)
-                        .tint(.conduitAccent)
-                    Text("Keep Sessions, Cron, and Kanban visible beside the current conversation when the window is wide enough.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
         }.navigationTitle("Appearance")
     }
 }

@@ -64,27 +64,15 @@ struct RootView: View {
 
 struct MainView: View {
     @EnvironmentObject var appState: AppState
-    @AppStorage("conduit.ipadPersistentSidebar") private var prefersPersistentSidebar = false
     /// Exists only to re-render this subtree when the accent palette changes,
     /// so every live colour provider resolves against the new palette. The
     /// value itself is read through `AccentPalette.current`.
     @AppStorage(AccentPalette.preferenceKey) private var accentPaletteRaw = AccentPalette.defaultPalette.rawValue
-    @State private var availableWindowWidth: CGFloat = 0
     @State private var settingsPresentation: SettingsSnapshot?
     @State private var shouldPresentSettingsAfterSidebarDismissal = false
 
-    private var sidebarPresentation: SidebarPresentation {
-        SidebarLayoutPolicy.resolvePresentation(
-            idiom: UIDevice.current.userInterfaceIdiom,
-            prefersPersistentSidebar: prefersPersistentSidebar,
-            availableWidth: availableWindowWidth
-        )
-    }
-
-    private var isPersistentSidebarActive: Bool { sidebarPresentation == .persistent }
-
     var body: some View {
-        sidebarLayoutContent
+        chatNavigationContent
         .sheet(isPresented: $appState.showModelPicker) {
             ModelPickerView()
                 .presentationDetents([.medium, .large])
@@ -109,6 +97,11 @@ struct MainView: View {
         .sheet(isPresented: $appState.showAgentsSheet) {
             DelegateAgentsSheet()
                 .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+        }
+        .sheet(isPresented: $appState.showKanbanSheet) {
+            KanbanView()
+                .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
         }
         .sheet(isPresented: $appState.showVoiceSheet, onDismiss: appState.closeVoiceConversation) {
@@ -147,15 +140,6 @@ struct MainView: View {
             )
                 .presentationDetents([.large])
         }
-        .background(windowWidthReader)
-        .onPreferenceChange(MainViewWindowWidthKey.self) { availableWindowWidth = $0 }
-        .onChange(of: isPersistentSidebarActive) { _, persistentActive in
-            // Hard invariant: the persistent layout must never coexist with
-            // showSidebar == true — that flag suppresses streaming/reasoning
-            // publication. A resize, rotation, or the Appearance toggle can
-            // activate the persistent layout while the drawer is presented.
-            if persistentActive { appState.dismissSidebarDrawer() }
-        }
         .task(id: voiceCapabilityRefreshKey) {
             await appState.refreshVoiceCapabilities()
         }
@@ -172,37 +156,13 @@ struct MainView: View {
         }
     }
 
-    /// Routes the sidebar between its two presentations: the existing chat
-    /// shell with the modal drawer, or — on wide iPad windows with the
-    /// Appearance opt-in — the same SidebarView as a persistent leading
-    /// column beside the chat.
-    @ViewBuilder
-    private var sidebarLayoutContent: some View {
-        if isPersistentSidebarActive {
-            HStack(spacing: 0) {
-                SidebarView(
-                    onRequestSettings: presentSettingsFromPersistentSidebar,
-                    presentation: .persistent
-                )
-                .frame(width: SidebarLayoutMetrics.persistentSidebarWidth)
-
-                Divider()
-                    .ignoresSafeArea(.container, edges: .vertical)
-
-                chatNavigationContent
-            }
-        } else {
-            chatNavigationContent
-        }
-    }
-
-    /// The existing chat shell, shared by both sidebar layouts so the drawer
-    /// and the persistent column render the identical conversation surface.
-    /// Only the drawer affordances (hamburger and left-edge swipe) hide while
-    /// the persistent sidebar is visible. An open Group Chat room replaces
-    /// the conversation surface wholesale: a room is NOT a session, so this
-    /// swap is the entire viewport integration — `ChatView`'s session state
-    /// (and the saved `SessionReference`) is untouched by room navigation.
+    /// The conversation shell: always full screen, with the sessions drawer
+    /// presented over it — the persistent iPad column was retired (Gerardo,
+    /// 2026-09-26: conversation first, navigation through the floating bar).
+    /// An open Group Chat room replaces the conversation surface wholesale:
+    /// a room is NOT a session, so this swap is the entire viewport
+    /// integration — `ChatView`'s session state (and the saved
+    /// `SessionReference`) is untouched by room navigation.
     private var chatNavigationContent: some View {
         NavigationStack {
             ZStack {
@@ -216,17 +176,13 @@ struct MainView: View {
                 }
             }
             .overlay(alignment: .leading) {
-                if !isPersistentSidebarActive {
-                    EdgePanGesture { appState.showSidebar = true }
-                        .frame(width: 25)
-                        .ignoresSafeArea()
-                }
+                EdgePanGesture { appState.showSidebar = true }
+                    .frame(width: 25)
+                    .ignoresSafeArea()
             }
-            // The floating glass bar replaces the navigation bar: mounted as
-            // the top safe-area inset it starts the content below itself and
-            // lets the transcript slide under the glass while scrolling,
-            // where the old toolbar only floated its loose pills over an
-            // empty strip of reserved safe area.
+            // The floating bar replaces the navigation bar: mounted as the
+            // top safe-area inset it starts the content below itself and
+            // lets the transcript slide under the glass while scrolling.
             .safeAreaInset(edge: .top, spacing: 0) {
                 floatingTopBar
             }
@@ -241,49 +197,77 @@ struct MainView: View {
         }
     }
 
-    /// The bar itself: the session's controls or the group-room's controls,
-    /// plus the connection dot that both surfaces used to show as a trailing
-    /// toolbar item.
-    @ViewBuilder
+    /// WhatsApp-style bar: chat identity leading, the destination segment
+    /// control centered, actions trailing. An open room swaps the leading and
+    /// trailing pills for its own; the center control is shared.
     private var floatingTopBar: some View {
         FloatingTopBar {
-            if appState.activeRoomSurface != nil {
-                GroupChatTopBarContent()
-            } else {
-                sessionTopBarControls
-            }
-            ConnectionStatusIndicator()
+            topBarLeading
+        } center: {
+            TopBarSegmentedControl(
+                active: activeTopBarSection,
+                runningAgentCount: runningAgentCount,
+                onSelect: selectTopBarSection
+            )
+        } trailing: {
+            topBarTrailing
         }
     }
 
-    /// The session half of the bar. Every control keeps the label and hint
-    /// it carried as a toolbar item (the UI tests address "Open sessions" by
-    /// that exact string), but the title no longer needs its own pill: it
-    /// sits directly on the bar's glass.
-    ///
-    /// Session-only by construction: an open room renders
-    /// `GroupChatTopBarContent` instead, so the session's title,
-    /// scroll-to-top, and refresh can never act on the hidden conversation
-    /// behind a room.
-    @ViewBuilder
-    private var sessionTopBarControls: some View {
-        // An open room supplies its own leading Leave button; a second
-        // leading control would be ambiguous. The edge swipe still opens
-        // the sidebar.
-        if !isPersistentSidebarActive {
-            Button {
+    /// Which destination the segment control marks as active: whatever owns
+    /// the surface right now, defaulting to `.chats` — an open conversation
+    /// IS the chats surface.
+    private var activeTopBarSection: TopBarSection {
+        if appState.showKanbanSheet { return .kanban }
+        if appState.showAgentsSheet { return .agents }
+        return .chats
+    }
+
+    /// Delegate agents whose status is active right now — the same predicate
+    /// `DelegateAgentsSheet` counts for its "N working now" line, so the
+    /// segment's activity dot and the sheet never disagree.
+    private var runningAgentCount: Int {
+        appState.delegateAgents.filter(\.status.isActive).count
+    }
+
+    /// One destination at a time: opening a new one closes the others, and
+    /// re-selecting the open one closes it. The chats segment pins the
+    /// drawer to its Sessions tab so "Open sessions" always lands there.
+    private func selectTopBarSection(_ section: TopBarSection) {
+        switch section {
+        case .chats:
+            appState.showKanbanSheet = false
+            appState.showAgentsSheet = false
+            if appState.showSidebar {
+                appState.dismissSidebarDrawer()
+            } else {
+                UserDefaults.standard.set(SidebarTab.sessions.rawValue, forKey: "conduit.sidebarTab")
                 appState.showSidebar = true
-            } label: {
-                Image(systemName: "line.3.horizontal")
-                    .font(.system(size: 16, weight: .semibold))
-                    .frame(width: 40, height: 40)
             }
-            .conduitGlassControl(cornerRadius: 20, tint: .conduitAccent.opacity(0.10))
-            .accessibilityLabel("Open sessions")
+        case .kanban:
+            appState.showAgentsSheet = false
+            appState.dismissSidebarDrawer()
+            appState.showKanbanSheet.toggle()
+        case .agents:
+            appState.showKanbanSheet = false
+            appState.dismissSidebarDrawer()
+            appState.showAgentsSheet.toggle()
         }
+    }
 
-        Spacer(minLength: 8)
+    /// Leading zone: the room's identity while a room is open, otherwise the
+    /// session title (tap = scroll to top). Session-only by construction, so
+    /// the title can never act on the hidden conversation behind a room.
+    @ViewBuilder
+    private var topBarLeading: some View {
+        if appState.activeRoomSurface != nil {
+            GroupChatTitlePill()
+        } else {
+            sessionTitlePill
+        }
+    }
 
+    private var sessionTitlePill: some View {
         Button {
             appState.requestChatScrollToTop()
         } label: {
@@ -291,44 +275,57 @@ struct MainView: View {
                 .font(.subheadline.weight(.semibold))
                 .lineLimit(1)
                 .truncationMode(.middle)
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
         }
         .buttonStyle(.plain)
-        .layoutPriority(1)
+        .conduitGlassSurface(cornerRadius: 20, tint: .conduitAccent.opacity(0.06))
         .accessibilityLabel(appState.activeSessionTitle)
         .accessibilityHint("Scroll to top of conversation")
+    }
 
-        Spacer(minLength: 8)
-
-        Button {
-            Task { await appState.refreshActiveSession() }
-        } label: {
-            Image(systemName: "arrow.clockwise")
-                .font(.system(size: 15, weight: .semibold))
-                .rotationEffect(.degrees(appState.isChatRefreshing ? 360 : 0))
-                .animation(
-                    appState.isChatRefreshing
-                        ? .linear(duration: 0.75).repeatForever(autoreverses: false)
-                        : .default,
-                    value: appState.isChatRefreshing
-                )
-                .frame(width: 40, height: 40)
+    /// Trailing zone: refresh + connection dot for a session; the room's
+    /// actions menu + connection dot for a room.
+    @ViewBuilder
+    private var topBarTrailing: some View {
+        if appState.activeRoomSurface != nil {
+            GroupChatActionsPill()
+        } else {
+            sessionActionsPill
         }
-        .conduitGlassControl(cornerRadius: 20, tint: .conduitAccent.opacity(0.10))
-        .disabled(!appState.isConnected || appState.isChatRefreshing)
-        .accessibilityLabel("Refresh conversation")
+    }
+
+    private var sessionActionsPill: some View {
+        ConduitGlassGroup(spacing: 6) {
+            HStack(spacing: 6) {
+                Button {
+                    Task { await appState.refreshActiveSession() }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 15, weight: .semibold))
+                        .rotationEffect(.degrees(appState.isChatRefreshing ? 360 : 0))
+                        .animation(
+                            appState.isChatRefreshing
+                                ? .linear(duration: 0.75).repeatForever(autoreverses: false)
+                                : .default,
+                            value: appState.isChatRefreshing
+                        )
+                        .frame(width: 40, height: 40)
+                }
+                .conduitGlassControl(cornerRadius: 20, tint: .conduitAccent.opacity(0.10))
+                .disabled(!appState.isConnected || appState.isChatRefreshing)
+                .accessibilityLabel("Refresh conversation")
+
+                ConnectionStatusIndicator()
+            }
+            .padding(4)
+            .conduitGlassSurface(cornerRadius: 22, tint: .conduitAccent.opacity(0.05))
+        }
     }
 
     private func presentSettingsFromDrawer() {
         shouldPresentSettingsAfterSidebarDismissal = true
         appState.showSidebar = false
-    }
-
-    /// Persistent mode keeps the sidebar visible, so Settings opens directly
-    /// instead of waiting for the drawer sheet to dismiss first.
-    private func presentSettingsFromPersistentSidebar() {
-        appState.isSettingsSheetPresented = true
-        settingsPresentation = appState.makeSettingsSnapshot()
     }
 
     private func presentSettingsAfterSidebarDismissal() {
@@ -342,35 +339,16 @@ struct MainView: View {
     /// Consumption semantics (defer-while-pending, claim-once-per-request,
     /// drop on precedence losers) live in AppState so they survive MainView
     /// teardown; this layer only owns the actual sheet presentation. An
-    /// active persistent sidebar already shows Sessions, so the request is
-    /// consumed without opening a redundant drawer.
+    /// already-open drawer IS the surface, so the request is consumed
+    /// without stacking a second presentation.
     private func presentPreferredReturnSurfaceIfNeeded() {
         guard appState.claimPreferredReturnSurfacePresentation() else { return }
-        guard SidebarLayoutPolicy.shouldPresentDrawerForReturnSurface(
-            persistentSidebarActive: isPersistentSidebarActive,
-            drawerPresented: appState.showSidebar
-        ) else { return }
+        guard !appState.showSidebar else { return }
         appState.showSidebar = true
-    }
-
-    private var windowWidthReader: some View {
-        GeometryReader { proxy in
-            Color.clear.preference(key: MainViewWindowWidthKey.self, value: proxy.size.width)
-        }
     }
 
     private var voiceCapabilityRefreshKey: String {
         "\(appState.isConnected):\(appState.activeProfile)"
-    }
-}
-
-/// Reports the width of the window hosting MainView so the sidebar layout
-/// decision tracks Split View, Stage Manager, and window resizing.
-private struct MainViewWindowWidthKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = max(value, nextValue())
     }
 }
 

@@ -1138,6 +1138,11 @@ final class AppState: ObservableObject {
     @Published var showWorkspaceSheet = false
     @Published var showGatewaySheet = false
     @Published var showAgentsSheet = false
+    /// The Kanban board's own sheet, opened from the floating bar's segment
+    /// control (Gerardo, 2026-09-26: one destination per segment, each over
+    /// the conversation). Lives here so the return-surface decision can see
+    /// it like every other modal sheet.
+    @Published var showKanbanSheet = false
     @Published var showVoiceSheet = false
     /// Mirrors MainView's Settings sheet item so return-surface decisions can
     /// tell whether Settings owns the surface across a background/foreground cycle.
@@ -2240,7 +2245,7 @@ final class AppState: ObservableObject {
     /// over the preferred return surface.
     var isModalSheetPresented: Bool {
         showModelPicker || showContextSheet || showWorkspaceSheet || showGatewaySheet
-            || showAgentsSheet || showVoiceSheet || isSettingsSheetPresented
+            || showAgentsSheet || showKanbanSheet || showVoiceSheet || isSettingsSheetPresented
     }
 
     /// True when an explicit destination exists but has not been routed yet
