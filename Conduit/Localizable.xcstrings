@@ -1,6 +1,16 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "This conversation has no saved copy on this device" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "此对话在此设备上没有已保存的副本"
+          }
+        }
+      }
+    },
     "Read-only saved copy" : {
       "localizations" : {
         "zh-Hans" : {

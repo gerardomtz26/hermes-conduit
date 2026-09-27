@@ -1216,7 +1216,14 @@ final class AppState: ObservableObject {
     /// when the user starts a manual login (which abandons the prior
     /// failure's repair context).
     @Published var lastConnectionFailure: ConnectionFailure?
-    @Published var showLogin = true
+    @Published var showLogin = true {
+        didSet {
+            // The sign-in surface never keeps a saved copy in memory: after an
+            // authentication failure it must not reappear on the next sign-in.
+            // (The files stay until sign-out/removal/switch wipes them.)
+            if showLogin { dismissOfflineChatPresentation() }
+        }
+    }
     @Published private(set) var composerPrefillText = ""
     @Published private(set) var composerPrefillToken = UUID()
 
@@ -5056,11 +5063,22 @@ final class AppState: ObservableObject {
         rememberDashboardURL(dashboard.normalizedURL)
         _ = prepareChatResumeForConnection(to: dashboard.normalizedURL, dashboardID: id)
         retireConnectionRuntimeForDashboardSwitch()
+        // Mirrors cold launch. A switch to a DIFFERENT server already wiped
+        // every saved copy above (prepareChatResumeForConnection), so this
+        // only finds one when re-selecting the same server.
         if let credentials = KeychainHelper.loadCredentials(dashboardID: id) {
+            if !credentials.requiresFaceID {
+                presentOfflineChatIfAvailable(dashboardID: id)
+                if offlineChatPresentation != nil {
+                    showLogin = false
+                    isConnecting = true
+                }
+            }
             await restoreSavedCredentials(credentials, dashboardID: id, switchGeneration: generation)
             return
         }
         if let saved = KeychainHelper.loadConnection(dashboardID: id) {
+            presentOfflineChatIfAvailable(dashboardID: id)
             // Cookie/ticket-based resume: keep the app shell up while the
             // bridge restores the dashboard's own cookie mirror.
             connection = saved
@@ -5359,7 +5377,8 @@ final class AppState: ObservableObject {
         }
     }
 
-    /// Opens sign-in from the offline copy (the saved copy stays on disk).
+    /// Opens sign-in from the offline copy. The copy leaves the screen (and
+    /// memory) with it; the files stay on disk.
     func signInFromOfflineChat() {
         showLogin = true
     }
@@ -18443,6 +18462,8 @@ final class AppState: ObservableObject {
     /// message stops it without touching the gateway; starting a different
     /// message takes over from whatever is playing.
     func toggleReadAloud(message: ChatMessage) {
+        // The saved copy is read-only and has no gateway to speak through.
+        guard offlineChatPresentation == nil else { return }
         if messageReadAloudController.isActiveMessage(message.id) {
             messageReadAloudController.stop()
             return

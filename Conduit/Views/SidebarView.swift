@@ -272,8 +272,10 @@ struct SessionList: View {
             List {
                 if showingProjects {
                     projectContent
-                } else if appState.sessions.isEmpty, let offline = appState.offlineChatPresentation {
-                    // No live catalog yet: list the saved session list (#99).
+                } else if let offline = appState.offlineChatPresentation {
+                    // While the saved copy is up, list the saved session list
+                    // (#99) — even if the live catalog already arrived, until
+                    // the live transcript replaces the copy.
                     // Read-only — only conversations with a saved transcript
                     // open, and they open inside the offline copy.
                     Section("Saved on this device") {
@@ -480,7 +482,7 @@ struct SessionList: View {
                 Text(session.title)
                     .font(.subheadline.weight(isDisplayed ? .semibold : .regular))
                     .lineLimit(1)
-                Text(isSaved ? session.updatedLabel : AppLocalization.string("Not saved offline"))
+                Text(isSaved ? session.displayUpdatedLabel() : AppLocalization.string("Not saved offline"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -489,6 +491,7 @@ struct SessionList: View {
         .buttonStyle(.plain)
         .disabled(!isSaved)
         .opacity(isSaved ? 1 : 0.5)
+        .accessibilityHint(isSaved ? "" : AppLocalization.string("This conversation has no saved copy on this device"))
     }
 
     private func sessionRow(_ session: SessionSummary) -> some View {

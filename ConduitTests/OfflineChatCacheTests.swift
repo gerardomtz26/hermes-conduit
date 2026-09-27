@@ -240,7 +240,58 @@ final class OfflineChatCacheTests: XCTestCase {
             _ = appState.presentCredentialRestoreFailure(failure, switchGeneration: nil)
 
             XCTAssertTrue(appState.showLogin, "\(failure)")
+            XCTAssertNil(
+                appState.offlineChatPresentation,
+                "An auth failure must not keep the copy in memory for the next sign-in (\(failure))"
+            )
         }
+    }
+
+    func testSignInFromTheCopyLeavesNoCopyInMemory() {
+        let (appState, store, dashboard) = makeAppState()
+        seedCopy(store, dashboard: dashboard)
+        appState.presentOfflineChatIfAvailable(dashboardID: dashboard)
+        appState.showLogin = false
+
+        appState.signInFromOfflineChat()
+
+        XCTAssertTrue(appState.showLogin)
+        XCTAssertNil(appState.offlineChatPresentation)
+        XCTAssertNotNil(store.load(dashboardID: dashboard, profile: "default"), "Files stay until a wipe boundary")
+    }
+
+    func testReadAloudIsInertOverTheCopy() throws {
+        let (appState, store, dashboard) = makeAppState()
+        seedCopy(store, dashboard: dashboard)
+        appState.presentOfflineChatIfAvailable(dashboardID: dashboard)
+        let row = try XCTUnwrap(appState.offlineChatPresentation?.displayedMessages.last)
+
+        appState.toggleReadAloud(message: row)
+
+        XCTAssertNil(appState.errorMessage, "Read aloud must not surface a gateway error over the saved copy")
+        XCTAssertFalse(appState.messageReadAloudController.isActiveMessage(row.id))
+    }
+
+    /// Re-selecting the same server with saved (non-Face ID) credentials
+    /// mirrors cold launch: the copy shows, and an unreachable server keeps
+    /// it instead of sending the user to sign-in.
+    func testDashboardReselectWithSavedCredentialsKeepsTheCopyWhenUnreachable() async {
+        let loopback = SavedDashboard(id: UUID(), label: "Local", normalizedURL: "http://127.0.0.1:1")
+        let (appState, store, _) = makeAppState(
+            registry: SavedDashboardRegistry(activeDashboardID: loopback.id, dashboards: [loopback])
+        )
+        seedCopy(store, dashboard: loopback.id)
+        KeychainHelper.saveCredentials(
+            DashboardCredentials(baseURL: loopback.normalizedURL, username: "hermes", password: "unused", requiresFaceID: false),
+            dashboardID: loopback.id
+        )
+        addTeardownBlock { KeychainHelper.clearCredentials(dashboardID: loopback.id) }
+
+        await appState.switchDashboard(to: loopback.id)
+
+        XCTAssertFalse(appState.showLogin)
+        XCTAssertEqual(appState.offlineChatPresentation?.displayedSessionID, "stored-a")
+        XCTAssertEqual(appState.turnState, .reconnecting)
     }
 
     func testUnreachableRestoreWithoutACopyGoesToSignIn() {

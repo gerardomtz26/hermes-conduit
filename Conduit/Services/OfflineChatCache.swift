@@ -93,6 +93,29 @@ struct OfflineCachedSession: Codable, Equatable, Identifiable {
         aliases = ([summary.id] + summary.alternateIds).filter { $0 != durable }
     }
 
+    private enum CodingKeys: String, CodingKey {
+        case id, title, updatedLabel, lastActivityAt, source, aliases
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        updatedLabel = try container.decode(String.self, forKey: .updatedLabel)
+        lastActivityAt = try container.decodeIfPresent(TimeInterval.self, forKey: .lastActivityAt)
+        source = try container.decode(SessionSource.self, forKey: .source)
+        // Rows written before aliases were recorded decode with none.
+        aliases = try container.decodeIfPresent([String].self, forKey: .aliases) ?? []
+    }
+
+    /// Relative to now when the row carried a machine-readable instant (the
+    /// saved `updatedLabel` was formatted at save time and goes stale).
+    func displayUpdatedLabel(now: Date = Date()) -> String {
+        guard let lastActivityAt else { return updatedLabel }
+        return Date(timeIntervalSince1970: lastActivityAt)
+            .formatted(.relative(presentation: .named, unitsStyle: .abbreviated))
+    }
+
     func matches(_ identities: Set<String>) -> Bool {
         identities.contains(id) || !identities.isDisjoint(with: aliases)
     }

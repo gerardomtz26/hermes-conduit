@@ -9,14 +9,21 @@ import SwiftUI
 
 struct OfflineChatTranscriptView: View {
     let presentation: OfflineChatPresentation
+    @EnvironmentObject var appState: AppState
+
+    private static let topAnchor = "offline-chat-top"
 
     var body: some View {
         VStack(spacing: 0) {
             OfflineChatBanner(savedAt: presentation.displayedTranscript?.savedAt)
                 .padding(.horizontal, 18)
                 .padding(.top, 10)
+            ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 18) {
+                    Color.clear
+                        .frame(height: 1)
+                        .id(Self.topAnchor)
                     if presentation.displayedMessages.isEmpty {
                         Text("No saved copy of this conversation")
                             .font(.subheadline)
@@ -34,6 +41,12 @@ struct OfflineChatTranscriptView: View {
             .defaultScrollAnchor(.bottom)
             // A different saved conversation starts at its own latest row.
             .id(presentation.displayedSessionID)
+            // The header title's scroll-to-top acts on the saved copy while
+            // it is the conversation on screen.
+            .onChange(of: appState.chatScrollToTopRequest) { _, _ in
+                withAnimation { proxy.scrollTo(Self.topAnchor, anchor: .top) }
+            }
+            }
         }
         .accessibilityIdentifier("offline-chat-transcript")
     }

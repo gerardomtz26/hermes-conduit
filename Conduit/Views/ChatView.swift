@@ -1576,7 +1576,7 @@ struct ReadAloudButton: View {
     }
 
     private var unavailable: Bool {
-        appState.readAloudUnavailableReason != nil
+        appState.readAloudUnavailableReason != nil || appState.offlineChatPresentation != nil
     }
 
     var body: some View {
