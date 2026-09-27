@@ -562,45 +562,50 @@ struct KanbanView: View {
                     laneBoard
                         .refreshable { await store.refresh(includeArchived: includeArchived) }
                         .overlay(alignment: .topTrailing) {
-                            VStack(alignment: .trailing, spacing: 6) {
-                                if let nudgeNotice = nudgeNoticeState.notice {
-                                    Label(nudgeNotice, systemImage: "checkmark.circle")
-                                        .font(.caption)
-                                        .foregroundStyle(.green)
-                                        .padding(8)
-                                        .background(.ultraThinMaterial, in: Capsule())
-                                        .transition(.opacity)
-                                }
-                                if let bulkNotice = bulkNoticeState.text {
-                                    Label(bulkNotice, systemImage: bulkNoticeState.kind == .success ? "checkmark.circle" : "exclamationmark.triangle.fill")
-                                        .font(.caption)
-                                        .foregroundStyle(bulkNoticeState.kind == .success ? Color.green : Color.orange)
-                                        .padding(8)
-                                        .background(.ultraThinMaterial, in: Capsule())
-                                        .transition(.opacity)
-                                }
-                                if let mutationError = store.mutationErrorMessage {
-                                    HStack(spacing: 6) {
-                                        Text(mutationError)
-                                    Button { store.clearMutationError() } label: {
-                                        Image(systemName: "xmark.circle.fill")
+                            // One glass container: adjacent notice pills
+                            // composite as a single liquid shape instead of
+                            // stacking independent materials.
+                            ConduitGlassGroup(spacing: 6) {
+                                VStack(alignment: .trailing, spacing: 6) {
+                                    if let nudgeNotice = nudgeNoticeState.notice {
+                                        Label(nudgeNotice, systemImage: "checkmark.circle")
+                                            .font(.caption)
+                                            .foregroundStyle(.green)
+                                            .padding(8)
+                                            .conduitGlassCapsuleSurface()
+                                            .transition(.opacity)
                                     }
-                                    .buttonStyle(.plain)
-                                    .accessibilityLabel("Dismiss Kanban error")
+                                    if let bulkNotice = bulkNoticeState.text {
+                                        Label(bulkNotice, systemImage: bulkNoticeState.kind == .success ? "checkmark.circle" : "exclamationmark.triangle.fill")
+                                            .font(.caption)
+                                            .foregroundStyle(bulkNoticeState.kind == .success ? Color.green : Color.orange)
+                                            .padding(8)
+                                            .conduitGlassCapsuleSurface()
+                                            .transition(.opacity)
                                     }
-                                    .font(.caption)
-                                    .foregroundStyle(.red)
-                                    .padding(8)
-                                    .background(.ultraThinMaterial, in: Capsule())
-                                } else if let refreshError = store.errorMessage {
-                                    Text("Refresh failed: \(refreshError)")
+                                    if let mutationError = store.mutationErrorMessage {
+                                        HStack(spacing: 6) {
+                                            Text(mutationError)
+                                        Button { store.clearMutationError() } label: {
+                                            Image(systemName: "xmark.circle.fill")
+                                        }
+                                        .buttonStyle(.plain)
+                                        .accessibilityLabel("Dismiss Kanban error")
+                                        }
                                         .font(.caption)
-                                        .foregroundStyle(.secondary)
+                                        .foregroundStyle(.red)
                                         .padding(8)
-                                        .background(.ultraThinMaterial, in: Capsule())
+                                        .conduitGlassCapsuleSurface()
+                                    } else if let refreshError = store.errorMessage {
+                                        Text("Refresh failed: \(refreshError)")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                            .padding(8)
+                                            .conduitGlassCapsuleSurface()
+                                    }
                                 }
+                                .padding(.top, 4)
                             }
-                            .padding(.top, 4)
                         }
                 }
             } else {
@@ -945,7 +950,7 @@ struct KanbanView: View {
                             .font(.caption)
                             .padding(.horizontal, 10)
                             .padding(.vertical, 5)
-                            .background(.ultraThinMaterial, in: Capsule())
+                            .conduitGlassCapsuleSurface()
                     }
                 }
             } else {
@@ -1082,7 +1087,7 @@ struct KanbanView: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .conduitGlassSurface(cornerRadius: 18)
         .padding(.horizontal, 10)
         .padding(.bottom, 2)
     }

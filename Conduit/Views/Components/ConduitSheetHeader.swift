@@ -1,6 +1,11 @@
 import SwiftUI
 
 /// Shared title and close affordance for full-height sheets.
+///
+/// On iOS 26 the strip is Liquid Glass: the sheet's content slides beneath
+/// it like a system navigation bar instead of meeting an opaque `.bar`
+/// material. Earlier systems keep that exact `.bar` fill — same frame, same
+/// covered area, only the material differs.
 struct ConduitSheetHeader: View {
     let title: String
     let close: () -> Void
@@ -24,6 +29,18 @@ struct ConduitSheetHeader: View {
         .padding(.horizontal, 16)
         .padding(.top, 8)
         .padding(.bottom, 10)
-        .background(.bar)
+        .background(headerBackground)
+    }
+
+    @ViewBuilder
+    private var headerBackground: some View {
+        if #available(iOS 26.0, *) {
+            Rectangle()
+                .fill(.clear)
+                .glassEffect(.regular, in: .rect(cornerRadius: 0))
+        } else {
+            Rectangle()
+                .fill(.bar)
+        }
     }
 }

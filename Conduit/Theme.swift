@@ -167,14 +167,13 @@ extension View {
     /// fallback intentionally stays material-based rather than attempting to
     /// imitate glass with custom blur stacks.
     ///
-    /// Both branches of both helpers in this section — this one and
-    /// `conduitGlassControl` — must keep the same corner radius and the same
-    /// covered area, so the two OS paths render the same card geometry. A
-    /// branch that drew a smaller surface would render a clipped card on that
-    /// path. The fallback cannot be exercised by any simulator runtime this
-    /// project has available (iOS 26.5 only, locally and in CI), which is why
-    /// this note stands in for a test of it: verify by inspection when changing
-    /// either branch.
+    /// Both branches of every helper in this section must keep the same
+    /// corner radius and the same covered area, so the two OS paths render
+    /// the same card geometry. A branch that drew a smaller surface would
+    /// render a clipped card on that path. The fallback cannot be exercised
+    /// by any simulator runtime this project has available (iOS 26.5 only,
+    /// locally and in CI), which is why this note stands in for a test of
+    /// it: verify by inspection when changing either branch.
     @ViewBuilder
     func conduitGlassSurface(
         cornerRadius: CGFloat,
@@ -225,6 +224,45 @@ extension View {
                 .overlay {
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                         .strokeBorder(Color.white.opacity(0.16), lineWidth: 1)
+                }
+        }
+    }
+
+    /// Capsule-shaped glass for the floating notice pills (Kanban toasts,
+    /// banners): the pill keeps its Capsule geometry on both paths — native
+    /// glass on iOS 26, the same `ultraThinMaterial` fill it always had
+    /// before it.
+    @ViewBuilder
+    func conduitGlassCapsuleSurface(tint: Color = .clear) -> some View {
+        if #available(iOS 26.0, *) {
+            self.glassEffect(.regular.tint(tint), in: Capsule())
+        } else {
+            self.background(.ultraThinMaterial, in: Capsule())
+        }
+    }
+
+    /// A large floating tray (the composer) that refracts the living
+    /// backdrop on iOS 26 instead of sitting on an opaque foundation. The
+    /// fallback keeps the tray's original foundation and stroke byte for
+    /// byte: that colour pair is a designed surface, not a placeholder.
+    @ViewBuilder
+    func conduitGlassTray(
+        cornerRadius: CGFloat,
+        tint: Color = .clear,
+        fallbackFoundation: Color,
+        fallbackStroke: Color
+    ) -> some View {
+        if #available(iOS 26.0, *) {
+            self.glassEffect(.regular.tint(tint), in: .rect(cornerRadius: cornerRadius))
+        } else {
+            self
+                .background(
+                    fallbackFoundation,
+                    in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .strokeBorder(fallbackStroke, lineWidth: 1)
                 }
         }
     }

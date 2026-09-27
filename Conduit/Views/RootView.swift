@@ -222,70 +222,15 @@ struct MainView: View {
                         .ignoresSafeArea()
                 }
             }
-            .navigationTitle("")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(.hidden, for: .navigationBar)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    // An open room supplies its own leading Leave button; a
-                    // second leading control would be ambiguous. The edge
-                    // swipe still opens the sidebar.
-                    if !isPersistentSidebarActive && appState.activeRoomSurface == nil {
-                        Button {
-                            appState.showSidebar = true
-                        } label: {
-                            Image(systemName: "line.3.horizontal")
-                                .font(.system(size: 16, weight: .semibold))
-                                .frame(width: 40, height: 40)
-                        }
-                        .conduitGlassControl(cornerRadius: 20, tint: .conduitAccent.opacity(0.10))
-                        .accessibilityLabel("Open sessions")
-                    }
-                }
-                // Session-only controls: an open room owns the title and
-                // actions (GroupChatView's toolbar), so the session's title,
-                // scroll-to-top, and refresh must not act on the hidden
-                // conversation behind it.
-                if appState.activeRoomSurface == nil {
-                    ToolbarItem(placement: .principal) {
-                        Button {
-                            appState.requestChatScrollToTop()
-                        } label: {
-                            Text(appState.activeSessionTitle)
-                                .font(.subheadline.weight(.semibold))
-                                .lineLimit(1)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 7)
-                                .conduitGlassSurface(cornerRadius: 16, tint: .conduitAccent.opacity(0.06))
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(appState.activeSessionTitle)
-                        .accessibilityHint("Scroll to top of conversation")
-                    }
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button {
-                            Task { await appState.refreshActiveSession() }
-                        } label: {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.system(size: 15, weight: .semibold))
-                                .rotationEffect(.degrees(appState.isChatRefreshing ? 360 : 0))
-                                .animation(
-                                    appState.isChatRefreshing
-                                        ? .linear(duration: 0.75).repeatForever(autoreverses: false)
-                                        : .default,
-                                    value: appState.isChatRefreshing
-                                )
-                                .frame(width: 40, height: 40)
-                        }
-                        .conduitGlassControl(cornerRadius: 20, tint: .conduitAccent.opacity(0.10))
-                        .disabled(!appState.isConnected || appState.isChatRefreshing)
-                        .accessibilityLabel("Refresh conversation")
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    ConnectionStatusIndicator()
-                }
+            // The floating glass bar replaces the navigation bar: mounted as
+            // the top safe-area inset it starts the content below itself and
+            // lets the transcript slide under the glass while scrolling,
+            // where the old toolbar only floated its loose pills over an
+            // empty strip of reserved safe area.
+            .safeAreaInset(edge: .top, spacing: 0) {
+                floatingTopBar
             }
+            .toolbar(.hidden, for: .navigationBar)
         }
         .sheet(isPresented: $appState.showSidebar, onDismiss: presentSettingsAfterSidebarDismissal) {
             SidebarView(onRequestSettings: presentSettingsFromDrawer)
@@ -294,6 +239,84 @@ struct MainView: View {
                     transaction.animation = .easeInOut(duration: 0.15)
                 }
         }
+    }
+
+    /// The bar itself: the session's controls or the group-room's controls,
+    /// plus the connection dot that both surfaces used to show as a trailing
+    /// toolbar item.
+    @ViewBuilder
+    private var floatingTopBar: some View {
+        FloatingTopBar {
+            if appState.activeRoomSurface != nil {
+                GroupChatTopBarContent()
+            } else {
+                sessionTopBarControls
+            }
+            ConnectionStatusIndicator()
+        }
+    }
+
+    /// The session half of the bar. Every control keeps the label and hint
+    /// it carried as a toolbar item (the UI tests address "Open sessions" by
+    /// that exact string), but the title no longer needs its own pill: it
+    /// sits directly on the bar's glass.
+    ///
+    /// Session-only by construction: an open room renders
+    /// `GroupChatTopBarContent` instead, so the session's title,
+    /// scroll-to-top, and refresh can never act on the hidden conversation
+    /// behind a room.
+    @ViewBuilder
+    private var sessionTopBarControls: some View {
+        // An open room supplies its own leading Leave button; a second
+        // leading control would be ambiguous. The edge swipe still opens
+        // the sidebar.
+        if !isPersistentSidebarActive {
+            Button {
+                appState.showSidebar = true
+            } label: {
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: 16, weight: .semibold))
+                    .frame(width: 40, height: 40)
+            }
+            .conduitGlassControl(cornerRadius: 20, tint: .conduitAccent.opacity(0.10))
+            .accessibilityLabel("Open sessions")
+        }
+
+        Spacer(minLength: 8)
+
+        Button {
+            appState.requestChatScrollToTop()
+        } label: {
+            Text(appState.activeSessionTitle)
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .padding(.horizontal, 8)
+        }
+        .buttonStyle(.plain)
+        .layoutPriority(1)
+        .accessibilityLabel(appState.activeSessionTitle)
+        .accessibilityHint("Scroll to top of conversation")
+
+        Spacer(minLength: 8)
+
+        Button {
+            Task { await appState.refreshActiveSession() }
+        } label: {
+            Image(systemName: "arrow.clockwise")
+                .font(.system(size: 15, weight: .semibold))
+                .rotationEffect(.degrees(appState.isChatRefreshing ? 360 : 0))
+                .animation(
+                    appState.isChatRefreshing
+                        ? .linear(duration: 0.75).repeatForever(autoreverses: false)
+                        : .default,
+                    value: appState.isChatRefreshing
+                )
+                .frame(width: 40, height: 40)
+        }
+        .conduitGlassControl(cornerRadius: 20, tint: .conduitAccent.opacity(0.10))
+        .disabled(!appState.isConnected || appState.isChatRefreshing)
+        .accessibilityLabel("Refresh conversation")
     }
 
     private func presentSettingsFromDrawer() {

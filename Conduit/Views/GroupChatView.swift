@@ -8,32 +8,16 @@ struct GroupChatView: View {
     @EnvironmentObject private var appState: AppState
     @ObservedObject private var appLanguage = AppLanguageStore.shared
     @State private var draft = ""
-    @State private var showingDisbandConfirmation = false
 
     var body: some View {
         VStack(spacing: 0) {
             transcript
             composer
         }
-        .toolbar { toolbarContent }
         // The view is keyed by room, so appear/change bracket exactly one
         // room: the draft comes back on reopen and is kept as it changes.
         .onAppear { draft = appState.activeRoomDraft() }
         .onChange(of: draft) { _, text in appState.saveActiveRoomDraft(text) }
-        .confirmationDialog(
-            AppLocalization.string("Disband this group chat?"),
-            isPresented: $showingDisbandConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button(AppLocalization.string("Disband"), role: .destructive) {
-                Task { await appState.disbandActiveRoom() }
-            }
-            Button(AppLocalization.string("Cancel"), role: .cancel) {}
-        } message: {
-            Text(AppLocalization.string(
-                "The room, its history, and every member's session end permanently. This cannot be undone."
-            ))
-        }
     }
 
     private var surface: AppState.GroupRoomSurface? { appState.activeRoomSurface }
@@ -201,49 +185,91 @@ struct GroupChatView: View {
     }
 
     // MARK: - Toolbar
+    //
+    // The room's toolbar items live in `GroupChatTopBarContent` below: the
+    // navigation bar is hidden on this surface, and the room publishes its
+    // controls through the same floating glass bar MainView mounts for the
+    // session.
+}
 
-    @ToolbarContentBuilder
-    private var toolbarContent: some ToolbarContent {
-        ToolbarItem(placement: .topBarLeading) {
-            Button {
-                appState.closeGroupRoom()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.subheadline.weight(.semibold))
-            }
-            .accessibilityLabel(Text(AppLocalization.string("Leave this group chat")))
+// MARK: - Floating top bar content
+
+/// The group-room half of `FloatingTopBar`: Leave, the room title with its
+/// member summary, and the actions menu — the three items this room used to
+/// publish as navigation-bar toolbar items, plus the disband confirmation
+/// that rode on the old view. MainView hosts it when a room is open, so both
+/// conversation surfaces render inside ONE bar.
+///
+/// Self-contained on purpose: the disband confirmation belongs with the menu
+/// that triggers it, not with `GroupChatView` — the bar is owned by MainView
+/// and a room switch must not tear the dialog down mid-presentation.
+struct GroupChatTopBarContent: View {
+    @EnvironmentObject private var appState: AppState
+    @State private var showingDisbandConfirmation = false
+
+    private var surface: AppState.GroupRoomSurface? { appState.activeRoomSurface }
+
+    var body: some View {
+        Button {
+            appState.closeGroupRoom()
+        } label: {
+            Image(systemName: "xmark")
+                .font(.subheadline.weight(.semibold))
+                .frame(width: 40, height: 40)
         }
-        ToolbarItem(placement: .principal) {
-            VStack(spacing: 1) {
-                Text(surface?.room.name ?? "")
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-                Text(memberSummary)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
+        .conduitGlassControl(cornerRadius: 20)
+        .accessibilityLabel(Text(AppLocalization.string("Leave this group chat")))
+
+        Spacer(minLength: 8)
+
+        VStack(spacing: 1) {
+            Text(surface?.room.name ?? "")
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
+            Text(memberSummary)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
         }
-        ToolbarItem(placement: .topBarTrailing) {
-            Menu {
-                if appState.groupCapabilities?.supports("groups.stop") == true,
-                   let driver = appState.activeRoomDriverStatus,
-                   driver.running || driver.working {
-                    Button {
-                        Task { await appState.stopActiveRoomWork() }
-                    } label: {
-                        Label(AppLocalization.string("Stop"), systemImage: "stop.fill")
-                    }
-                }
-                Button(role: .destructive) {
-                    showingDisbandConfirmation = true
+        .layoutPriority(1)
+
+        Spacer(minLength: 8)
+
+        Menu {
+            if appState.groupCapabilities?.supports("groups.stop") == true,
+               let driver = appState.activeRoomDriverStatus,
+               driver.running || driver.working {
+                Button {
+                    Task { await appState.stopActiveRoomWork() }
                 } label: {
-                    Label(AppLocalization.string("Disband Group"), systemImage: "trash")
+                    Label(AppLocalization.string("Stop"), systemImage: "stop.fill")
                 }
-            } label: {
-                Image(systemName: "ellipsis.circle")
-                    .font(.callout.weight(.semibold))
             }
-            .accessibilityLabel(Text(AppLocalization.string("Group chat actions")))
+            Button(role: .destructive) {
+                showingDisbandConfirmation = true
+            } label: {
+                Label(AppLocalization.string("Disband Group"), systemImage: "trash")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+                .font(.callout.weight(.semibold))
+                .frame(width: 40, height: 40)
+        }
+        .conduitGlassControl(cornerRadius: 20)
+        .accessibilityLabel(Text(AppLocalization.string("Group chat actions")))
+        .confirmationDialog(
+            AppLocalization.string("Disband this group chat?"),
+            isPresented: $showingDisbandConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button(AppLocalization.string("Disband"), role: .destructive) {
+                Task { await appState.disbandActiveRoom() }
+            }
+            Button(AppLocalization.string("Cancel"), role: .cancel) {}
+        } message: {
+            Text(AppLocalization.string(
+                "The room, its history, and every member's session end permanently. This cannot be undone."
+            ))
         }
     }
 

@@ -408,11 +408,14 @@ struct ComposerBar: View {
             }
             .padding(10)
         }
-        .background(composerFoundation, in: RoundedRectangle(cornerRadius: 30, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 30, style: .continuous)
-                .strokeBorder(composerStroke, lineWidth: 1)
-        }
+        // The tray is Liquid Glass on iOS 26 — the living backdrop refracts
+        // through it instead of meeting an opaque foundation. The fallback
+        // keeps the original foundation + stroke (see conduitGlassTray).
+        .conduitGlassTray(
+            cornerRadius: 30,
+            fallbackFoundation: composerFoundation,
+            fallbackStroke: composerStroke
+        )
         .opacity(appState.turnState == .unsupportedGateway ? 0.7 : 1)
         .animation(ConduitMotion.transition, value: action)
         .preferredColorScheme(appState.themePreference.colorScheme)

@@ -66,7 +66,7 @@ struct CapabilitiesView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .padding(8)
-                        .background(.ultraThinMaterial, in: Capsule())
+                        .conduitGlassCapsuleSurface()
                         .padding(.top, 6)
                 }
             }
