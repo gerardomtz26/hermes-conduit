@@ -39,6 +39,14 @@ struct MarkdownText: View {
     /// `.default` environment default keeps non-chat subtrees untouched.
     @Environment(\.chatTextSize) private var chatTextSize
 
+    /// The Dynamic Type size SwiftUI is painting with — the system's own
+    /// text size, since the app no longer writes an override of its own.
+    /// Read as a first-class rendering input on purpose: `chatTextSize`
+    /// alone never moves with the Settings slider, so without this the body
+    /// never re-evaluated and settled messages kept their old type until the
+    /// app was relaunched (Gerardo, 2026-09-26).
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
     var body: some View {
         // Path fork is centralized here: ordinary messages keep the exact
         // fast cached path below; pathological ones (see
@@ -65,7 +73,8 @@ struct MarkdownText: View {
             foregroundStyle: foregroundStyle,
             usesAccentSurface: usesAccentSurface,
             isStreaming: isStreaming,
-            chatTextSize: chatTextSize
+            chatTextSize: chatTextSize,
+            dynamicTypeSize: dynamicTypeSize
         )
         let selectionSegments = rendering.selectableText == nil
             ? MarkdownSelectionSegmentPlan.descriptors(for: rendering.blocks)
@@ -271,7 +280,8 @@ enum MarkdownRenderCache {
         foregroundStyle: Color,
         usesAccentSurface: Bool,
         isStreaming: Bool,
-        chatTextSize: ChatTextSize
+        chatTextSize: ChatTextSize,
+        dynamicTypeSize: DynamicTypeSize = .large
     ) -> MarkdownRendering {
         // `foregroundStyle` is deliberately absent from the key: only two
         // values are ever passed (.primary / .white), each uniquely tied to
@@ -292,10 +302,19 @@ enum MarkdownRenderCache {
         // needs no cache migration. Reading preferredContentSizeCategory
         // touches UIApplication.shared, hence the @MainActor isolation on
         // this function.
+        //
+        // `dynamicTypeSize` is the environment half of the same fact: it is
+        // what the body re-evaluates on (the slider changes it live), while
+        // the app category above is what the fonts themselves resolve
+        // against. Keying on both means a size change — system slider or any
+        // environment override — always serves freshly typed metrics
+        // (settled messages otherwise kept their old type until relaunch;
+        // Gerardo, 2026-09-26).
         let key = [
             recognizesGatewayMedia ? "1" : "0",
             usesAccentSurface ? "1" : "0",
             UIApplication.shared.preferredContentSizeCategory.rawValue,
+            UIContentSizeCategory(dynamicTypeSize).rawValue,
             chatTextSize.cacheIdentity,
             source
         ].joined(separator: "|") as NSString
