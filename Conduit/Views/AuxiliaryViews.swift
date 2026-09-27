@@ -1688,7 +1688,8 @@ private struct NotificationsSettingsDetail: View {
                     notificationToggle("Response ready", detail: AppLocalization.string("An active turn finishes"), keyPath: \.responseReady)
                     notificationToggle("Turn failed", detail: AppLocalization.string("A turn stops with an error"), keyPath: \.turnFailed)
                     notificationToggle("Background task finished", detail: AppLocalization.string("A delegated agent completes"), keyPath: \.backgroundTaskFinished)
-                    notificationToggle("Completion sound", detail: AppLocalization.string("Play a sound with notifications"), keyPath: \.completionSound)
+                    notificationToggle("Approval & input sound", detail: AppLocalization.string("Play a sound when Hermes is waiting on you"), keyPath: \.attentionSound)
+                    notificationToggle("Completion sound", detail: AppLocalization.string("Play a sound when a turn or task finishes"), keyPath: \.completionSound)
                     notificationToggle("Show previews", detail: AppLocalization.string("Include response text in notifications"), keyPath: \.showPreviews)
                     notificationToggle("Approval cards in pushes", detail: AppLocalization.string("Include approval details so cards work from notifications. Disable for maximum privacy."), keyPath: \.decisionCards)
                 }

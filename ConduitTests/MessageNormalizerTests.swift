@@ -345,6 +345,7 @@ final class MessageNormalizerTests: XCTestCase {
         XCTAssertFalse(decoded.approvalNeeded, "Persisted values must survive")
         XCTAssertTrue(decoded.showPreviews, "Persisted values must survive")
         XCTAssertTrue(decoded.decisionCards, "Absent decision_cards must fall back to the default-on value")
+        XCTAssertTrue(decoded.attentionSound, "Absent attention_sound must fall back to the default-on value")
     }
 
     func testRelayMetaDecodingAndCapabilityChecks() throws {
