@@ -111,9 +111,16 @@ struct OfflineCachedSession: Codable, Equatable, Identifiable {
     /// Relative to now when the row carried a machine-readable instant (the
     /// saved `updatedLabel` was formatted at save time and goes stale).
     func displayUpdatedLabel(now: Date = Date()) -> String {
-        guard let lastActivityAt else { return updatedLabel }
-        return Date(timeIntervalSince1970: lastActivityAt)
-            .formatted(.relative(presentation: .named, unitsStyle: .abbreviated))
+        // Persisted input: anything outside 2000 ... now + 1 day is not a
+        // real activity instant, so keep the saved label.
+        guard let lastActivityAt,
+              lastActivityAt.isFinite,
+              lastActivityAt >= 946_684_800,
+              lastActivityAt <= now.timeIntervalSince1970 + 86_400 else { return updatedLabel }
+        let formatter = RelativeDateTimeFormatter()
+        formatter.dateTimeStyle = .named
+        formatter.unitsStyle = .abbreviated
+        return formatter.localizedString(for: Date(timeIntervalSince1970: lastActivityAt), relativeTo: now)
     }
 
     func matches(_ identities: Set<String>) -> Bool {
@@ -148,14 +155,26 @@ struct OfflineChatPresentation: Equatable {
     let dashboardID: UUID
     let profile: String
     let snapshot: OfflineChatSnapshot
-    var displayedSessionID: String?
+    var displayedSessionID: String? {
+        didSet { displayedMessages = Self.messages(in: snapshot, for: displayedSessionID) }
+    }
+    /// Mapped once per displayed conversation, not on every render.
+    private(set) var displayedMessages: [ChatMessage]
+
+    init(dashboardID: UUID, profile: String, snapshot: OfflineChatSnapshot, displayedSessionID: String?) {
+        self.dashboardID = dashboardID
+        self.profile = profile
+        self.snapshot = snapshot
+        self.displayedSessionID = displayedSessionID
+        self.displayedMessages = Self.messages(in: snapshot, for: displayedSessionID)
+    }
 
     var displayedTranscript: OfflineCachedTranscript? {
         displayedSessionID.flatMap(snapshot.transcript(for:))
     }
 
-    var displayedMessages: [ChatMessage] {
-        displayedTranscript?.messages.map(\.chatMessage) ?? []
+    private static func messages(in snapshot: OfflineChatSnapshot, for sessionID: String?) -> [ChatMessage] {
+        sessionID.flatMap(snapshot.transcript(for:))?.messages.map(\.chatMessage) ?? []
     }
 }
 

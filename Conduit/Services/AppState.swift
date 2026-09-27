@@ -1815,14 +1815,25 @@ final class AppState: ObservableObject {
 
     // MARK: - Offline chat cache (#99)
 
+    #if DEBUG
+    private static let testOfflineChatCacheRoot: URL? = {
+        guard NSClassFromString("XCTestCase") != nil else { return nil }
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("OfflineChatCache-tests", isDirectory: true)
+        try? FileManager.default.removeItem(at: root)
+        return root
+    }()
+    #endif
+
     private static func makeDefaultOfflineChatCache() -> OfflineChatCacheStore {
         #if DEBUG
-        // Unit tests construct many AppStates in one process: give each its
-        // own throwaway directory so no test can read another's copy.
-        if NSClassFromString("XCTestCase") != nil {
+        // Unit tests construct many AppStates in one process without
+        // injecting a store: each gets its own subdirectory (so no test can
+        // read another's copy) under ONE per-process root, which is wiped the
+        // first time it is used — nothing accumulates across runs.
+        if let testRoot = testOfflineChatCacheRoot {
             return OfflineChatCacheStore(
-                directory: FileManager.default.temporaryDirectory
-                    .appendingPathComponent("OfflineChatCache-\(UUID().uuidString)", isDirectory: true)
+                directory: testRoot.appendingPathComponent(UUID().uuidString, isDirectory: true)
             )
         }
         #endif

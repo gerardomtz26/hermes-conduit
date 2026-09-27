@@ -209,6 +209,50 @@ final class OfflineChatCacheTests: XCTestCase {
         XCTAssertNil(appState.offlineChatPresentation)
     }
 
+    // MARK: - Sidebar
+
+    /// The saved section never hides the live catalog: in the owed-bootstrap
+    /// window the live list is published while the copy is still up, and both
+    /// render (saved above live). The empty state only shows with neither.
+    func testSidebarShowsSavedSectionAlongsideTheLiveCatalog() {
+        let withCopyAndLive = SidebarOfflineLayout.visibility(
+            showingProjects: false, hasOfflineCopy: true, displayedSessionsEmpty: false
+        )
+        XCTAssertEqual(withCopyAndLive, .init(savedSection: true, liveSections: true, emptyState: false))
+
+        let copyOnly = SidebarOfflineLayout.visibility(
+            showingProjects: false, hasOfflineCopy: true, displayedSessionsEmpty: true
+        )
+        XCTAssertEqual(copyOnly, .init(savedSection: true, liveSections: true, emptyState: false))
+
+        let liveOnly = SidebarOfflineLayout.visibility(
+            showingProjects: false, hasOfflineCopy: false, displayedSessionsEmpty: false
+        )
+        XCTAssertEqual(liveOnly, .init(savedSection: false, liveSections: true, emptyState: false))
+
+        let neither = SidebarOfflineLayout.visibility(
+            showingProjects: false, hasOfflineCopy: false, displayedSessionsEmpty: true
+        )
+        XCTAssertEqual(neither, .init(savedSection: false, liveSections: true, emptyState: true))
+
+        let projects = SidebarOfflineLayout.visibility(
+            showingProjects: true, hasOfflineCopy: true, displayedSessionsEmpty: false
+        )
+        XCTAssertEqual(projects, .init(savedSection: false, liveSections: false, emptyState: false))
+    }
+
+    func testSavedRowTimeFallsBackToTheSavedLabelForImplausibleInstants() {
+        let now = Date(timeIntervalSince1970: 1_790_000_000)
+        func row(_ instant: TimeInterval?) -> OfflineCachedSession {
+            OfflineCachedSession(id: "a", title: "A", updatedLabel: "saved label", lastActivityAt: instant, source: .chat)
+        }
+        XCTAssertEqual(row(nil).displayUpdatedLabel(now: now), "saved label")
+        XCTAssertEqual(row(1e12).displayUpdatedLabel(now: now), "saved label")
+        XCTAssertEqual(row(-5).displayUpdatedLabel(now: now), "saved label")
+        XCTAssertEqual(row(.infinity).displayUpdatedLabel(now: now), "saved label")
+        XCTAssertNotEqual(row(now.timeIntervalSince1970 - 3600).displayUpdatedLabel(now: now), "saved label")
+    }
+
     // MARK: - Unreachable server vs. sign-in
 
     func testUnreachableRestoreKeepsTheCopyInsteadOfSignIn() {

@@ -1,6 +1,16 @@
 {
   "sourceLanguage" : "en",
   "strings" : {
+    "Read-only copies from your last connection." : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "上次连接时保存的只读副本。"
+          }
+        }
+      }
+    },
     "This conversation has no saved copy on this device" : {
       "localizations" : {
         "zh-Hans" : {
