@@ -5,6 +5,40 @@ A native iOS client for [Hermes Agent](https://github.com/NousResearch/hermes-ag
 [![App Store](https://img.shields.io/badge/App_Store-Hermes_Conduit-blue)](https://apps.apple.com/us/app/hermes-conduit/id6790977764)
 [![Website](https://img.shields.io/badge/Website-hermesconduit.app-blue)](https://hermesconduit.app)
 
+<!-- ===== SECCIÓN DEL FORK · no existe en el original ===== -->
+## Diferencias con el original (fork de gerardomtz26)
+
+Este clon de [kaishi00/hermes-conduit](https://github.com/kaishi00/hermes-conduit) se trabaja en la rama **`build-local`**; el `main` de este repo no lleva trabajo propio, es solo espejo del `main` del original (por eso el aviso de «153 commits atrás»: no es una copia desfasada, es una rama que no se mueve). Los `.ipa` se firman con cuenta de desarrollo gratuita en esta máquina y se reparten por iCloud, no por la App Store.
+
+Estado medido el **2026-09-26**: `build-local` va **22 commits delante** del original (21 propios + el merge de alineación) y **75 detrás**. Última alineación: **2026-09-25** (`826a3bb`, trajo 78 commits del original).
+
+### Lo que este repo tiene y el original no
+
+| Área | Diferencia |
+|---|---|
+| Clarify | Arreglo del contrato `server→client requests` (build 147): las fichas de clarify se contestan y llegan en vivo desde el gateway, no solo como JSON del historial; la fila de herramienta cruda ya no se dibuja junto a la ficha. Tests propios: `ServerRequestTests`. |
+| Colores | Acento azul con una burbuja que sí sostiene texto blanco, selector de 5 paletas en Ajustes → Apariencia con contrato de contraste WCAG (`AccentPaletteTests` es el contrato). El modo AMOLED existió (builds 150–152) y se retiró. |
+| Escala de texto | `InterfaceScaleFont` puentea el Dynamic Type del ambiente a las ~17 llamadas UIKit a `preferredFont`; los selectores propios de escala se retiraron — el slider de iOS es el único mando. |
+| Markdown | Las tarjetas asentadas releen el dynamic type del ambiente (cierra el rojo viejo de SettledMessageIsolation). |
+| Subagentes | Las tarjetas de delegados se identifican por el `subagent_id` del gateway: las terminadas se retiran solas en vez de quedarse hasta reiniciar. |
+| Interfaz | Barra flotante Liquid Glass en la conversación (build 158); navegación por píldora chats · kanban · subagentes con punto de actividad en vivo, y retiro de la sidebar persistente de iPad (build 159). |
+| Pruebas ciegas al fork | 3 tests leen el `Info.plist` del bundle anfitrión en vez del id original `com.milim.relay` (orientaciones de iPad/iPhone y ATS de Tailscale); `SidebarLayoutTests` se retiró junto con la sidebar. |
+
+### Lo que el original tiene y aquí falta (75 commits · medido 2026-09-26)
+
+Entran con la próxima alineación (merge, nunca rebase):
+
+- **Chat sin conexión** (issue-99, #223/#227/#229): copia offline de transcripciones que sobrevive a cambio de cuenta o de dashboard, y filas guardadas que no caen al cerrar la sesión.
+- **Medios** (#195/#225/#226): vista previa a pantalla completa con guardar y compartir; previsualizaciones más ligeras de memoria e hilo principal.
+- **Voz**: recuperación del motor de audio — los errores −10868 se clasifican recuperables, los engines arrancan limpios y el reset de media-services ya no truena.
+- **Compositor** (#194): el micrófono aparece solo si el perfil tiene voz habilitada; un solo slot mic/enviar.
+- **Notificaciones** (#228): sonido de aprobación y de entrada (`attention_sound`).
+- Correcciones de scroll (overshoot), del gate de tamaño de texto, consulta de menciones ASCII-only y etiquetas de Group Chat. El CI (`.github/workflows/ci.yml`) ya está al día — no falta.
+
+> Esta sección pertenece al fork: si un merge con el original conflictúa aquí, se conserva esta versión y solo se actualizan sus cifras.
+
+<!-- ===== FIN SECCIÓN DEL FORK ===== -->
+
 ## What it does
 
 Conduit connects directly to your self-hosted Hermes dashboard. Same sessions, same profiles, same capabilities as the desktop client. No relay service, no extra processes, no middleman.
