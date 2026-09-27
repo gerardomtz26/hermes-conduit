@@ -62,6 +62,7 @@ private struct OfflineChatBanner: View {
             if appState.isConnecting {
                 ProgressView()
                     .controlSize(.small)
+                    .accessibilityLabel("Reconnecting…")
             } else {
                 Button("Retry") { appState.retryFromOfflineChat() }
                     .font(.footnote.weight(.semibold))

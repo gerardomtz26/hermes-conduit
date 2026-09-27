@@ -212,6 +212,8 @@ struct ChatView: View {
                     )
                 )
             }
+            // VoiceOver reads only the saved copy while it is up.
+            .accessibilityHidden(appState.messages.isEmpty && appState.offlineChatPresentation != nil)
             // The read-only saved copy (#99) sits OVER the live scroll view
             // instead of feeding it: the live view stays mounted with the
             // same empty transcript a cold launch always had, so its viewport

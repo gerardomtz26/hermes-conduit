@@ -224,6 +224,9 @@ final class OfflineChatCacheTests: XCTestCase {
             XCTAssertNotNil(appState.offlineChatPresentation, "\(failure)")
             XCTAssertEqual(appState.lastConnectionFailure, failure)
             XCTAssertFalse(appState.isConnecting)
+            // Matches the saved-ticket path: recovery pending, never left
+            // .synchronizing by the native-OAuth cold-launch restore.
+            XCTAssertEqual(appState.turnState, .reconnecting, "\(failure)")
         }
     }
 
@@ -263,6 +266,34 @@ final class OfflineChatCacheTests: XCTestCase {
         appState.recordOfflineChatCopy()
         let snapshot = try XCTUnwrap(store.load(dashboardID: dashboard, profile: "default"))
         XCTAssertEqual(snapshot.transcript(for: "stored-a")?.messages.map(\.id), ["live"])
+    }
+
+    /// Servers that report a runtime `session_id` distinct from the durable
+    /// stored id: the transcript must be keyed like its saved session-list
+    /// row, or the sidebar shows the displayed chat as "Not saved offline".
+    func testTranscriptIsKeyedLikeItsSessionRowWhenRuntimeAndStoredIdsDiffer() throws {
+        let (appState, store, dashboard) = makeAppState()
+        var row = session("runtime-1")
+        row.storedSessionId = "stored-1"
+        appState.sessions = [row]
+        appState.activeSessionId = "runtime-1"
+        appState.messages = [ChatMessage(id: "live", role: .user, content: "Live", timestamp: "1")]
+        appState.isConnected = true
+
+        appState.recordOfflineChatCopy()
+
+        let snapshot = try XCTUnwrap(store.load(dashboardID: dashboard, profile: "default"))
+        XCTAssertEqual(snapshot.sessions.map(\.id), ["stored-1"])
+        XCTAssertEqual(snapshot.lastSessionID, "stored-1")
+        XCTAssertNotNil(snapshot.transcript(for: "stored-1"))
+        XCTAssertNil(snapshot.transcript(for: "runtime-1"))
+
+        // Cold launch: the displayed transcript and its sidebar row agree.
+        let (relaunched, _, _) = makeAppState(sharing: store, dashboard: dashboard)
+        relaunched.presentOfflineChatIfAvailable(dashboardID: dashboard)
+        let presentation = try XCTUnwrap(relaunched.offlineChatPresentation)
+        let displayed = try XCTUnwrap(presentation.displayedSessionID)
+        XCTAssertTrue(presentation.snapshot.sessions.contains { $0.id == displayed })
     }
 
     func testBackgroundFlushRecordsTheOnScreenConversation() throws {
@@ -327,8 +358,17 @@ final class OfflineChatCacheTests: XCTestCase {
         return OfflineChatCacheStore(directory: directory)
     }
 
+    private func makeAppState(sharing store: OfflineChatCacheStore, dashboard: UUID) -> (AppState, OfflineChatCacheStore, UUID) {
+        let saved = SavedDashboard(id: dashboard, label: "One", normalizedURL: "https://one.example")
+        return makeAppState(
+            registry: SavedDashboardRegistry(activeDashboardID: dashboard, dashboards: [saved]),
+            store: store
+        )
+    }
+
     private func makeAppState(
-        registry: SavedDashboardRegistry? = nil
+        registry: SavedDashboardRegistry? = nil,
+        store existingStore: OfflineChatCacheStore? = nil
     ) -> (AppState, OfflineChatCacheStore, UUID) {
         let suite = "OfflineChatCacheTests.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suite) else {
@@ -337,7 +377,7 @@ final class OfflineChatCacheTests: XCTestCase {
         addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
         let dashboard = SavedDashboard(id: UUID(), label: "One", normalizedURL: "https://one.example")
         let registry = registry ?? SavedDashboardRegistry(activeDashboardID: dashboard.id, dashboards: [dashboard])
-        let store = makeStore()
+        let store = existingStore ?? makeStore()
         let appState = AppState(
             defaults: defaults,
             loadSavedConnection: false,

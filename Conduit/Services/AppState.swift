@@ -1831,9 +1831,7 @@ final class AppState: ObservableObject {
               turnState != .synchronizing,
               !messages.isEmpty,
               let dashboardID = activeDashboardID,
-              let sessionID = ChatScrollIdentityNormalization.sessionID(
-                activeChatScrollSessionIdentity.canonicalSessionID ?? activeSessionId
-              ) else { return }
+              let sessionID = offlineChatDurableSessionID() else { return }
         offlineChatCache.record(
             dashboardID: dashboardID,
             profile: activeProfile,
@@ -1842,6 +1840,25 @@ final class AppState: ObservableObject {
             messages: messages,
             sessions: sessions
         )
+    }
+
+    /// The key a saved transcript is stored under: the durable id of the
+    /// catalog row this conversation matches (by runtime id, stored id, or
+    /// alias) — the same `storedSessionId ?? id` that keys the saved session
+    /// list — so a server that reports distinct runtime and stored ids still
+    /// lines the transcript up with its sidebar row.
+    private func offlineChatDurableSessionID() -> String? {
+        guard let active = ChatScrollIdentityNormalization.sessionID(
+            activeChatScrollSessionIdentity.canonicalSessionID ?? activeSessionId
+        ) else { return nil }
+        var candidates = acceptedIdentitySessionIDs(forRequested: active)
+        candidates.formUnion(activeChatScrollSessionIdentity.equivalentSessionIDs)
+        let row = sessions.first { session in
+            candidates.contains(session.id)
+                || session.storedSessionId.map(candidates.contains) == true
+                || !candidates.isDisjoint(with: session.alternateIds)
+        }
+        return row.map { $0.storedSessionId ?? $0.id } ?? active
     }
 
     /// Cold launch: present the saved copy for the active dashboard until the
@@ -5307,6 +5324,9 @@ final class AppState: ObservableObject {
         lastConnectionFailure = failure
         isConnecting = false
         isConnected = false
+        // Same state the saved-ticket path reaches through connect's failure:
+        // recovery is pending, not synchronizing.
+        turnState = .reconnecting
         showLogin = false
         return true
     }
