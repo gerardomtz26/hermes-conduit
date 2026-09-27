@@ -125,6 +125,7 @@ final class OfflineChatCacheTests: XCTestCase {
         let presentation = try XCTUnwrap(appState.offlineChatPresentation)
         XCTAssertEqual(presentation.displayedSessionID, "stored-a")
         XCTAssertEqual(presentation.displayedMessages.map(\.id), ["u1", "a1"])
+        XCTAssertEqual(appState.displayedChatTitle, "A")
         // Not evidence: nothing the live paths read changed.
         XCTAssertTrue(appState.messages.isEmpty)
         XCTAssertTrue(appState.sessions.isEmpty)

@@ -1117,7 +1117,7 @@ final class AppState: ObservableObject {
 
     var composerPlaceholder: String {
         if offlineChatPresentation != nil {
-            return AppLocalization.string("Offline · saved copy is read-only")
+            return AppLocalization.string("Read-only saved copy")
         }
         switch turnState {
         case .running:
@@ -1868,6 +1868,12 @@ final class AppState: ObservableObject {
               presentation.snapshot.transcript(for: sessionID) != nil else { return }
         presentation.displayedSessionID = sessionID
         offlineChatPresentation = presentation
+    }
+
+    /// Header title: the saved conversation's title while the offline copy
+    /// is on screen, otherwise the live conversation's.
+    var displayedChatTitle: String {
+        offlineChatPresentation?.displayedTranscript?.title ?? activeSessionTitle
     }
 
     func dismissOfflineChatPresentation() {
