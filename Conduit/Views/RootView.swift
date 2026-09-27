@@ -218,13 +218,10 @@ struct MainView: View {
                     .padding(.trailing, 12)
                     .padding(.bottom, 16)
                     // Cap AFTER the padding so the card itself is exactly
-                    // panelWidth (304 - 24) and hangs from the leading edge.
-                    .frame(maxWidth: SessionsPanel.panelWidth + 24, alignment: .leading)
-                    // The drop: the card grows down from the name's corner.
-                    .transition(
-                        .scale(scale: 0.92, anchor: .topLeading)
-                            .combined(with: .opacity)
-                    )
+                    // panelWidth (380 - 24) and hangs from the leading edge.
+                    // No transition here: SessionsPanel's own matched
+                    // geometry (id "bubble") inflates the card out of the
+                    // name's capsule — the bubble IS the first frame.
                 }
                 .zIndex(2)
             }
@@ -304,6 +301,10 @@ struct MainView: View {
         }
         .buttonStyle(.plain)
         .conduitGlassSurface(cornerRadius: 20, tint: .conduitAccent.opacity(0.06))
+        // Source of the bubble→card morph: while the panel is open this
+        // pill is NOT rendered (topBarLeading), so the panel's card takes
+        // its capsule frame as the geometry to inflate from (id "bubble").
+        .matchedGeometryEffect(id: "bubble", in: sessionsMorph)
         .accessibilityLabel(appState.displayedChatTitle)
         .accessibilityIdentifier("open.sessions")
         .accessibilityHint("Opens the conversations menu")

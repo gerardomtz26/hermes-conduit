@@ -284,6 +284,10 @@ struct GroupChatTitlePill: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .conduitGlassSurface(cornerRadius: 20, tint: .conduitAccent.opacity(0.06))
+        // Source of the bubble→card morph, same contract as the session
+        // pill in MainView: this pill is not rendered while the panel is
+        // open, so the card inflates FROM this capsule (id "bubble").
+        .matchedGeometryEffect(id: "bubble", in: namespace)
     }
 
     /// The member whose turn is running (memoized by AppState) — the same
