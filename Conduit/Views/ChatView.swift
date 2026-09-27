@@ -1128,7 +1128,8 @@ private struct UserImageAttachmentPreview: View {
     let attachment: Attachment
     let gatewayResolver: GatewayMediaDataURLResolver?
     @State private var gatewayImage: UIImage?
-    @State private var gatewayImageData: Data?
+    @State private var opening = false
+    @State private var openTask: Task<Void, Never>?
     @State private var gatewayLoadFailed = false
     @State private var localPreview: UIImage?
     @State private var localPreviewPath: String?
@@ -1250,7 +1251,6 @@ private struct UserImageAttachmentPreview: View {
                 // files on the MainActor before short-circuiting.
             } else if isGatewayImage, let gatewayResolver {
                 gatewayImage = nil
-                gatewayImageData = nil
                 gatewayLoadFailed = false
                 guard let dataURL = await gatewayResolver.dataURL(for: attachment.uri),
                 !Task.isCancelled,
@@ -1260,7 +1260,6 @@ private struct UserImageAttachmentPreview: View {
                     gatewayLoadFailed = true
                     return
                 }
-                gatewayImageData = data
                 gatewayImage = image
             }
         }
@@ -1293,21 +1292,34 @@ private struct UserImageAttachmentPreview: View {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
                 }
+                .overlay { if opening { ProgressView().tint(.white) } }
                 .opensMediaPreview(openPreview)
+                .onDisappear {
+                    openTask?.cancel()
+                    openTask = nil
+                    opening = false
+                }
                 .accessibilityLabel("Attached image: \(attachment.name)")
     }
 
     /// Opens the full-resolution original: the local file when the photo
-    /// is still on this device, otherwise the bytes fetched from Hermes
-    /// (the inline preview is a downsampled thumbnail).
+    /// is still on this device, otherwise the bytes re-fetched from Hermes.
+    /// The row keeps only the downsampled/decoded image, never the original
+    /// bytes, so an image-heavy transcript doesn't pin them all in memory.
     private func openPreview() {
-        if let localFileURL {
-            MediaPreviewPresenter.shared.present(fileURL: localFileURL, title: attachment.name)
-        } else if let gatewayImageData {
-            MediaPreviewPresenter.shared.present(
-                data: gatewayImageData,
-                filename: AttachmentPreviewFilename.make(name: attachment.name, uri: attachment.uri)
-            )
+        if let localFileURL, MediaPreviewPresenter.shared.present(fileURL: localFileURL, title: attachment.name) {
+            return
+        }
+        guard !opening, isGatewayImage, let gatewayResolver else { return }
+        let uri = attachment.uri
+        let filename = AttachmentPreviewFilename.make(name: attachment.name, uri: uri)
+        opening = true
+        openTask = Task {
+            if let dataURL = await gatewayResolver.dataURL(for: uri), !Task.isCancelled {
+                await MediaPreviewPresenter.shared.present(dataURL: dataURL, filename: filename)
+            }
+            guard !Task.isCancelled else { return }
+            opening = false
         }
     }
 
@@ -1328,8 +1340,14 @@ enum AttachmentPreviewFilename {
         guard !trimmed.isEmpty else { return uriName }
         let cleanName = MediaPreviewPresenter.sanitizedFilename(trimmed)
         let uriExtension = (uriName as NSString).pathExtension
-        guard (cleanName as NSString).pathExtension.isEmpty, !uriExtension.isEmpty else { return cleanName }
-        return "\(cleanName).\(uriExtension)"
+        guard !uriExtension.isEmpty else { return cleanName }
+        // The stored path's extension describes the bytes; a display name
+        // that disagrees (or has none) would make Quick Look pick the wrong
+        // renderer.
+        let nameExtension = (cleanName as NSString).pathExtension
+        if nameExtension.caseInsensitiveCompare(uriExtension) == .orderedSame { return cleanName }
+        let stem = nameExtension.isEmpty ? cleanName : (cleanName as NSString).deletingPathExtension
+        return MediaPreviewPresenter.truncatedFilename("\(stem).\(uriExtension)")
     }
 }
 
@@ -1380,14 +1398,14 @@ private struct UserDocumentAttachmentChip: View {
         // Cancelled on disappear, so a slow fetch can't pop a preview over
         // whatever screen the user moved on to.
         openTask = Task {
-            let dataURL = await gatewayResolver.dataURL(for: attachment.uri)
+            if let dataURL = await gatewayResolver.dataURL(for: attachment.uri), !Task.isCancelled {
+                await MediaPreviewPresenter.shared.present(
+                    dataURL: dataURL,
+                    filename: AttachmentPreviewFilename.make(name: attachment.name, uri: attachment.uri)
+                )
+            }
             guard !Task.isCancelled else { return }
             loading = false
-            guard let dataURL else { return }
-            MediaPreviewPresenter.shared.present(
-                dataURL: dataURL,
-                filename: AttachmentPreviewFilename.make(name: attachment.name, uri: attachment.uri)
-            )
         }
     }
 }

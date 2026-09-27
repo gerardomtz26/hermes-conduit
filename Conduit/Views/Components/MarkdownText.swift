@@ -1651,7 +1651,6 @@ private struct RemoteMarkdownImage: View {
     let alt: String
     let gatewayMediaDataURL: ((String) async -> String?)?
     @State private var gatewayImage: UIImage?
-    @State private var gatewayImageData: Data?
     @State private var gatewayLoadFailed = false
     @State private var openingRemote = false
     @State private var openTask: Task<Void, Never>?
@@ -1705,7 +1704,6 @@ private struct RemoteMarkdownImage: View {
         .task(id: url) {
             guard isGatewayMedia, gatewayFileKind == nil else { return }
             gatewayImage = nil
-            gatewayImageData = nil
             gatewayLoadFailed = false
             guard let gatewayMediaDataURL, !gatewayPath.isEmpty,
                   let dataURL = await gatewayMediaDataURL(gatewayPath),
@@ -1716,7 +1714,6 @@ private struct RemoteMarkdownImage: View {
                 gatewayLoadFailed = true
                 return
             }
-            gatewayImageData = data
             gatewayImage = image
         }
     }
@@ -1729,10 +1726,8 @@ private struct RemoteMarkdownImage: View {
                 .scaledToFit()
                 .frame(maxHeight: 360)
                 .clipShape(RoundedRectangle(cornerRadius: 13, style: .continuous))
-                .opensMediaPreview {
-                    guard let gatewayImageData else { return }
-                    MediaPreviewPresenter.shared.present(data: gatewayImageData, filename: gatewayPath)
-                }
+                .overlay { if openingRemote { ProgressView() } }
+                .opensMediaPreview(openGatewayImage)
                 .accessibilityLabel(alt.isEmpty ? Text("Image") : Text(verbatim: alt))
         } else if gatewayLoadFailed {
             Label(alt.isEmpty ? AppLocalization.string("Image unavailable") : AppLocalization.string("\(alt) unavailable"), systemImage: "photo.badge.exclamationmark")
@@ -1753,6 +1748,21 @@ private struct RemoteMarkdownImage: View {
                 .foregroundStyle(.secondary)
         }
         .padding(12)
+    }
+
+    /// The row keeps only the decoded image, not the original bytes (up to
+    /// 16 MB each across a whole transcript), so opening re-fetches them.
+    private func openGatewayImage() {
+        guard !openingRemote, let gatewayMediaDataURL else { return }
+        let path = gatewayPath
+        openingRemote = true
+        openTask = Task {
+            if let dataURL = await gatewayMediaDataURL(path), !Task.isCancelled {
+                await MediaPreviewPresenter.shared.present(dataURL: dataURL, filename: path)
+            }
+            guard !Task.isCancelled else { return }
+            openingRemote = false
+        }
     }
 
     /// AsyncImage keeps only the rendered image, so the original bytes are
@@ -1835,12 +1845,15 @@ private struct GatewayMediaFileCard: View {
         openTask = Task {
             let dataURL = await gatewayMediaDataURL(path)
             guard !Task.isCancelled else { return }
-            loading = false
-            guard let dataURL,
-                  MediaPreviewPresenter.shared.present(dataURL: dataURL, filename: path) else {
-                failed = true
-                return
+            let presented: Bool
+            if let dataURL {
+                presented = await MediaPreviewPresenter.shared.present(dataURL: dataURL, filename: path)
+            } else {
+                presented = false
             }
+            guard !Task.isCancelled else { return }
+            loading = false
+            failed = !presented
         }
     }
 }
