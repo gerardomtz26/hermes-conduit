@@ -178,7 +178,9 @@ final class ConnectionSetupSettingsUITests: XCTestCase {
     // MARK: - Walk helpers
 
     private func openSettings(_ app: XCUIApplication) {
-        let sessions = app.buttons["Open sessions"]
+        // The conversation-name pill (accessibility identifier: the visible
+        // label is the conversation title, which the test cannot know).
+        let sessions = app.buttons["open.sessions"]
         XCTAssertTrue(sessions.waitForExistence(timeout: 10), "Main app shell did not appear. Tree:\n\(app.debugDescription)")
         sessions.tap()
 

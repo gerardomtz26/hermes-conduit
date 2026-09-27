@@ -240,6 +240,13 @@ struct GroupChatView: View {
 /// both conversation surfaces render inside ONE bar.
 struct GroupChatTitlePill: View {
     @EnvironmentObject private var appState: AppState
+    /// Shared with `SessionsPanel`'s header: the room's name is the text
+    /// the panel grows out of (see the session pill in MainView for the
+    /// same contract).
+    let namespace: Namespace.ID
+    /// Opens the sessions panel — injected by MainView so the animated flip
+    /// and the Sessions-tab pinning live in one place.
+    let onOpenMenu: () -> Void
 
     private var surface: AppState.GroupRoomSurface? { appState.activeRoomSurface }
 
@@ -256,10 +263,18 @@ struct GroupChatTitlePill: View {
             .accessibilityLabel(Text(AppLocalization.string("Leave this group chat")))
 
             VStack(alignment: .leading, spacing: 1) {
-                Text(surface?.room.name ?? "")
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                Button(action: onOpenMenu) {
+                    Text(surface?.room.name ?? "")
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .matchedGeometryEffect(id: "conversation-title", in: namespace)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(surface?.room.name ?? "")
+                .accessibilityIdentifier("open.sessions")
+                .accessibilityHint("Opens the conversations menu")
+
                 Text(memberSummary)
                     .font(.caption2)
                     .foregroundStyle(.secondary)

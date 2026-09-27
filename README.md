@@ -21,7 +21,7 @@ Measured 2026-09-27: `build-local` runs **25 commits ahead** of the original (23
 | Text scale | `InterfaceScaleFont` bridges the environment's Dynamic Type into the ~17 UIKit `preferredFont` call sites; the custom scale selectors were retired — the iOS slider is the only size control. |
 | Markdown | Settled cards re-read the environment's dynamic type (closes the long-standing SettledMessageIsolation red). |
 | Subagents | Delegate cards are keyed by the gateway's `subagent_id`: finished ones drop off on their own instead of lingering until relaunch. |
-| Interface | Floating Liquid Glass bar over the conversation (build 158); segment-control navigation — chats · kanban · subagents with a live activity dot — and the persistent iPad sidebar retired (build 159). |
+| Interface | Floating Liquid Glass bar over the conversation (build 158); the conversation's NAME is the navigation — tapping it grows the sessions panel out of the title pill, the text morphing into the panel's header (build 161), and the bar's empty middle keeps tap-to-top; the persistent iPad sidebar was retired (build 159). |
 | Fork-blind tests | 3 tests read the host bundle's `Info.plist` instead of the original `com.milim.relay` id (iPad/iPhone orientations and the Tailscale ATS rule); `SidebarLayoutTests` was retired along with the sidebar. |
 
 ### What the last alignment brought from the original (2026-09-27 · 75 commits)

@@ -26,7 +26,9 @@ final class ProfilePickerUITests: XCTestCase {
     private enum Identity {
         static let connectedDashboard = "-CONDUIT_UI_TEST_CONNECTED_DASHBOARD"
         static let seededProfiles = "-CONDUIT_UI_TEST_PROFILES"
-        static let openSidebar = "Open sessions"
+        // The conversation-name pill opens the sessions panel; its visible
+    // label is the conversation title, so the test keys on the identifier.
+    static let openSidebar = "open.sessions"
         static let workspace = "sidebar.workspace"
         static let pickerTitle = "Profiles"
         static let currentMarker = "Current"

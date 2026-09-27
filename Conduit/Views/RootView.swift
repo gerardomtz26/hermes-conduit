@@ -72,7 +72,9 @@ struct MainView: View {
     /// value itself is read through `AccentPalette.current`.
     @AppStorage(AccentPalette.preferenceKey) private var accentPaletteRaw = AccentPalette.defaultPalette.rawValue
     @State private var settingsPresentation: SettingsSnapshot?
-    @State private var shouldPresentSettingsAfterSidebarDismissal = false
+    /// Shared by the conversation-name pill and the sessions panel's
+    /// header: the panel grows out of the name through this match.
+    @Namespace private var sessionsMorph
 
     var body: some View {
         chatNavigationContent
@@ -179,7 +181,7 @@ struct MainView: View {
                 }
             }
             .overlay(alignment: .leading) {
-                EdgePanGesture { appState.showSidebar = true }
+                EdgePanGesture { openSessionsPanel(forceSessionsTab: false) }
                     .frame(width: 25)
                     .ignoresSafeArea()
             }
@@ -191,102 +193,100 @@ struct MainView: View {
             }
             .toolbar(.hidden, for: .navigationBar)
         }
-        .sheet(isPresented: $appState.showSidebar, onDismiss: presentSettingsAfterSidebarDismissal) {
-            SidebarView(onRequestSettings: presentSettingsFromDrawer)
-                .presentationDetents([.large])
-                .transaction { transaction in
-                    transaction.animation = .easeInOut(duration: 0.15)
-                }
+        // NOT a sheet: the sessions panel is a full-surface overlay that
+        // grows out of the conversation's name (matched geometry between the
+        // title pill and the panel header), so it never reads as a card
+        // dropped in the middle of the screen.
+        .overlay {
+            if appState.showSidebar {
+                SessionsPanel(
+                    namespace: sessionsMorph,
+                    title: panelTitle,
+                    onRequestSettings: presentSettingsFromDrawer,
+                    onClose: closeSessionsPanel
+                )
+                .zIndex(2)
+                .transition(.opacity)
+            }
         }
     }
 
-    /// WhatsApp-style bar: chat identity leading, the destination segment
-    /// control centered, actions trailing. An open room swaps the leading and
-    /// trailing pills for its own; the center control is shared.
+    /// What the panel's header says — the same string the source pill had,
+    /// so the morph carries the identical text.
+    private var panelTitle: String {
+        if let room = appState.activeRoomSurface { return room.room.name }
+        return appState.displayedChatTitle
+    }
+
+    /// The bar: chat identity leading — tapping it grows the sessions panel
+    /// out of the very pill (matched geometry) — actions trailing. An open
+    /// room swaps both pills for its own. The empty middle keeps
+    /// scroll-to-top; see `CenterScrollZone`.
     private var floatingTopBar: some View {
         FloatingTopBar {
             topBarLeading
-        } center: {
-            TopBarSegmentedControl(
-                active: activeTopBarSection,
-                runningAgentCount: runningAgentCount,
-                onSelect: selectTopBarSection
-            )
         } trailing: {
             topBarTrailing
         }
     }
 
-    /// Which destination the segment control marks as active: whatever owns
-    /// the surface right now, defaulting to `.chats` — an open conversation
-    /// IS the chats surface.
-    private var activeTopBarSection: TopBarSection {
-        if appState.showKanbanSheet { return .kanban }
-        if appState.showAgentsSheet { return .agents }
-        return .chats
+    /// Opens the sessions panel on its Sessions tab: the conversation's
+    /// name always lands on conversations. `forceSessionsTab: false` keeps
+    /// whatever tab the drawer last showed (the edge swipe's old behavior).
+    /// The flip animates so the panel grows out of the pill.
+    private func openSessionsPanel(forceSessionsTab: Bool = true) {
+        if forceSessionsTab {
+            UserDefaults.standard.set(SidebarTab.sessions.rawValue, forKey: "conduit.sidebarTab")
+        }
+        withAnimation(ConduitMotion.transition) {
+            appState.showSidebar = true
+        }
     }
 
-    /// Delegate agents whose status is active right now — the same predicate
-    /// `DelegateAgentsSheet` counts for its "N working now" line, so the
-    /// segment's activity dot and the sheet never disagree.
-    private var runningAgentCount: Int {
-        appState.delegateAgents.filter(\.status.isActive).count
-    }
-
-    /// One destination at a time: opening a new one closes the others, and
-    /// re-selecting the open one closes it. The chats segment pins the
-    /// drawer to its Sessions tab so "Open sessions" always lands there.
-    private func selectTopBarSection(_ section: TopBarSection) {
-        switch section {
-        case .chats:
-            appState.showKanbanSheet = false
-            appState.showAgentsSheet = false
-            if appState.showSidebar {
-                appState.dismissSidebarDrawer()
-            } else {
-                UserDefaults.standard.set(SidebarTab.sessions.rawValue, forKey: "conduit.sidebarTab")
-                appState.showSidebar = true
-            }
-        case .kanban:
-            appState.showAgentsSheet = false
+    private func closeSessionsPanel() {
+        withAnimation(ConduitMotion.transition) {
             appState.dismissSidebarDrawer()
-            appState.showKanbanSheet.toggle()
-        case .agents:
-            appState.showKanbanSheet = false
-            appState.dismissSidebarDrawer()
-            appState.showAgentsSheet.toggle()
         }
     }
 
     /// Leading zone: the room's identity while a room is open, otherwise the
-    /// session title (tap = scroll to top). Session-only by construction, so
-    /// the title can never act on the hidden conversation behind a room.
+    /// session title. Tapping it opens the sessions panel — and while that
+    /// panel is open the pill is NOT rendered, so its title text is the
+    /// geometry source the panel's header morphs FROM (classic matched
+    /// geometry: exactly one of the pair exists at any moment).
     @ViewBuilder
     private var topBarLeading: some View {
         if appState.activeRoomSurface != nil {
-            GroupChatTitlePill()
-        } else {
+            if !appState.showSidebar {
+                GroupChatTitlePill(namespace: sessionsMorph, onOpenMenu: { openSessionsPanel() })
+            }
+        } else if !appState.showSidebar {
             sessionTitlePill
         }
     }
 
     private var sessionTitlePill: some View {
         Button {
-            appState.requestChatScrollToTop()
+            Haptics.selection()
+            openSessionsPanel()
         } label: {
             // displayedChatTitle (upstream #99): shows the saved
             // conversation's name while the offline copy is on screen.
+            // The match sits on the TEXT (before the padding) so the panel
+            // header receives the exact glyph frame, padding included.
             Text(appState.displayedChatTitle)
                 .font(.subheadline.weight(.semibold))
                 .lineLimit(1)
                 .truncationMode(.middle)
+                .matchedGeometryEffect(id: "conversation-title", in: sessionsMorph)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
         }
         .buttonStyle(.plain)
         .conduitGlassSurface(cornerRadius: 20, tint: .conduitAccent.opacity(0.06))
         .accessibilityLabel(appState.displayedChatTitle)
-        .accessibilityHint("Scroll to top of conversation")
+        .accessibilityIdentifier("open.sessions")
+        .accessibilityHint("Opens the conversations menu")
     }
 
     /// Trailing zone: refresh + connection dot for a session; the room's
@@ -328,14 +328,15 @@ struct MainView: View {
         }
     }
 
+    /// Settings requested from inside the panel: close it (the panel is an
+    /// overlay, so nothing waits for a sheet's onDismiss) and present
+    /// Settings directly — the sheet lands above the closing panel.
     private func presentSettingsFromDrawer() {
-        shouldPresentSettingsAfterSidebarDismissal = true
-        appState.showSidebar = false
+        closeSessionsPanel()
+        openSettings()
     }
 
-    private func presentSettingsAfterSidebarDismissal() {
-        guard shouldPresentSettingsAfterSidebarDismissal else { return }
-        shouldPresentSettingsAfterSidebarDismissal = false
+    private func openSettings() {
         appState.isSettingsSheetPresented = true
         settingsPresentation = appState.makeSettingsSnapshot()
     }
@@ -349,7 +350,12 @@ struct MainView: View {
     private func presentPreferredReturnSurfaceIfNeeded() {
         guard appState.claimPreferredReturnSurfacePresentation() else { return }
         guard !appState.showSidebar else { return }
-        appState.showSidebar = true
+        // Animated like every other opening: the panel must always grow out
+        // of the name, even when the trigger is a notification or a voice
+        // intent instead of a tap.
+        withAnimation(ConduitMotion.transition) {
+            appState.showSidebar = true
+        }
     }
 
     private var voiceCapabilityRefreshKey: String {

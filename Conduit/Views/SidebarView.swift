@@ -10,6 +10,13 @@ import SwiftUI
 struct SidebarView: View {
     @EnvironmentObject var appState: AppState
     let onRequestSettings: () -> Void
+    /// Set when the drawer lives inside `SessionsPanel` (an overlay, not a
+    /// sheet): the panel owns dismissal — the environment `dismiss` only
+    /// works when this view is presented as a sheet.
+    var onClose: (() -> Void)? = nil
+    /// The panel supplies the panel-wide backdrop; the standalone drawer
+    /// keeps its own.
+    var showsBackdrop: Bool = true
     @AppStorage("conduit.sidebarTab") private var selectedTabRaw = SidebarTab.sessions.rawValue
 
     private var selectedTab: SidebarTab {
@@ -22,7 +29,9 @@ struct SidebarView: View {
     var body: some View {
         NavigationStack {
             ZStack {
-                ConduitBackdrop()
+                if showsBackdrop {
+                    ConduitBackdrop()
+                }
 
                 VStack(spacing: 16) {
                     ConduitGlassGroup(spacing: 12) {
@@ -70,7 +79,11 @@ struct SidebarView: View {
                             .accessibilityLabel("Settings")
 
                             Button {
-                                dismiss()
+                                if let onClose {
+                                    onClose()
+                                } else {
+                                    dismiss()
+                                }
                             } label: {
                                 Image(systemName: "xmark")
                                     .font(.system(size: 15, weight: .semibold))
