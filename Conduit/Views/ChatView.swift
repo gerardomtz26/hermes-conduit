@@ -1099,7 +1099,7 @@ struct UserMessageContent: View, Equatable {
                     if attachment.kind == .image {
                         UserImageAttachmentPreview(attachment: attachment, gatewayResolver: gatewayResolver)
                     } else {
-                        UserDocumentAttachmentChip(attachment: attachment)
+                        UserDocumentAttachmentChip(attachment: attachment, gatewayResolver: gatewayResolver)
                     }
                 }
             }
@@ -1128,6 +1128,7 @@ private struct UserImageAttachmentPreview: View {
     let attachment: Attachment
     let gatewayResolver: GatewayMediaDataURLResolver?
     @State private var gatewayImage: UIImage?
+    @State private var gatewayImageData: Data?
     @State private var gatewayLoadFailed = false
     @State private var localPreview: UIImage?
     @State private var localPreviewPath: String?
@@ -1249,14 +1250,17 @@ private struct UserImageAttachmentPreview: View {
                 // files on the MainActor before short-circuiting.
             } else if isGatewayImage, let gatewayResolver {
                 gatewayImage = nil
+                gatewayImageData = nil
                 gatewayLoadFailed = false
                 guard let dataURL = await gatewayResolver.dataURL(for: attachment.uri),
                 !Task.isCancelled,
-                let image = image(fromDataURL: dataURL) else {
+                let data = DataURLLimits.decodeBase64DataURL(dataURL, prefix: "data:image/"),
+                let image = UIImage(data: data) else {
                     guard !Task.isCancelled else { return }
                     gatewayLoadFailed = true
                     return
                 }
+                gatewayImageData = data
                 gatewayImage = image
             }
         }
@@ -1289,7 +1293,22 @@ private struct UserImageAttachmentPreview: View {
                     RoundedRectangle(cornerRadius: 14, style: .continuous)
                         .strokeBorder(Color.white.opacity(0.22), lineWidth: 1)
                 }
+                .opensMediaPreview(openPreview)
                 .accessibilityLabel("Attached image: \(attachment.name)")
+    }
+
+    /// Opens the full-resolution original: the local file when the photo
+    /// is still on this device, otherwise the bytes fetched from Hermes
+    /// (the inline preview is a downsampled thumbnail).
+    private func openPreview() {
+        if let localFileURL {
+            MediaPreviewPresenter.shared.present(fileURL: localFileURL, title: attachment.name)
+        } else if let gatewayImageData {
+            MediaPreviewPresenter.shared.present(
+                data: gatewayImageData,
+                filename: AttachmentPreviewFilename.make(name: attachment.name, uri: attachment.uri)
+            )
+        }
     }
 
     private func previewHeight(for image: UIImage) -> CGFloat {
@@ -1297,23 +1316,79 @@ private struct UserImageAttachmentPreview: View {
         return min(260, max(120, 224 * image.size.height / image.size.width))
     }
 
-    private func image(fromDataURL value: String) -> UIImage? {
-        guard let data = DataURLLimits.decodeBase64DataURL(value, prefix: "data:image/") else { return nil }
-        return UIImage(data: data)
+}
+
+/// The name a previewed attachment is saved/shared under: the display name,
+/// borrowing the stored path's extension when the name has none so the
+/// share sheet and Quick Look still recognize the type.
+enum AttachmentPreviewFilename {
+    static func make(name: String, uri: String) -> String {
+        let uriName = MediaPreviewPresenter.sanitizedFilename(uri)
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return uriName }
+        let cleanName = MediaPreviewPresenter.sanitizedFilename(trimmed)
+        let uriExtension = (uriName as NSString).pathExtension
+        guard (cleanName as NSString).pathExtension.isEmpty, !uriExtension.isEmpty else { return cleanName }
+        return "\(cleanName).\(uriExtension)"
     }
 }
 
 private struct UserDocumentAttachmentChip: View {
     let attachment: Attachment
+    let gatewayResolver: GatewayMediaDataURLResolver?
+    @State private var loading = false
+    @State private var openTask: Task<Void, Never>?
+
+    private var localFileURL: URL? {
+        if let url = URL(string: attachment.uri), url.isFileURL {
+            return FileManager.default.fileExists(atPath: url.path) ? url : nil
+        }
+        let url = URL(fileURLWithPath: attachment.uri)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
 
     var body: some View {
-        Label(attachment.name, systemImage: "doc")
-            .font(.caption.weight(.medium))
-            .foregroundStyle(.white)
-            .lineLimit(1)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(Color.white.opacity(0.13), in: Capsule())
+        HStack(spacing: 6) {
+            Label(attachment.name, systemImage: "doc")
+                .lineLimit(1)
+            if loading {
+                ProgressView()
+                    .controlSize(.mini)
+                    .tint(.white)
+            }
+        }
+        .font(.caption.weight(.medium))
+        .foregroundStyle(.white)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color.white.opacity(0.13), in: Capsule())
+        .opensMediaPreview(open)
+        .onDisappear {
+            openTask?.cancel()
+            openTask = nil
+            loading = false
+        }
+    }
+
+    private func open() {
+        if let localFileURL {
+            MediaPreviewPresenter.shared.present(fileURL: localFileURL, title: attachment.name)
+            return
+        }
+        guard !loading, attachment.uri.hasPrefix("/"), let gatewayResolver else { return }
+        loading = true
+        // Cancelled on disappear, so a slow fetch can't pop a preview over
+        // whatever screen the user moved on to.
+        openTask = Task {
+            let dataURL = await gatewayResolver.dataURL(for: attachment.uri)
+            guard !Task.isCancelled else { return }
+            loading = false
+            guard let dataURL else { return }
+            MediaPreviewPresenter.shared.present(
+                dataURL: dataURL,
+                filename: AttachmentPreviewFilename.make(name: attachment.name, uri: attachment.uri)
+            )
+        }
     }
 }
 

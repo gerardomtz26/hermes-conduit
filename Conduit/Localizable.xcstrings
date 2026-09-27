@@ -2,6 +2,26 @@
   "sourceLanguage" : "en",
   "strings" : {
 
+    "Audio" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "音频"
+          }
+        }
+      }
+    },
+    "Couldn't open this file" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "无法打开此文件"
+          }
+        }
+      }
+    },
     "Created in Hermes Desktop. Desktop runs this group's conversation, so reply from there; this shows the latest synced messages." : {
       "localizations" : {
         "zh-Hans" : {
@@ -24,6 +44,16 @@
       }
     },
 
+    "Image" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "图片"
+          }
+        }
+      }
+    },
     "No messages yet." : {
       "localizations" : {
         "zh-Hans" : {
@@ -35,6 +65,16 @@
       }
     },
 
+    "Opens full screen with save and share" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "全屏打开，可保存和分享"
+          }
+        }
+      }
+    },
     "Shortened — the full message is in Hermes Desktop." : {
       "localizations" : {
         "zh-Hans" : {
@@ -79,6 +119,16 @@
       }
     },
 
+    "Video" : {
+      "localizations" : {
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "translated",
+            "value" : "视频"
+          }
+        }
+      }
+    },
     "Your previous message is still pending. Retry it from the room, or wait for it to deliver." : {
       "localizations" : {
         "zh-Hans" : {
