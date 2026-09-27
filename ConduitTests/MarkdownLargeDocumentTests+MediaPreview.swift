@@ -61,9 +61,20 @@ extension MarkdownLargeDocumentTests {
         XCTAssertEqual(MediaPreviewPresenter.sanitizedFilename(""), "media")
     }
 
+    func testMediaPreview_SanitizedFilenameTruncatesLongStemKeepingExtension() {
+        let long = String(repeating: "é", count: 300) + ".mp4"
+        let name = MediaPreviewPresenter.sanitizedFilename("/tmp/" + long)
+        XCTAssertLessThanOrEqual(name.utf8.count, 200)
+        XCTAssertTrue(name.hasSuffix(".mp4"))
+        XCTAssertEqual(MediaPreviewPresenter.sanitizedFilename("/tmp/short.png"), "short.png")
+    }
+
     func testMediaPreview_AttachmentPreviewFilenameBorrowsExtensionFromStoredPath() {
         XCTAssertEqual(AttachmentPreviewFilename.make(name: "Screenshot", uri: "/uploads/abc.png"), "Screenshot.png")
-        XCTAssertEqual(AttachmentPreviewFilename.make(name: "photo.jpg", uri: "/uploads/abc.png"), "photo.jpg")
+        XCTAssertEqual(AttachmentPreviewFilename.make(name: "photo.PNG", uri: "/uploads/abc.png"), "photo.PNG")
+        // The stored path describes the bytes; a disagreeing name extension
+        // would send Quick Look to the wrong renderer.
+        XCTAssertEqual(AttachmentPreviewFilename.make(name: "photo.txt", uri: "/uploads/abc.png"), "photo.png")
         XCTAssertEqual(AttachmentPreviewFilename.make(name: "  ", uri: "/uploads/abc.png"), "abc.png")
     }
 

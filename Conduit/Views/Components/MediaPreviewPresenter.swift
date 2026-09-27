@@ -72,7 +72,12 @@ enum GatewayMediaKind: Equatable {
 
 @MainActor
 final class MediaPreviewPresenter {
-    static let shared = MediaPreviewPresenter()
+    /// First use sweeps staging folders left by a previous run (a preview
+    /// open when the app was killed never reaches its dismiss cleanup).
+    static let shared: MediaPreviewPresenter = {
+        MediaPreviewPresenter.removeDirectory(MediaPreviewPresenter.stagingRoot)
+        return MediaPreviewPresenter()
+    }()
 
     /// One open preview. Each controller gets its own session (Quick Look
     /// holds its data source weakly, so `sessions` keeps it alive), which
@@ -83,6 +88,7 @@ final class MediaPreviewPresenter {
         /// Temporary directory created for this preview, removed on dismiss.
         let ownedDirectory: URL?
         var onFinish: (@MainActor () -> Void)?
+        var didPresent = false
 
         init(url: URL, title: String, ownedDirectory: URL?) {
             self.url = url
@@ -114,28 +120,47 @@ final class MediaPreviewPresenter {
 
     /// Previews a file already on disk (a local attachment). The file is
     /// left in place afterwards.
-    func present(fileURL: URL, title: String? = nil) {
-        guard Self.isPreviewable(filename: fileURL.lastPathComponent, mimeType: nil) else { return }
-        show(Session(url: fileURL, title: title ?? fileURL.lastPathComponent, ownedDirectory: nil))
+    @discardableResult
+    func present(fileURL: URL, title: String? = nil) -> Bool {
+        guard Self.isPreviewable(filename: fileURL.lastPathComponent, mimeType: nil),
+              FileManager.default.fileExists(atPath: fileURL.path) else { return false }
+        return show(Session(url: fileURL, title: title ?? fileURL.lastPathComponent, ownedDirectory: nil))
     }
 
-    /// Previews in-memory bytes (a decoded gateway data URL or a download)
-    /// under `filename`, so Save/Share keep the original name and type.
-    /// Active web content (HTML, SVG, XML) is refused rather than handed to
-    /// Quick Look's web renderer.
+    /// Previews in-memory bytes (a download) under `filename`, so Save/Share
+    /// keep the original name and type. Active web content (HTML, SVG, XML)
+    /// is refused rather than handed to Quick Look's web renderer. The disk
+    /// write runs off the main actor; a cancelled caller presents nothing.
     @discardableResult
-    func present(data: Data, filename: String, mimeType: String? = nil) -> Bool {
-        guard Self.isPreviewable(filename: filename, mimeType: mimeType),
-              let staged = Self.stage(data: data, filename: filename) else { return false }
-        return show(Session(url: staged.file, title: staged.file.lastPathComponent, ownedDirectory: staged.directory))
+    func present(data: Data, filename: String, mimeType: String? = nil) async -> Bool {
+        guard Self.isPreviewable(filename: filename, mimeType: mimeType) else { return false }
+        let staged = await Task.detached(priority: .userInitiated) {
+            Self.stage(data: data, filename: filename)
+        }.value
+        return presentStaged(staged)
     }
 
     /// Previews a gateway `data:` URL, refusing active web content by its
-    /// declared MIME type as well as by `filename`.
+    /// declared MIME type as well as by `filename`. Up to 16 MB of base64 is
+    /// decoded and written off the main actor so a large file can't hitch
+    /// the transcript on tap.
     @discardableResult
-    func present(dataURL: String, filename: String) -> Bool {
-        guard let data = DataURLLimits.decodeBase64DataURL(dataURL) else { return false }
-        return present(data: data, filename: filename, mimeType: Self.mimeType(ofDataURL: dataURL))
+    func present(dataURL: String, filename: String) async -> Bool {
+        guard Self.isPreviewable(filename: filename, mimeType: Self.mimeType(ofDataURL: dataURL)) else { return false }
+        let staged = await Task.detached(priority: .userInitiated) { () -> (directory: URL, file: URL)? in
+            guard let data = DataURLLimits.decodeBase64DataURL(dataURL) else { return nil }
+            return Self.stage(data: data, filename: filename)
+        }.value
+        return presentStaged(staged)
+    }
+
+    private func presentStaged(_ staged: (directory: URL, file: URL)?) -> Bool {
+        guard let staged else { return false }
+        guard !Task.isCancelled else {
+            Self.removeDirectory(staged.directory)
+            return false
+        }
+        return show(Session(url: staged.file, title: staged.file.lastPathComponent, ownedDirectory: staged.directory))
     }
 
     /// Downloads a web image and previews it. The body is streamed against
@@ -145,7 +170,7 @@ final class MediaPreviewPresenter {
         guard let (data, response) = await Self.boundedDownload(url),
               !Task.isCancelled else { return false }
         let name = Self.filename(for: url, response: response, fallback: fallbackName)
-        return present(data: data, filename: name, mimeType: response.mimeType)
+        return await present(data: data, filename: name, mimeType: response.mimeType)
     }
 
     // MARK: - Presentation
@@ -163,7 +188,19 @@ final class MediaPreviewPresenter {
         controller.dataSource = session
         controller.delegate = session
         controller.modalPresentationStyle = .fullScreen
-        presenter.present(controller, animated: true)
+        presenter.present(controller, animated: true) {
+            session.didPresent = true
+        }
+        // UIKit refuses (and only logs) a presentation while another is in
+        // flight, and then never calls the completion or the dismiss
+        // delegate. Reclaim such a session once the transition has had
+        // ample time to finish.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(5))
+            guard !session.didPresent, controller.presentingViewController == nil else { return }
+            self?.sessions[key] = nil
+            Self.removeDirectory(session.ownedDirectory)
+        }
         return true
     }
 
@@ -218,10 +255,21 @@ final class MediaPreviewPresenter {
             if response.expectedContentLength > Int64(limit) { return nil }
             var data = Data()
             if response.expectedContentLength > 0 { data.reserveCapacity(Int(response.expectedContentLength)) }
+            // Gather into a fixed chunk and append in bulk: appending each
+            // byte to `Data` costs millions of calls for a large image.
+            let chunkSize = 64 * 1024
+            var chunk = [UInt8]()
+            chunk.reserveCapacity(chunkSize)
             for try await byte in bytes {
-                data.append(byte)
-                if data.count > limit { return nil }
+                chunk.append(byte)
+                if chunk.count == chunkSize {
+                    data.append(contentsOf: chunk)
+                    chunk.removeAll(keepingCapacity: true)
+                    if data.count > limit { return nil }
+                }
             }
+            data.append(contentsOf: chunk)
+            guard data.count <= limit else { return nil }
             return data.isEmpty ? nil : (data, response)
         } catch {
             return nil
@@ -256,7 +304,20 @@ final class MediaPreviewPresenter {
             .replacingOccurrences(of: ":", with: "-")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty, cleaned != ".", cleaned != ".." else { return "media" }
-        return cleaned
+        return truncatedFilename(cleaned)
+    }
+
+    /// File systems cap a name at 255 bytes; keep the extension and trim the
+    /// stem so an over-long gateway name still stages.
+    nonisolated static func truncatedFilename(_ name: String, maxBytes: Int = 200) -> String {
+        guard name.utf8.count > maxBytes else { return name }
+        let ext = (name as NSString).pathExtension
+        let suffix = ext.isEmpty || ext.utf8.count > 16 ? "" : ".\(ext)"
+        var stem = suffix.isEmpty ? name : String(name.dropLast(suffix.count))
+        while stem.utf8.count + suffix.utf8.count > maxBytes, !stem.isEmpty {
+            stem.removeLast()
+        }
+        return stem.isEmpty ? "media\(suffix)" : stem + suffix
     }
 
     nonisolated static func filename(for url: URL, response: URLResponse?, fallback: String) -> String {
