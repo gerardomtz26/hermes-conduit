@@ -10,7 +10,7 @@ A native iOS client for [Hermes Agent](https://github.com/NousResearch/hermes-ag
 
 This clone of [kaishi00/hermes-conduit](https://github.com/kaishi00/hermes-conduit) is worked on the **`build-local`** branch; this repo's `main` carries no work of its own — it is only a mirror of the original's `main`, so if GitHub ever shows it "N commits behind", that is why: it is a snapshot of the original, not a lagging copy. The `.ipa` builds are signed with a free local developer account and distributed over iCloud, not through the App Store.
 
-Measured 2026-09-26: `build-local` runs **22 commits ahead** of the original (21 of its own plus the alignment merge) and **75 behind**. Last alignment: **2026-09-25** (`826a3bb`, which brought 78 commits from the original).
+Measured 2026-09-27: `build-local` runs **25 commits ahead** of the original (23 of its own plus the two alignment merges) and **0 behind** — the fork carries the original's head as of `53ec506`. Last alignment: **2026-09-27** (`20d4ad9`); the previous one, 2026-09-25 (`826a3bb`), brought 78 commits.
 
 ### What this repo has that the original doesn't
 
@@ -24,9 +24,9 @@ Measured 2026-09-26: `build-local` runs **22 commits ahead** of the original (21
 | Interface | Floating Liquid Glass bar over the conversation (build 158); segment-control navigation — chats · kanban · subagents with a live activity dot — and the persistent iPad sidebar retired (build 159). |
 | Fork-blind tests | 3 tests read the host bundle's `Info.plist` instead of the original `com.milim.relay` id (iPad/iPhone orientations and the Tailscale ATS rule); `SidebarLayoutTests` was retired along with the sidebar. |
 
-### What the original has that here is missing (75 commits · measured 2026-09-26)
+### What the last alignment brought from the original (2026-09-27 · 75 commits)
 
-They land with the next alignment (a merge, never a rebase):
+Nothing is missing right now — `build-local` sits 0 behind. That alignment landed:
 
 - **Offline chat** (issue-99, #223/#227/#229): an offline copy of transcripts that survives account or dashboard switches, and saved rows that don't drop when a session closes.
 - **Media** (#195/#225/#226): full-screen previews with save and share; previews that are lighter on memory and the main thread.
