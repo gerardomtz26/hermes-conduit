@@ -376,7 +376,9 @@ struct ComposerBar: View {
 
             HStack(alignment: .bottom, spacing: 8) {
                 attachmentButton
-                voiceButton
+                if appState.showsComposerVoiceButton {
+                    voiceButton
+                }
 
                 ZStack(alignment: .topLeading) {
                     let currentEditorIdentity = editorIdentity
