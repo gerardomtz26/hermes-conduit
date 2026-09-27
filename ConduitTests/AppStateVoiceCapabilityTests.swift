@@ -220,10 +220,67 @@ final class AppStateVoiceCapabilityTests: XCTestCase {
         )
     }
 
+    // MARK: - Composer voice button visibility (#194)
+
+    func testComposerHidesVoiceButtonWhenVoiceWasNeverEnabled() {
+        let appState = makeAppState(snapshot: readySnapshot, isVoiceEnabled: false)
+
+        XCTAssertFalse(appState.showsComposerVoiceButton)
+    }
+
+    func testComposerShowsVoiceButtonWhenVoiceIsEnabled() {
+        let appState = makeAppState(snapshot: readySnapshot)
+
+        XCTAssertTrue(appState.showsComposerVoiceButton)
+    }
+
+    /// Enabled voice with a broken provider keeps the (disabled) button, so
+    /// the user can still see something needs fixing.
+    func testComposerKeepsVoiceButtonWhenEnabledVoiceIsUnavailable() {
+        let appState = makeAppState(snapshot: .unavailable)
+
+        XCTAssertFalse(appState.canStartVoiceConversation)
+        XCTAssertTrue(appState.showsComposerVoiceButton)
+    }
+
+    /// A reconnect resets `isVoiceEnabled` before capabilities reload; the
+    /// persisted preference keeps the button from blinking out meanwhile.
+    func testPersistedVoicePreferenceKeepsButtonThroughReconnectReset() async {
+        let appState = makeAppState(snapshot: readySnapshot, isVoiceEnabled: false)
+        let didEnable = await appState.setVoiceEnabled(true)
+        XCTAssertTrue(didEnable)
+
+        appState.installVoiceCapabilityStateForTesting(
+            bridge: DashboardTicketBridge(baseURL: "https://example.com"),
+            snapshot: .unavailable,
+            isVoiceEnabled: false
+        )
+
+        XCTAssertTrue(appState.showsComposerVoiceButton)
+    }
+
+    func testDisablingVoiceHidesComposerVoiceButton() async {
+        let appState = makeAppState(snapshot: readySnapshot, isVoiceEnabled: false)
+        _ = await appState.setVoiceEnabled(true)
+        _ = await appState.setVoiceEnabled(false)
+
+        XCTAssertFalse(appState.showsComposerVoiceButton)
+    }
+
+    private var readySnapshot: VoiceCapabilitySnapshot {
+        VoiceCapabilitySnapshot(
+            isGatewayConnected: true,
+            supportsTranscription: true,
+            supportsSpeech: true,
+            unavailableReason: nil
+        )
+    }
+
     private func makeAppState(
         snapshot: VoiceCapabilitySnapshot,
         transcriptionMode: VoiceTranscriptionMode = .hermes,
-        appleSpeechAvailability: AppleSpeechRecognitionAvailability = .ready(localeIdentifier: "en-US")
+        appleSpeechAvailability: AppleSpeechRecognitionAvailability = .ready(localeIdentifier: "en-US"),
+        isVoiceEnabled: Bool = true
     ) -> AppState {
         let suite = "AppStateVoiceCapabilityTests.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suite) else {
@@ -239,7 +296,7 @@ final class AppStateVoiceCapabilityTests: XCTestCase {
         appState.installVoiceCapabilityStateForTesting(
             bridge: DashboardTicketBridge(baseURL: "https://example.com"),
             snapshot: snapshot,
-            isVoiceEnabled: true,
+            isVoiceEnabled: isVoiceEnabled,
             transcriptionMode: transcriptionMode,
             appleSpeechAvailability: appleSpeechAvailability
         )

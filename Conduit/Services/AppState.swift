@@ -18177,6 +18177,16 @@ final class AppState: ObservableObject {
 
     var canStartVoiceConversation: Bool { voiceUnavailableReason == nil }
 
+    /// Whether the composer shows its voice button at all. Voice the user
+    /// never enabled for this profile is hidden so the text field gets the
+    /// width back (#194). Once enabled, the button stays and shows its
+    /// disabled state for transient or provider problems. The persisted
+    /// preference is consulted too, because `isVoiceEnabled` is reset while
+    /// a connection re-establishes and the button must not blink out then.
+    var showsComposerVoiceButton: Bool {
+        isVoiceEnabled || defaults.bool(forKey: voiceEnabledPreferenceKey(profile: activeProfile))
+    }
+
     /// TTS-only availability for read aloud: a connected gateway with voice
     /// enabled and a ready speech provider. Deliberately does not require
     /// transcription, mic permission, or Apple Speech — a profile with TTS
