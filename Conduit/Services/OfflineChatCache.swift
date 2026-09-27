@@ -110,6 +110,7 @@ struct OfflineCachedSession: Codable, Equatable, Identifiable {
 
     /// Relative to now when the row carried a machine-readable instant (the
     /// saved `updatedLabel` was formatted at save time and goes stale).
+    @MainActor
     func displayUpdatedLabel(now: Date = Date()) -> String {
         // Persisted input: anything outside 2000 ... now + 1 day is not a
         // real activity instant, so keep the saved label.
@@ -117,11 +118,20 @@ struct OfflineCachedSession: Codable, Equatable, Identifiable {
               lastActivityAt.isFinite,
               lastActivityAt >= 946_684_800,
               lastActivityAt <= now.timeIntervalSince1970 + 86_400 else { return updatedLabel }
+        return Self.relativeFormatter.localizedString(for: Date(timeIntervalSince1970: lastActivityAt), relativeTo: now)
+    }
+
+    /// One formatter for every saved row (the sidebar renders up to
+    /// `maxSessions` of them). Main-actor confined: formatters are not
+    /// thread-safe, and only the sidebar reads it. Its locale is the one
+    /// current at first use.
+    @MainActor
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
         formatter.dateTimeStyle = .named
         formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: Date(timeIntervalSince1970: lastActivityAt), relativeTo: now)
-    }
+        return formatter
+    }()
 
     func matches(_ identities: Set<String>) -> Bool {
         identities.contains(id) || !identities.isDisjoint(with: aliases)
@@ -240,14 +250,16 @@ final class OfflineChatCacheStore {
         guard !rows.isEmpty else { return }
         var snapshot = load(dashboardID: dashboardID, profile: profile)
             ?? OfflineChatSnapshot(lastSessionID: nil, sessions: [], transcripts: [])
-        let catalog = sessions.filter { $0.source != .cron && !$0.isArchived }
-        if !catalog.isEmpty {
-            snapshot.sessions = Array(catalog.prefix(Self.maxSessions).map(OfflineCachedSession.init))
-        }
+        let catalogRows = sessions
+            .filter { $0.source != .cron && !$0.isArchived }
+            .map(OfflineCachedSession.init)
         var allIdentities = identities
         if let sessionID { allIdentities.insert(sessionID) }
+        // Resolve against the FULL catalog (or the saved list when the live
+        // one is empty), before any cap can drop the conversation's row.
+        let resolutionRows = catalogRows.isEmpty ? snapshot.sessions : catalogRows
         guard let sessionID = sessionID
-            ?? snapshot.sessions.first(where: { $0.matches(allIdentities) })?.id else { return }
+            ?? resolutionRows.first(where: { $0.matches(allIdentities) })?.id else { return }
         if let row = snapshot.sessions.first(where: { $0.id == sessionID }) {
             allIdentities.formUnion(row.aliases)
         }
@@ -257,8 +269,45 @@ final class OfflineChatCacheStore {
             at: 0
         )
         snapshot.transcripts = Array(snapshot.transcripts.prefix(Self.maxTranscripts))
+        if !catalogRows.isEmpty {
+            // Every retained transcript (current conversation first) keeps a
+            // row to open it from, whatever its position in the catalog.
+            snapshot.sessions = Self.cappedSessions(
+                catalogRows,
+                keeping: snapshot.transcripts.map(\.sessionID),
+                previouslySaved: snapshot.sessions
+            )
+        }
         snapshot.lastSessionID = sessionID
         write(snapshot, dashboardID: dashboardID, profile: profile)
+    }
+
+    /// At most `maxSessions` rows. Slots are reserved first for the rows of
+    /// `keptSessionIDs` (the retained transcripts, current conversation
+    /// first) found in the live catalog or, failing that, in the previous
+    /// saved list; the rest are filled from the newest catalog rows. Catalog
+    /// rows keep catalog order, followed by reserved rows only the previous
+    /// saved list had. A retained transcript whose conversation appears in
+    /// either list therefore keeps a sidebar row to open it from.
+    private static func cappedSessions(
+        _ catalog: [OfflineCachedSession],
+        keeping keptSessionIDs: [String],
+        previouslySaved: [OfflineCachedSession]
+    ) -> [OfflineCachedSession] {
+        var selected = Set<String>()
+        var savedOnly: [OfflineCachedSession] = []
+        for id in keptSessionIDs where selected.count < maxSessions {
+            if catalog.contains(where: { $0.id == id }) {
+                selected.insert(id)
+            } else if let row = previouslySaved.first(where: { $0.id == id }) {
+                selected.insert(id)
+                savedOnly.append(row)
+            }
+        }
+        for row in catalog where selected.count < maxSessions {
+            selected.insert(row.id)
+        }
+        return catalog.filter { selected.contains($0.id) } + savedOnly
     }
 
     func removeDashboard(_ dashboardID: UUID) {
