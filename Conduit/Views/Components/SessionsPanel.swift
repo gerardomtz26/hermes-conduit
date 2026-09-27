@@ -82,6 +82,9 @@ struct SessionsPanel: View {
         // height) and collapses it back in on close. This is the whole
         // drop animation; the content transition above is only the fade.
         .matchedGeometryEffect(id: "bubble", in: namespace)
+        // Measured by SessionsPanelWidthUITests: the cap in MainView is
+        // one line and it silently vanished once already (build 164).
+        .accessibilityIdentifier("sessions.panel")
     }
 
     private var header: some View {

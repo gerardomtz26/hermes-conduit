@@ -219,9 +219,16 @@ struct MainView: View {
                     .padding(.bottom, 16)
                     // Cap AFTER the padding so the card itself is exactly
                     // panelWidth (380 - 24) and hangs from the leading edge.
+                    // THIS line is the whole difference between a side bar
+                    // and a full-screen card: without it the overlay
+                    // proposes the whole screen and the card fills it —
+                    // which is exactly what build 164 shipped by accident
+                    // (the morph deleted this line). It is pinned by
+                    // SessionsPanelWidthUITests.
                     // No transition here: SessionsPanel's own matched
                     // geometry (id "bubble") inflates the card out of the
                     // name's capsule — the bubble IS the first frame.
+                    .frame(maxWidth: SessionsPanel.panelWidth + 24, alignment: .leading)
                 }
                 .zIndex(2)
             }
