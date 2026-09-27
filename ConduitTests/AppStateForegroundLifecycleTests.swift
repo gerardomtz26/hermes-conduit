@@ -2459,20 +2459,22 @@ final class AppStateForegroundLifecycleTests: XCTestCase {
         ]
         for scenario in scenarios {
             let active = session("stored-a")
-            var resumeCount = 0
             var scheduledReconnects = 0
             let harness = makeHarness(
                 lifecycleOperations: ChatResumeLifecycleOperations(
                     connectClient: { _ in
                         if scenario.connectFails { throw URLError(.notConnectedToInternet) }
                     },
-                    loadCatalog: { _, _ in throw URLError(.notConnectedToInternet) },
+                    loadCatalog: { _, _ in
+                        XCTFail("An offline return must not reload the catalog (\(scenario.name))")
+                        throw URLError(.notConnectedToInternet)
+                    },
                     mintTicket: { _ in
                         if scenario.mintFails { throw URLError(.notConnectedToInternet) }
                         return "fresh-ticket"
                     },
                     openSession: { _, _, _ in
-                        resumeCount += 1
+                        XCTFail("An offline return must not resume (\(scenario.name))")
                         throw URLError(.notConnectedToInternet)
                     },
                     refreshContext: { _, _ in },
@@ -2500,12 +2502,13 @@ final class AppStateForegroundLifecycleTests: XCTestCase {
             harness.appState.handleScenePhase(.background)
             await runSceneActivation(harness)
 
-            XCTAssertEqual(resumeCount, 0, scenario.name)
             XCTAssertEqual(harness.appState.messages, visible, scenario.name)
             XCTAssertEqual(harness.appState.activeSessionId, active.id, scenario.name)
             XCTAssertNotNil(harness.appState.connection, scenario.name)
+            XCTAssertNotNil(harness.appState.client, scenario.name)
             XCTAssertFalse(harness.appState.showLogin, scenario.name)
             XCTAssertFalse(harness.appState.isConnected, scenario.name)
+            XCTAssertEqual(harness.appState.turnState, .reconnecting, scenario.name)
             XCTAssertEqual(scheduledReconnects, 1, scenario.name)
         }
     }
