@@ -1337,6 +1337,7 @@ private struct UserDocumentAttachmentChip: View {
     let attachment: Attachment
     let gatewayResolver: GatewayMediaDataURLResolver?
     @State private var loading = false
+    @State private var openTask: Task<Void, Never>?
 
     private var localFileURL: URL? {
         if let url = URL(string: attachment.uri), url.isFileURL {
@@ -1362,6 +1363,11 @@ private struct UserDocumentAttachmentChip: View {
         .padding(.vertical, 7)
         .background(Color.white.opacity(0.13), in: Capsule())
         .opensMediaPreview(open)
+        .onDisappear {
+            openTask?.cancel()
+            openTask = nil
+            loading = false
+        }
     }
 
     private func open() {
@@ -1371,12 +1377,15 @@ private struct UserDocumentAttachmentChip: View {
         }
         guard !loading, attachment.uri.hasPrefix("/"), let gatewayResolver else { return }
         loading = true
-        Task {
-            defer { loading = false }
-            guard let dataURL = await gatewayResolver.dataURL(for: attachment.uri),
-                  let data = DataURLLimits.decodeBase64DataURL(dataURL) else { return }
+        // Cancelled on disappear, so a slow fetch can't pop a preview over
+        // whatever screen the user moved on to.
+        openTask = Task {
+            let dataURL = await gatewayResolver.dataURL(for: attachment.uri)
+            guard !Task.isCancelled else { return }
+            loading = false
+            guard let dataURL else { return }
             MediaPreviewPresenter.shared.present(
-                data: data,
+                dataURL: dataURL,
                 filename: AttachmentPreviewFilename.make(name: attachment.name, uri: attachment.uri)
             )
         }

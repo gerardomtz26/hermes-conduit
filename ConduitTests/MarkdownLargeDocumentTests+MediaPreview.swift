@@ -67,6 +67,24 @@ extension MarkdownLargeDocumentTests {
         XCTAssertEqual(AttachmentPreviewFilename.make(name: "  ", uri: "/uploads/abc.png"), "abc.png")
     }
 
+    // MARK: - Content policy
+
+    func testMediaPreview_RefusesActiveWebContentByExtensionOrMIME() {
+        XCTAssertFalse(MediaPreviewPresenter.isPreviewable(filename: "/tmp/page.html", mimeType: nil))
+        XCTAssertFalse(MediaPreviewPresenter.isPreviewable(filename: "logo.SVG", mimeType: nil))
+        XCTAssertFalse(MediaPreviewPresenter.isPreviewable(filename: "report.pdf", mimeType: "text/html; charset=utf-8"))
+        XCTAssertTrue(MediaPreviewPresenter.isPreviewable(filename: "report.pdf", mimeType: "application/pdf"))
+        XCTAssertTrue(MediaPreviewPresenter.isPreviewable(filename: "clip.mp4", mimeType: nil))
+        XCTAssertNil(MarkdownParser.gatewayMediaPath("MEDIA: /tmp/page.html"))
+    }
+
+    func testMediaPreview_ReadsMIMETypeFromDataURLHeader() {
+        XCTAssertEqual(MediaPreviewPresenter.mimeType(ofDataURL: "data:Text/HTML;base64,PGI+"), "text/html")
+        XCTAssertEqual(MediaPreviewPresenter.mimeType(ofDataURL: "data:video/mp4;base64,AAAA"), "video/mp4")
+        XCTAssertNil(MediaPreviewPresenter.mimeType(ofDataURL: "data:;base64,AAAA"))
+        XCTAssertNil(MediaPreviewPresenter.mimeType(ofDataURL: "https://example.com/a.png"))
+    }
+
     func testMediaPreview_StageWritesBytesUnderOriginalNameInOwnDirectory() throws {
         let data = Data("hello".utf8)
         let staged = try XCTUnwrap(MediaPreviewPresenter.stage(data: data, filename: "/remote/dir/note.txt"))

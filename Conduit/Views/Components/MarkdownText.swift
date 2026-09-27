@@ -1654,6 +1654,7 @@ private struct RemoteMarkdownImage: View {
     @State private var gatewayImageData: Data?
     @State private var gatewayLoadFailed = false
     @State private var openingRemote = false
+    @State private var openTask: Task<Void, Never>?
 
     private var isGatewayMedia: Bool { url.hasPrefix("MEDIA:") }
     private var gatewayPath: String {
@@ -1696,6 +1697,11 @@ private struct RemoteMarkdownImage: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .onDisappear {
+            openTask?.cancel()
+            openTask = nil
+            openingRemote = false
+        }
         .task(id: url) {
             guard isGatewayMedia, gatewayFileKind == nil else { return }
             gatewayImage = nil
@@ -1754,8 +1760,11 @@ private struct RemoteMarkdownImage: View {
     private func openRemoteImage() {
         guard !openingRemote, let destination = WebFallbackImageDestination.resolve(url) else { return }
         openingRemote = true
-        Task {
+        // Cancelled on disappear, so a slow download can't pop a preview
+        // over whatever screen the user moved on to.
+        openTask = Task {
             _ = await MediaPreviewPresenter.shared.presentRemote(url: destination, fallbackName: alt.isEmpty ? "image" : alt)
+            guard !Task.isCancelled else { return }
             openingRemote = false
         }
     }
@@ -1771,6 +1780,7 @@ private struct GatewayMediaFileCard: View {
     let gatewayMediaDataURL: ((String) async -> String?)?
     @State private var loading = false
     @State private var failed = false
+    @State private var openTask: Task<Void, Never>?
 
     var body: some View {
         HStack(spacing: 12) {
@@ -1805,6 +1815,11 @@ private struct GatewayMediaFileCard: View {
         }
         .accessibilityElement(children: .combine)
         .opensMediaPreview(open)
+        .onDisappear {
+            openTask?.cancel()
+            openTask = nil
+            loading = false
+        }
     }
 
     private var displayName: String {
@@ -1815,11 +1830,14 @@ private struct GatewayMediaFileCard: View {
         guard !loading, let gatewayMediaDataURL else { return }
         loading = true
         failed = false
-        Task {
-            defer { loading = false }
-            guard let dataURL = await gatewayMediaDataURL(path),
-                  let data = DataURLLimits.decodeBase64DataURL(dataURL),
-                  MediaPreviewPresenter.shared.present(data: data, filename: path) else {
+        // Cancelled on disappear, so a slow fetch can't pop a preview over
+        // whatever screen the user moved on to.
+        openTask = Task {
+            let dataURL = await gatewayMediaDataURL(path)
+            guard !Task.isCancelled else { return }
+            loading = false
+            guard let dataURL,
+                  MediaPreviewPresenter.shared.present(dataURL: dataURL, filename: path) else {
                 failed = true
                 return
             }

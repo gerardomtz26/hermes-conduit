@@ -35,7 +35,7 @@ enum GatewayMediaKind: Equatable {
     static let videoExtensions: Set<String> = ["mp4", "mov", "m4v", "webm", "mkv", "avi"]
     static let audioExtensions: Set<String> = ["mp3", "m4a", "wav", "aac", "ogg", "oga", "opus", "flac", "caf", "aiff"]
     static let documentExtensions: Set<String> = [
-        "pdf", "txt", "md", "csv", "json", "rtf", "html",
+        "pdf", "txt", "md", "csv", "json", "rtf",
         "doc", "docx", "xls", "xlsx", "ppt", "pptx", "key", "pages", "numbers"
     ]
 
@@ -71,68 +71,100 @@ enum GatewayMediaKind: Equatable {
 }
 
 @MainActor
-final class MediaPreviewPresenter: NSObject {
+final class MediaPreviewPresenter {
     static let shared = MediaPreviewPresenter()
 
-    private struct Item {
+    /// One open preview. Each controller gets its own session (Quick Look
+    /// holds its data source weakly, so `sessions` keeps it alive), which
+    /// removes only its own staged directory when that controller closes.
+    private final class Session: NSObject, QLPreviewControllerDataSource, QLPreviewControllerDelegate {
         let url: URL
         let title: String
         /// Temporary directory created for this preview, removed on dismiss.
         let ownedDirectory: URL?
+        var onFinish: (@MainActor () -> Void)?
+
+        init(url: URL, title: String, ownedDirectory: URL?) {
+            self.url = url
+            self.title = title
+            self.ownedDirectory = ownedDirectory
+        }
+
+        func numberOfPreviewItems(in controller: QLPreviewController) -> Int { 1 }
+
+        func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem {
+            PreviewItem(url: url, title: title)
+        }
+
+        func previewController(_ controller: QLPreviewController, editingModeFor previewItem: QLPreviewItem) -> QLPreviewItemEditingMode {
+            .disabled
+        }
+
+        func previewControllerDidDismiss(_ controller: QLPreviewController) {
+            MediaPreviewPresenter.removeDirectory(ownedDirectory)
+            // Quick Look calls its delegate on the main thread.
+            MainActor.assumeIsolated {
+                onFinish?()
+                onFinish = nil
+            }
+        }
     }
 
-    private var item: Item?
+    private var sessions: [ObjectIdentifier: Session] = [:]
 
     /// Previews a file already on disk (a local attachment). The file is
     /// left in place afterwards.
     func present(fileURL: URL, title: String? = nil) {
-        show(Item(url: fileURL, title: title ?? fileURL.lastPathComponent, ownedDirectory: nil))
+        guard Self.isPreviewable(filename: fileURL.lastPathComponent, mimeType: nil) else { return }
+        show(Session(url: fileURL, title: title ?? fileURL.lastPathComponent, ownedDirectory: nil))
     }
 
     /// Previews in-memory bytes (a decoded gateway data URL or a download)
     /// under `filename`, so Save/Share keep the original name and type.
+    /// Active web content (HTML, SVG, XML) is refused rather than handed to
+    /// Quick Look's web renderer.
     @discardableResult
-    func present(data: Data, filename: String) -> Bool {
-        guard let staged = Self.stage(data: data, filename: filename) else { return false }
-        show(Item(url: staged.file, title: staged.file.lastPathComponent, ownedDirectory: staged.directory))
-        return true
+    func present(data: Data, filename: String, mimeType: String? = nil) -> Bool {
+        guard Self.isPreviewable(filename: filename, mimeType: mimeType),
+              let staged = Self.stage(data: data, filename: filename) else { return false }
+        return show(Session(url: staged.file, title: staged.file.lastPathComponent, ownedDirectory: staged.directory))
     }
 
-    /// Downloads a web image and previews it. Bounded by the same 16 MB
-    /// ceiling as gateway media so a hostile URL can't exhaust memory.
+    /// Previews a gateway `data:` URL, refusing active web content by its
+    /// declared MIME type as well as by `filename`.
+    @discardableResult
+    func present(dataURL: String, filename: String) -> Bool {
+        guard let data = DataURLLimits.decodeBase64DataURL(dataURL) else { return false }
+        return present(data: data, filename: filename, mimeType: Self.mimeType(ofDataURL: dataURL))
+    }
+
+    /// Downloads a web image and previews it. The body is streamed against
+    /// the same 16 MB ceiling as gateway media, so an oversized or endless
+    /// response is abandoned instead of being buffered whole.
     func presentRemote(url: URL, fallbackName: String) async -> Bool {
-        do {
-            let (data, response) = try await URLSession.shared.data(from: url)
-            guard !Task.isCancelled,
-                  !data.isEmpty,
-                  data.count <= DataURLLimits.maxDecodedBytes,
-                  (response as? HTTPURLResponse).map({ (200..<300).contains($0.statusCode) }) ?? true else { return false }
-            let name = Self.filename(for: url, response: response, fallback: fallbackName)
-            return present(data: data, filename: name)
-        } catch {
-            return false
-        }
+        guard let (data, response) = await Self.boundedDownload(url),
+              !Task.isCancelled else { return false }
+        let name = Self.filename(for: url, response: response, fallback: fallbackName)
+        return present(data: data, filename: name, mimeType: response.mimeType)
     }
 
     // MARK: - Presentation
 
-    private func show(_ newItem: Item) {
+    @discardableResult
+    private func show(_ session: Session) -> Bool {
         guard let presenter = Self.topViewController() else {
-            Self.removeDirectory(newItem.ownedDirectory)
-            return
+            Self.removeDirectory(session.ownedDirectory)
+            return false
         }
-        if let previous = item { Self.removeDirectory(previous.ownedDirectory) }
-        item = newItem
         let controller = QLPreviewController()
-        controller.dataSource = self
-        controller.delegate = self
+        let key = ObjectIdentifier(controller)
+        session.onFinish = { [weak self] in self?.sessions[key] = nil }
+        sessions[key] = session
+        controller.dataSource = session
+        controller.delegate = session
         controller.modalPresentationStyle = .fullScreen
         presenter.present(controller, animated: true)
-    }
-
-    private func finish() {
-        Self.removeDirectory(item?.ownedDirectory)
-        item = nil
+        return true
     }
 
     private static func topViewController() -> UIViewController? {
@@ -146,6 +178,54 @@ final class MediaPreviewPresenter: NSObject {
             top = presented
         }
         return top
+    }
+
+    // MARK: - Content policy
+
+    nonisolated static let blockedExtensions: Set<String> = [
+        "html", "htm", "xhtml", "xht", "svg", "svgz", "xml", "webarchive", "mht", "mhtml"
+    ]
+    nonisolated static let blockedMIMETypes: Set<String> = [
+        "text/html", "application/xhtml+xml", "image/svg+xml", "text/xml",
+        "application/xml", "application/x-webarchive", "multipart/related"
+    ]
+
+    /// False for content Quick Look would render as a web page.
+    nonisolated static func isPreviewable(filename: String, mimeType: String?) -> Bool {
+        let ext = (sanitizedFilename(filename) as NSString).pathExtension.lowercased()
+        if blockedExtensions.contains(ext) { return false }
+        if let mimeType {
+            let base = mimeType.split(separator: ";", maxSplits: 1).first.map(String.init) ?? mimeType
+            if blockedMIMETypes.contains(base.trimmingCharacters(in: .whitespaces).lowercased()) { return false }
+        }
+        return true
+    }
+
+    /// The MIME type in a `data:<type>;base64,` header, lowercased.
+    nonisolated static func mimeType(ofDataURL value: String) -> String? {
+        guard value.lowercased().hasPrefix("data:") else { return nil }
+        let header = value.dropFirst(5).prefix { $0 != ";" && $0 != "," }
+        let type = header.trimmingCharacters(in: .whitespaces).lowercased()
+        return type.isEmpty ? nil : type
+    }
+
+    // MARK: - Download
+
+    nonisolated static func boundedDownload(_ url: URL, limit: Int = DataURLLimits.maxDecodedBytes) async -> (Data, URLResponse)? {
+        do {
+            let (bytes, response) = try await URLSession.shared.bytes(from: url)
+            if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) { return nil }
+            if response.expectedContentLength > Int64(limit) { return nil }
+            var data = Data()
+            if response.expectedContentLength > 0 { data.reserveCapacity(Int(response.expectedContentLength)) }
+            for try await byte in bytes {
+                data.append(byte)
+                if data.count > limit { return nil }
+            }
+            return data.isEmpty ? nil : (data, response)
+        } catch {
+            return nil
+        }
     }
 
     // MARK: - Staging
@@ -193,26 +273,6 @@ final class MediaPreviewPresenter: NSObject {
     nonisolated static func removeDirectory(_ directory: URL?) {
         guard let directory else { return }
         try? FileManager.default.removeItem(at: directory)
-    }
-}
-
-extension MediaPreviewPresenter: QLPreviewControllerDataSource, QLPreviewControllerDelegate {
-    nonisolated func numberOfPreviewItems(in controller: QLPreviewController) -> Int {
-        MainActor.assumeIsolated { item == nil ? 0 : 1 }
-    }
-
-    nonisolated func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem {
-        MainActor.assumeIsolated {
-            PreviewItem(url: item?.url, title: item?.title)
-        }
-    }
-
-    nonisolated func previewControllerDidDismiss(_ controller: QLPreviewController) {
-        MainActor.assumeIsolated { finish() }
-    }
-
-    nonisolated func previewController(_ controller: QLPreviewController, editingModeFor previewItem: QLPreviewItem) -> QLPreviewItemEditingMode {
-        .disabled
     }
 }
 
