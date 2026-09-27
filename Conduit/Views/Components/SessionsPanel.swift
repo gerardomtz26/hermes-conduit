@@ -2,27 +2,31 @@
 //  SessionsPanel.swift
 //  Conduit
 //
-//  The sessions panel: the conversations menu presented as a full-surface
-//  overlay that grows OUT OF the conversation's name. Gerardo asked for
-//  this explicitly (2026-09-27): never a card dropped in the middle of the
-//  screen — tapping the name makes the panel appear as if it were unified
-//  with it, the title pill morphing into the panel's header.
+//  The sessions panel: a FLOATING SIDE PANEL that drops down out of the
+//  conversation's name. Gerardo's design (2026-09-27, second pass): not a
+//  full-surface layer — a Liquid Glass card anchored to the leading edge,
+//  its top flush with the name's row, growing from that corner with a
+//  spring while the conversation stays visible to the right of it.
 //
 //  The morph is classic matched geometry with exactly ONE of the pair
 //  present at any moment: MainView stops rendering the bar's pill while the
 //  panel is open, so whichever side exists is the geometry source and the
 //  animated flip carries the title's frame from one to the other.
 //
-//  Geometry twin of the pill: same font, and the header's paddings are
-//  chosen so the text lands exactly where it sat in the bar —
-//  12 (bar) + 12 (pill) = 24 leading, 10 top. That is what makes the
-//  morph read as one continuous object instead of a jump.
+//  Geometry twin of the pill: same font, and the paddings are chosen so the
+//  text lands exactly where it sat in the bar — panel margin 12 + header 12
+//  = 24 leading, 10 top. That is what makes the morph read as one
+//  continuous object instead of a jump.
 //
 
 import SwiftUI
 
 struct SessionsPanel: View {
-    @EnvironmentObject private var appState: AppState
+    /// One number tunes the card's width — the four drawer tabs need ~70
+    /// pt each, and the conversation name sits at x = 24 with the card
+    /// hanging 12 from the leading edge. Narrower (≈230) squeezes the tabs.
+    static let panelWidth: CGFloat = 320
+
     let namespace: Namespace.ID
     /// The same string the source pill showed (session title or room name).
     let title: String
@@ -30,23 +34,20 @@ struct SessionsPanel: View {
     let onClose: () -> Void
 
     var body: some View {
-        ZStack(alignment: .top) {
-            // One field for the whole panel: header and drawer share it, and
-            // it covers the floating bar underneath (the panel sits above
-            // the whole navigation stack).
-            ConduitBackdrop()
-                .ignoresSafeArea()
+        VStack(spacing: 0) {
+            header
 
-            VStack(spacing: 0) {
-                header
-                SidebarView(
-                    onRequestSettings: onRequestSettings,
-                    onClose: onClose,
-                    showsBackdrop: false
-                )
-            }
+            SidebarView(onRequestSettings: onRequestSettings, showsBackdrop: false)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .scrollContentBackground(.hidden)
         }
-        .transition(.opacity)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // Liquid Glass card: the conversation refracts through the panel
+        // instead of being covered by an opaque field — that is what makes
+        // it read as floating BESIDE the chat instead of replacing it.
+        .conduitGlassSurface(cornerRadius: 26, tint: .conduitAccent.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     private var header: some View {
@@ -76,9 +77,11 @@ struct SessionsPanel: View {
             // Same words the drawer's own close control always carried.
             .accessibilityLabel("Close sessions")
         }
-        .padding(.leading, 24)
-        .padding(.trailing, 14)
+        // 12 (card margin) + 12 = 24 leading — the pill's x in the bar —
+        // and 10 top, its top padding: the morph has to land in place.
+        .padding(.leading, 12)
+        .padding(.trailing, 10)
         .padding(.top, 10)
-        .padding(.bottom, 8)
+        .padding(.bottom, 6)
     }
 }

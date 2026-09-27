@@ -10,12 +10,8 @@ import SwiftUI
 struct SidebarView: View {
     @EnvironmentObject var appState: AppState
     let onRequestSettings: () -> Void
-    /// Set when the drawer lives inside `SessionsPanel` (an overlay, not a
-    /// sheet): the panel owns dismissal — the environment `dismiss` only
-    /// works when this view is presented as a sheet.
-    var onClose: (() -> Void)? = nil
-    /// The panel supplies the panel-wide backdrop; the standalone drawer
-    /// keeps its own.
+    /// The panel supplies the card's field; a standalone drawer would draw
+    /// its own.
     var showsBackdrop: Bool = true
     @AppStorage("conduit.sidebarTab") private var selectedTabRaw = SidebarTab.sessions.rawValue
 
@@ -24,7 +20,6 @@ struct SidebarView: View {
         set { selectedTabRaw = newValue.rawValue }
     }
     @State private var showProfilePicker = false
-    @Environment(\.dismiss) private var dismiss
 
     var body: some View {
         NavigationStack {
@@ -78,19 +73,9 @@ struct SidebarView: View {
                             .conduitGlassControl(cornerRadius: 18)
                             .accessibilityLabel("Settings")
 
-                            Button {
-                                if let onClose {
-                                    onClose()
-                                } else {
-                                    dismiss()
-                                }
-                            } label: {
-                                Image(systemName: "xmark")
-                                    .font(.system(size: 15, weight: .semibold))
-                                    .frame(width: 44, height: 44)
-                            }
-                            .conduitGlassControl(cornerRadius: 18)
-                            .accessibilityLabel("Close sessions")
+                            // No close X here: the panel's header owns
+                            // closing ("Close sessions" lives there now) —
+                            // two X buttons stacked would be noise.
                         }
                     }
 

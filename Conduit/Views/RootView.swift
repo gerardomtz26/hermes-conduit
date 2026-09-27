@@ -193,20 +193,38 @@ struct MainView: View {
             }
             .toolbar(.hidden, for: .navigationBar)
         }
-        // NOT a sheet: the sessions panel is a full-surface overlay that
-        // grows out of the conversation's name (matched geometry between the
-        // title pill and the panel header), so it never reads as a card
-        // dropped in the middle of the screen.
+        // NOT a sheet: a floating side panel that drops down out of the
+        // conversation's name (matched geometry between the title pill and
+        // the panel header), leaving the conversation visible to its right.
         .overlay {
             if appState.showSidebar {
-                SessionsPanel(
-                    namespace: sessionsMorph,
-                    title: panelTitle,
-                    onRequestSettings: presentSettingsFromDrawer,
-                    onClose: closeSessionsPanel
-                )
+                ZStack(alignment: .topLeading) {
+                    // Light scrim: the conversation stays visible beside the
+                    // card, and tapping anywhere outside closes the panel.
+                    Color.black.opacity(0.12)
+                        .ignoresSafeArea()
+                        .onTapGesture { closeSessionsPanel() }
+                        .transition(.opacity)
+
+                    SessionsPanel(
+                        namespace: sessionsMorph,
+                        title: panelTitle,
+                        onRequestSettings: presentSettingsFromDrawer,
+                        onClose: closeSessionsPanel
+                    )
+                    .padding(.leading, 12)
+                    .padding(.trailing, 12)
+                    .padding(.bottom, 16)
+                    // Cap AFTER the padding so the card itself is exactly
+                    // panelWidth (304 - 24) and hangs from the leading edge.
+                    .frame(maxWidth: SessionsPanel.panelWidth + 24, alignment: .leading)
+                    // The drop: the card grows down from the name's corner.
+                    .transition(
+                        .scale(scale: 0.92, anchor: .topLeading)
+                            .combined(with: .opacity)
+                    )
+                }
                 .zIndex(2)
-                .transition(.opacity)
             }
         }
     }

@@ -1188,7 +1188,14 @@ final class AppState: ObservableObject {
     /// no-op and the persistent column remains visible.
     func dismissSidebarDrawer() {
         guard showSidebar else { return }
-        showSidebar = false
+        // Animated at the single choke point: every session/bot/cron row
+        // closes the panel from here, and the panel must always morph BACK
+        // into the conversation's name instead of popping shut. The didSet
+        // side effects (streaming pause/resume) key on the value, which
+        // changes synchronously — the animation only affects presentation.
+        withAnimation(ConduitMotion.transition) {
+            showSidebar = false
+        }
     }
     @Published var showModelPicker = false
     @Published var showContextSheet = false
