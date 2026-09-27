@@ -117,11 +117,17 @@ struct OfflineCachedSession: Codable, Equatable, Identifiable {
               lastActivityAt.isFinite,
               lastActivityAt >= 946_684_800,
               lastActivityAt <= now.timeIntervalSince1970 + 86_400 else { return updatedLabel }
+        return Self.relativeFormatter.localizedString(for: Date(timeIntervalSince1970: lastActivityAt), relativeTo: now)
+    }
+
+    /// One formatter for every saved row (the sidebar renders up to
+    /// `maxSessions` of them); its locale follows the current locale.
+    private static let relativeFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
         formatter.dateTimeStyle = .named
         formatter.unitsStyle = .abbreviated
-        return formatter.localizedString(for: Date(timeIntervalSince1970: lastActivityAt), relativeTo: now)
-    }
+        return formatter
+    }()
 
     func matches(_ identities: Set<String>) -> Bool {
         identities.contains(id) || !identities.isDisjoint(with: aliases)
@@ -240,14 +246,19 @@ final class OfflineChatCacheStore {
         guard !rows.isEmpty else { return }
         var snapshot = load(dashboardID: dashboardID, profile: profile)
             ?? OfflineChatSnapshot(lastSessionID: nil, sessions: [], transcripts: [])
-        let catalog = sessions.filter { $0.source != .cron && !$0.isArchived }
-        if !catalog.isEmpty {
-            snapshot.sessions = Array(catalog.prefix(Self.maxSessions).map(OfflineCachedSession.init))
-        }
+        let catalogRows = sessions
+            .filter { $0.source != .cron && !$0.isArchived }
+            .map(OfflineCachedSession.init)
         var allIdentities = identities
         if let sessionID { allIdentities.insert(sessionID) }
+        // Resolve against the FULL catalog (or the saved list when the live
+        // one is empty), before any cap can drop the conversation's row.
+        let resolutionRows = catalogRows.isEmpty ? snapshot.sessions : catalogRows
         guard let sessionID = sessionID
-            ?? snapshot.sessions.first(where: { $0.matches(allIdentities) })?.id else { return }
+            ?? resolutionRows.first(where: { $0.matches(allIdentities) })?.id else { return }
+        if !catalogRows.isEmpty {
+            snapshot.sessions = Self.cappedSessions(catalogRows, keeping: sessionID)
+        }
         if let row = snapshot.sessions.first(where: { $0.id == sessionID }) {
             allIdentities.formUnion(row.aliases)
         }
@@ -259,6 +270,18 @@ final class OfflineChatCacheStore {
         snapshot.transcripts = Array(snapshot.transcripts.prefix(Self.maxTranscripts))
         snapshot.lastSessionID = sessionID
         write(snapshot, dashboardID: dashboardID, profile: profile)
+    }
+
+    /// The newest `maxSessions` rows, always including the recorded
+    /// conversation's row (it takes the last slot when it falls outside the
+    /// cap), so the saved transcript keeps a sidebar row to open it from.
+    static func cappedSessions(_ rows: [OfflineCachedSession], keeping sessionID: String) -> [OfflineCachedSession] {
+        var capped = Array(rows.prefix(maxSessions))
+        guard !capped.contains(where: { $0.id == sessionID }),
+              let kept = rows.first(where: { $0.id == sessionID }) else { return capped }
+        if capped.count == maxSessions { capped.removeLast() }
+        capped.append(kept)
+        return capped
     }
 
     func removeDashboard(_ dashboardID: UUID) {

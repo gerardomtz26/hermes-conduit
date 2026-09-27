@@ -38,6 +38,57 @@ final class OfflineChatCacheTests: XCTestCase {
         XCTAssertEqual(snapshot.sessions.map(\.id), ["stored-a"], "Cron rows stay out of the saved session list")
     }
 
+    /// A conversation outside the newest 60 catalog rows still gets a saved
+    /// row: without it the copy would show its transcript with no sidebar row
+    /// to highlight or reopen it from.
+    func testRecordedConversationKeepsItsRowPastTheSessionCap() throws {
+        let store = makeStore()
+        let dashboard = UUID()
+        let catalog = (0..<(OfflineChatCacheStore.maxSessions + 10)).map { session("s\($0)") }
+        let old = "s\(OfflineChatCacheStore.maxSessions + 5)"
+
+        store.record(
+            dashboardID: dashboard,
+            profile: "default",
+            sessionID: old,
+            title: "Old",
+            messages: [ChatMessage(id: "m", role: .user, content: "hi", timestamp: "1")],
+            sessions: catalog
+        )
+
+        let snapshot = try XCTUnwrap(store.load(dashboardID: dashboard, profile: "default"))
+        XCTAssertEqual(snapshot.sessions.count, OfflineChatCacheStore.maxSessions)
+        XCTAssertEqual(snapshot.sessions.last?.id, old)
+        XCTAssertEqual(snapshot.sessions.first?.id, "s0")
+        XCTAssertNotNil(snapshot.transcript(for: old))
+        XCTAssertTrue(snapshot.sessions.contains { $0.id == snapshot.lastSessionID })
+    }
+
+    func testRecordedConversationPastTheCapIsResolvedFromItsAlias() throws {
+        let store = makeStore()
+        let dashboard = UUID()
+        var catalog = (0..<(OfflineChatCacheStore.maxSessions + 2)).map { session("s\($0)") }
+        catalog[OfflineChatCacheStore.maxSessions + 1] = {
+            var row = session("runtime-late")
+            row.storedSessionId = "stored-late"
+            return row
+        }()
+
+        store.record(
+            dashboardID: dashboard,
+            profile: "default",
+            sessionID: nil,
+            identities: ["runtime-late"],
+            title: "Late",
+            messages: [ChatMessage(id: "m", role: .user, content: "hi", timestamp: "1")],
+            sessions: catalog
+        )
+
+        let snapshot = try XCTUnwrap(store.load(dashboardID: dashboard, profile: "default"))
+        XCTAssertEqual(snapshot.lastSessionID, "stored-late")
+        XCTAssertTrue(snapshot.sessions.contains { $0.id == "stored-late" })
+    }
+
     func testRecentTranscriptsAreBoundedMostRecentFirst() throws {
         let store = makeStore()
         let dashboard = UUID()
