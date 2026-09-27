@@ -64,6 +64,47 @@ final class OfflineChatCacheTests: XCTestCase {
         XCTAssertTrue(snapshot.sessions.contains { $0.id == snapshot.lastSessionID })
     }
 
+    /// CodeRabbit on #229: recording s65 then s0 must not drop s65's row —
+    /// every retained transcript keeps its saved row.
+    func testEveryRetainedTranscriptKeepsItsRowPastTheSessionCap() throws {
+        let store = makeStore()
+        let dashboard = UUID()
+        let catalog = (0..<(OfflineChatCacheStore.maxSessions + 10)).map { session("s\($0)") }
+        let row = [ChatMessage(id: "m", role: .user, content: "hi", timestamp: "1")]
+
+        for id in ["s65", "s62", "s0"] {
+            store.record(dashboardID: dashboard, profile: "default", sessionID: id, title: id, messages: row, sessions: catalog)
+        }
+
+        let snapshot = try XCTUnwrap(store.load(dashboardID: dashboard, profile: "default"))
+        XCTAssertEqual(snapshot.sessions.count, OfflineChatCacheStore.maxSessions)
+        for transcript in snapshot.transcripts {
+            XCTAssertTrue(snapshot.sessions.contains { $0.id == transcript.sessionID },
+                          "\(transcript.sessionID) lost its saved row")
+        }
+        XCTAssertEqual(snapshot.transcripts.map(\.sessionID), ["s0", "s62", "s65"])
+        // Catalog order is kept: the reserved rows sit after the newest ones.
+        XCTAssertEqual(snapshot.sessions.first?.id, "s0")
+        XCTAssertEqual(Array(snapshot.sessions.suffix(2).map(\.id)), ["s62", "s65"])
+    }
+
+    /// A retained transcript whose conversation the live catalog no longer
+    /// lists (but the previous saved list did) keeps its saved row.
+    func testRetainedTranscriptKeepsItsRowFromThePreviousSavedList() throws {
+        let store = makeStore()
+        let dashboard = UUID()
+        let row = [ChatMessage(id: "m", role: .user, content: "hi", timestamp: "1")]
+        store.record(dashboardID: dashboard, profile: "default", sessionID: "gone", title: "Gone",
+                     messages: row, sessions: [session("gone"), session("a")])
+
+        store.record(dashboardID: dashboard, profile: "default", sessionID: "a", title: "A",
+                     messages: row, sessions: [session("a"), session("b")])
+
+        let snapshot = try XCTUnwrap(store.load(dashboardID: dashboard, profile: "default"))
+        XCTAssertEqual(snapshot.transcripts.map(\.sessionID), ["a", "gone"])
+        XCTAssertEqual(snapshot.sessions.map(\.id), ["a", "b", "gone"])
+    }
+
     func testRecordedConversationPastTheCapIsResolvedFromItsAlias() throws {
         let store = makeStore()
         let dashboard = UUID()

@@ -110,6 +110,7 @@ struct OfflineCachedSession: Codable, Equatable, Identifiable {
 
     /// Relative to now when the row carried a machine-readable instant (the
     /// saved `updatedLabel` was formatted at save time and goes stale).
+    @MainActor
     func displayUpdatedLabel(now: Date = Date()) -> String {
         // Persisted input: anything outside 2000 ... now + 1 day is not a
         // real activity instant, so keep the saved label.
@@ -121,7 +122,10 @@ struct OfflineCachedSession: Codable, Equatable, Identifiable {
     }
 
     /// One formatter for every saved row (the sidebar renders up to
-    /// `maxSessions` of them); its locale follows the current locale.
+    /// `maxSessions` of them). Main-actor confined: formatters are not
+    /// thread-safe, and only the sidebar reads it. Its locale is the one
+    /// current at first use.
+    @MainActor
     private static let relativeFormatter: RelativeDateTimeFormatter = {
         let formatter = RelativeDateTimeFormatter()
         formatter.dateTimeStyle = .named
@@ -256,9 +260,6 @@ final class OfflineChatCacheStore {
         let resolutionRows = catalogRows.isEmpty ? snapshot.sessions : catalogRows
         guard let sessionID = sessionID
             ?? resolutionRows.first(where: { $0.matches(allIdentities) })?.id else { return }
-        if !catalogRows.isEmpty {
-            snapshot.sessions = Self.cappedSessions(catalogRows, keeping: sessionID)
-        }
         if let row = snapshot.sessions.first(where: { $0.id == sessionID }) {
             allIdentities.formUnion(row.aliases)
         }
@@ -268,20 +269,45 @@ final class OfflineChatCacheStore {
             at: 0
         )
         snapshot.transcripts = Array(snapshot.transcripts.prefix(Self.maxTranscripts))
+        if !catalogRows.isEmpty {
+            // Every retained transcript (current conversation first) keeps a
+            // row to open it from, whatever its position in the catalog.
+            snapshot.sessions = Self.cappedSessions(
+                catalogRows,
+                keeping: snapshot.transcripts.map(\.sessionID),
+                previouslySaved: snapshot.sessions
+            )
+        }
         snapshot.lastSessionID = sessionID
         write(snapshot, dashboardID: dashboardID, profile: profile)
     }
 
-    /// The newest `maxSessions` rows, always including the recorded
-    /// conversation's row (it takes the last slot when it falls outside the
-    /// cap), so the saved transcript keeps a sidebar row to open it from.
-    static func cappedSessions(_ rows: [OfflineCachedSession], keeping sessionID: String) -> [OfflineCachedSession] {
-        var capped = Array(rows.prefix(maxSessions))
-        guard !capped.contains(where: { $0.id == sessionID }),
-              let kept = rows.first(where: { $0.id == sessionID }) else { return capped }
-        if capped.count == maxSessions { capped.removeLast() }
-        capped.append(kept)
-        return capped
+    /// At most `maxSessions` rows. Slots are reserved first for the rows of
+    /// `keptSessionIDs` (the retained transcripts, current conversation
+    /// first) found in the live catalog or, failing that, in the previous
+    /// saved list; the rest are filled from the newest catalog rows. Catalog
+    /// rows keep catalog order, followed by reserved rows only the previous
+    /// saved list had. A retained transcript whose conversation appears in
+    /// either list therefore keeps a sidebar row to open it from.
+    private static func cappedSessions(
+        _ catalog: [OfflineCachedSession],
+        keeping keptSessionIDs: [String],
+        previouslySaved: [OfflineCachedSession]
+    ) -> [OfflineCachedSession] {
+        var selected = Set<String>()
+        var savedOnly: [OfflineCachedSession] = []
+        for id in keptSessionIDs where selected.count < maxSessions {
+            if catalog.contains(where: { $0.id == id }) {
+                selected.insert(id)
+            } else if let row = previouslySaved.first(where: { $0.id == id }) {
+                selected.insert(id)
+                savedOnly.append(row)
+            }
+        }
+        for row in catalog where selected.count < maxSessions {
+            selected.insert(row.id)
+        }
+        return catalog.filter { selected.contains($0.id) } + savedOnly
     }
 
     func removeDashboard(_ dashboardID: UUID) {
