@@ -214,6 +214,70 @@ final class AppStateChatResumeTests: XCTestCase {
         XCTAssertEqual(harness.appState.activeSessionId, "stored-newest")
     }
 
+    /// Self-improvement reviews arrive only as `review.summary` stream events
+    /// keyed by the RUNTIME session id, and with Hermes' default notification
+    /// mode every one reads "Memory updated". Each review must keep its own
+    /// row, and the rows must survive a resume that opens the conversation
+    /// under its durable id.
+    func testRepeatedReviewSummariesSurviveResumeUnderTheDurableID() {
+        let suite = "AppStateChatResumeTests.reviewSummaries.\(UUID().uuidString)"
+        guard let defaults = UserDefaults(suiteName: suite) else {
+            return XCTFail("Failed to create test UserDefaults suite")
+        }
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suite)
+        }
+        let row = session("stored-a", alternateIDs: ["runtime-1"])
+        let source = AppState(
+            defaults: defaults,
+            loadSavedConnection: false,
+            clearSessionPresentationCache: {},
+            sessionPresentationCache: SessionPresentationCache(defaults: defaults)
+        )
+        source.sessions = [row]
+        source.activeSessionId = row.id
+        let activity = ReviewActivity(summary: "Memory updated", details: nil, fullSessionId: nil)
+
+        source.handleStreamEvent(.reviewSummary(sessionId: "runtime-1", activity: activity))
+        source.messages.append(ChatMessage(id: "assistant-2", role: .assistant, content: "Next turn", timestamp: "2"))
+        source.handleStreamEvent(.reviewSummary(sessionId: "runtime-1", activity: activity))
+        XCTAssertEqual(source.messages.filter { $0.review == activity }.count, 2)
+
+        let resumed = AppState(
+            defaults: defaults,
+            loadSavedConnection: false,
+            clearSessionPresentationCache: {},
+            sessionPresentationCache: SessionPresentationCache(defaults: defaults)
+        )
+        resumed.sessions = [row]
+        XCTAssertTrue(resumed.applyChatResume(SessionResumeResult(
+            sessionId: row.id,
+            messages: [],
+            snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+        )))
+        XCTAssertEqual(
+            resumed.messages.filter { $0.review == activity }.count,
+            2,
+            "both reviews come back under the durable id"
+        )
+
+        // An older gateway that persisted one of them accounts for exactly
+        // one cached record; the other identically worded review stays.
+        let persisted = AppState(
+            defaults: defaults,
+            loadSavedConnection: false,
+            clearSessionPresentationCache: {},
+            sessionPresentationCache: SessionPresentationCache(defaults: defaults)
+        )
+        persisted.sessions = [row]
+        XCTAssertTrue(persisted.applyChatResume(SessionResumeResult(
+            sessionId: row.id,
+            messages: [ChatMessage(id: "row-7", role: .system, content: "Memory updated", timestamp: "1", review: activity)],
+            snapshot: SessionRuntimeSnapshot(object: ["running": .bool(false)])
+        )))
+        XCTAssertEqual(persisted.messages.filter { $0.review == activity }.count, 2)
+    }
+
     func testFreshResumeRestoresInFlightToolAndReconcilesItsCompletion() {
         let suite = "AppStateChatResumeTests.inFlightTool.\(UUID().uuidString)"
         guard let defaults = UserDefaults(suiteName: suite) else {
@@ -5834,6 +5898,7 @@ final class AppStateChatResumeTests: XCTestCase {
     /// connect task has returned with the scene still inactive; the caller
     /// owns the activation and its assertions.
     private func startConnectInterruptedBySceneDeactivation(
+        behavior: ChatResumeBehavior = .continueWhereLeftOff,
         deactivatingBeforeHandshake: Bool = true,
         configure: (OwedBootstrapCounters) -> Void = { _ in },
         onHarness: (AppState) -> Void = { _ in }
@@ -5847,6 +5912,7 @@ final class AppStateChatResumeTests: XCTestCase {
         let socket = ClarifyFakeSocket()
         transport.nextSocket = { socket }
         let harness = makeHarness(
+            behavior: behavior,
             reconnectScheduler: scheduler.schedule(after:operation:),
             lifecycleOperations: ChatResumeLifecycleOperations(
                 connectClient: { client in
@@ -5986,6 +6052,51 @@ final class AppStateChatResumeTests: XCTestCase {
         )
     }
 
+    /// #99 × #208/#209: a cold launch showing the read-only offline copy
+    /// whose connect was interrupted by scene deactivation keeps the copy up
+    /// while the bootstrap is owed, then the owed bootstrap selects the
+    /// conversation from the resume store (never from the copy) and its
+    /// transcript replaces the copy wholesale.
+    func testOwedBootstrapReplacesOfflineCopyWithoutUsingItAsEvidence() async throws {
+        let dashboard = UUID()
+        var revisionAfterPresenting: UInt64 = 0
+        let fixture = await startConnectInterruptedBySceneDeactivation(onHarness: { appState in
+            appState.offlineChatCacheForTesting.record(
+                dashboardID: dashboard,
+                profile: "default",
+                sessionID: "cached-other",
+                title: "Cached",
+                messages: [ChatMessage(id: "cached-1", role: .user, content: "Cached", timestamp: "1")],
+                sessions: [self.session("cached-other")]
+            )
+            appState.presentOfflineChatIfAvailable(dashboardID: dashboard)
+            revisionAfterPresenting = appState.chatTranscriptRevision
+        })
+        let harness = fixture.harness
+        let counters = fixture.counters
+
+        // Bootstrap owed: the catalog never loaded, so the copy is still the
+        // only thing on screen and nothing live was derived from it.
+        XCTAssertEqual(counters.catalogLoads, 0)
+        XCTAssertNotNil(harness.appState.offlineChatPresentation)
+        XCTAssertTrue(harness.appState.messages.isEmpty)
+        XCTAssertTrue(harness.appState.sessions.isEmpty)
+        XCTAssertEqual(harness.appState.chatTranscriptRevision, revisionAfterPresenting)
+
+        if let activation = harness.appState.handleScenePhase(.active) {
+            await activation.value
+        }
+
+        XCTAssertEqual(counters.catalogLoads, 1)
+        XCTAssertEqual(counters.openedSessionIDs, [fixture.saved.id],
+                       "The resume store picks the conversation; the offline copy's last session is not evidence")
+        XCTAssertEqual(harness.appState.activeSessionId, fixture.saved.id)
+        XCTAssertNil(harness.appState.offlineChatPresentation)
+        XCTAssertEqual(harness.appState.messages.map(\.id), ["100", "101"])
+        XCTAssertEqual(harness.appState.sessions.map(\.id), [fixture.saved.id])
+        XCTAssertEqual(harness.appState.turnState, .idle)
+    }
+
     func testOwedBootstrapIsConsumedOnceThenForegroundStaysObservational() async {
         let fixture = await startConnectInterruptedBySceneDeactivation()
         let harness = fixture.harness
@@ -6103,7 +6214,15 @@ final class AppStateChatResumeTests: XCTestCase {
         // user types (explicit ownership of the visible conversation) and
         // then the scene deactivates, so connect returns with the bootstrap
         // still owed.
+        //
+        // "Latest activity" makes the two purposes pick different rows:
+        // `.automaticReturn` jumps to the newest row, while `.preserveCurrent`
+        // keeps the conversation connect restored from the saved reference —
+        // the one on screen, which the user typed into. Under "continue where
+        // I left off" both purposes pick the saved session, so the test could
+        // not tell a replayed automatic return from a preserved conversation.
         let fixture = await startConnectInterruptedBySceneDeactivation(
+            behavior: .latestActivity,
             deactivatingBeforeHandshake: false
         ) { counters in
             counters.leadingCatalogRows = [newest]
@@ -6118,19 +6237,24 @@ final class AppStateChatResumeTests: XCTestCase {
         let counters = fixture.counters
         XCTAssertTrue(counters.catalogLoadHooks.isEmpty, "The connect's own sync must have reached the catalog")
         XCTAssertTrue(counters.openedSessionIDs.isEmpty)
+        XCTAssertEqual(
+            harness.appState.activeSessionId, fixture.saved.id,
+            "Connect restores the saved conversation as the visible one"
+        )
 
         if let activation = harness.appState.handleScenePhase(.active) {
             await activation.value
         }
 
-        // The owed sync preserves the visible conversation (none yet, so the
-        // newest row) instead of replaying the automatic return to the saved
-        // session the user moved away from.
+        // The owed sync preserves the visible conversation the user typed
+        // into instead of replaying the automatic return, which would jump
+        // to the newest row.
         XCTAssertFalse(
-            counters.openedSessionIDs.contains(fixture.saved.id),
+            counters.openedSessionIDs.contains(newest.id),
             "An owed bootstrap must not replay .automaticReturn after the user took ownership"
         )
-        XCTAssertEqual(counters.openedSessionIDs, [newest.id])
+        XCTAssertEqual(counters.openedSessionIDs, [fixture.saved.id])
+        XCTAssertEqual(harness.appState.activeSessionId, fixture.saved.id)
     }
 
     func testConnectSyncThatPublishedTheCatalogIsNotReplayedAfterDeactivation() async {
@@ -6369,8 +6493,7 @@ private final class OwedBootstrapCounters {
     var probes = 0
     /// Run in order, one inside each catalog load, until exhausted.
     var catalogLoadHooks: [@MainActor () throws -> Void] = []
-    /// Catalog rows listed ahead of the saved session (the newest-first
-    /// fallback a `.preserveCurrent` sync with no visible chat picks).
+    /// Catalog rows prepended ahead of the saved session.
     var leadingCatalogRows: [SessionSummary] = []
 }
 

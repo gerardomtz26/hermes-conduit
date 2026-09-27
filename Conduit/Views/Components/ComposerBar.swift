@@ -186,6 +186,12 @@ struct ComposerBar: View {
         }
     }
 
+    /// Roster bots matching a trailing `@query`, while the editor has focus.
+    private var mentionCandidates: [MentionAutocomplete.Candidate] {
+        guard isFocused, let query = MentionAutocomplete.activeQuery(in: text) else { return [] }
+        return MentionAutocomplete.filter(appState.composerMentionCandidates, query: query)
+    }
+
     private var action: ComposerAction {
         appState.composerAction(hasText: hasText, hasAttachments: !attachments.isEmpty)
     }
@@ -359,9 +365,17 @@ struct ComposerBar: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
+            if !isShowingSlashSuggestions && !mentionCandidates.isEmpty {
+                MentionSuggestionList(candidates: mentionCandidates) { candidate in
+                    replaceComposerText(MentionAutocomplete.completing(text, with: candidate))
+                }
+                .padding(.horizontal, 10)
+                .padding(.bottom, 4)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
+
             HStack(alignment: .bottom, spacing: 8) {
                 attachmentButton
-                voiceButton
 
                 ZStack(alignment: .topLeading) {
                     let currentEditorIdentity = editorIdentity
@@ -404,7 +418,7 @@ struct ComposerBar: View {
                 }
                 .animation(ConduitMotion.response, value: isFocused)
 
-                composerAction
+                trailingSlot
             }
             .padding(10)
         }
@@ -574,13 +588,40 @@ struct ComposerBar: View {
         .photosPicker(isPresented: $showAttachmentMenu, selection: $photoItem)
     }
 
+    /// What the single trailing slot of the input row holds.
+    enum TrailingControl: Equatable {
+        case voice
+        case action
+    }
+
+    /// Mic and send share one trailing slot, like Messages (#194): with
+    /// nothing to send the slot offers voice (when it's enabled for the
+    /// profile), and any sendable draft or live turn swaps it for the
+    /// action button. The slot itself never disappears, so the field keeps
+    /// its width as the first character is typed.
+    static func trailingControl(action: ComposerAction, showsVoiceButton: Bool) -> TrailingControl {
+        action == .unavailable && showsVoiceButton ? .voice : .action
+    }
+
     @ViewBuilder
-    private var composerAction: some View {
+    private var trailingSlot: some View {
+        let control = Self.trailingControl(
+            action: action,
+            showsVoiceButton: appState.showsComposerVoiceButton
+        )
         if #available(iOS 26.0, *) {
-            composerActionButton
+            trailingControlButton(control)
                 .glassEffectID("composer-action", in: glassNamespace)
         } else {
-            composerActionButton
+            trailingControlButton(control)
+        }
+    }
+
+    @ViewBuilder
+    private func trailingControlButton(_ control: TrailingControl) -> some View {
+        switch control {
+        case .voice: voiceButton
+        case .action: composerActionButton
         }
     }
 
