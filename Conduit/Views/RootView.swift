@@ -15,7 +15,10 @@ struct RootView: View {
 
     var body: some View {
         ZStack {
-            if appState.showLogin || appState.connection == nil {
+            // A cold launch that could not reach the server yet still shows
+            // the app shell over the read-only saved copy (#99).
+            if appState.showLogin
+                || (appState.connection == nil && appState.offlineChatPresentation == nil) {
                 LoginView()
                     .transition(.opacity)
             } else {

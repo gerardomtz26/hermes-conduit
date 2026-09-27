@@ -212,6 +212,16 @@ struct ChatView: View {
                     )
                 )
             }
+            // The read-only saved copy (#99) sits OVER the live scroll view
+            // instead of feeding it: the live view stays mounted with the
+            // same empty transcript a cold launch always had, so its viewport
+            // ownership, restoration, and follow logic are untouched. The
+            // first real transcript clears the copy in the same update.
+            .overlay {
+                if appState.messages.isEmpty, let offline = appState.offlineChatPresentation {
+                    OfflineChatTranscriptView(presentation: offline)
+                }
+            }
 
             // Composer + control bar
             ComposerBar()
@@ -252,7 +262,7 @@ struct ChatView: View {
                     transcriptTopBackfillControl
                 }
 
-                if appState.messages.isEmpty {
+                if appState.messages.isEmpty && appState.offlineChatPresentation == nil {
                     EmptyChatState().padding(.top, 60)
                 }
 
@@ -1514,8 +1524,8 @@ struct AssistantMessageActions: View {
         }
         .buttonStyle(.plain)
         .foregroundStyle(.secondary)
-        .disabled(appState.isBusy || appState.isBranchingChat)
-        .opacity(appState.isBusy || appState.isBranchingChat ? 0.45 : 1)
+        .disabled(appState.isBusy || appState.isBranchingChat || appState.offlineChatPresentation != nil)
+        .opacity(appState.isBusy || appState.isBranchingChat || appState.offlineChatPresentation != nil ? 0.45 : 1)
         .accessibilityLabel("Branch from this response")
     }
 

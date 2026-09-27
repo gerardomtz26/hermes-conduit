@@ -272,6 +272,15 @@ struct SessionList: View {
             List {
                 if showingProjects {
                     projectContent
+                } else if appState.sessions.isEmpty, let offline = appState.offlineChatPresentation {
+                    // No live catalog yet: list the saved session list (#99).
+                    // Read-only — only conversations with a saved transcript
+                    // open, and they open inside the offline copy.
+                    Section("Saved on this device") {
+                        ForEach(offline.snapshot.sessions) { session in
+                            offlineSessionRow(session, presentation: offline)
+                        }
+                    }
                 } else if displayedSessions.isEmpty {
                     ContentUnavailableView(
                         selectedSource == nil ? AppLocalization.string("No Sessions") : AppLocalization.string("No \(selectedSource!.label) Sessions"),
@@ -454,6 +463,32 @@ struct SessionList: View {
                 .background(selectedSource == source ? Color.conduitAccent : Color.primary.opacity(0.07), in: Capsule())
         }
         .buttonStyle(.plain)
+    }
+
+    private func offlineSessionRow(
+        _ session: OfflineCachedSession,
+        presentation: OfflineChatPresentation
+    ) -> some View {
+        let isSaved = presentation.snapshot.transcript(for: session.id) != nil
+        let isDisplayed = presentation.displayedSessionID == session.id
+        return Button {
+            Haptics.selection()
+            appState.showOfflineCachedSession(session.id)
+            appState.dismissSidebarDrawer()
+        } label: {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(session.title)
+                    .font(.subheadline.weight(isDisplayed ? .semibold : .regular))
+                    .lineLimit(1)
+                Text(isSaved ? session.updatedLabel : AppLocalization.string("Not saved offline"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .buttonStyle(.plain)
+        .disabled(!isSaved)
+        .opacity(isSaved ? 1 : 0.5)
     }
 
     private func sessionRow(_ session: SessionSummary) -> some View {
