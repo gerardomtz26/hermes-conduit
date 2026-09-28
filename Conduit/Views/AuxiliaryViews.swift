@@ -45,8 +45,7 @@ struct ContextSheet: View {
                         Text("\(String(Int(appState.runtime.contextPercent.rounded())))%")
                             .font(.caption.monospacedDigit().weight(.semibold))
                     }
-                    ProgressView(value: appState.runtime.contextPercent, total: 100)
-                        .tint(.conduitAccent)
+                    usageCompositionBar
                 }
                 .padding(.top, 4)
             }
@@ -56,7 +55,7 @@ struct ContextSheet: View {
                     ForEach(breakdown.categories, id: \.id) { category in
                         HStack(spacing: 10) {
                             Circle()
-                                .fill(colorFor(category.color))
+                                .fill(colorForCategory(category))
                                 .frame(width: 9, height: 9)
                             Text(category.label)
                             Spacer()
@@ -81,6 +80,61 @@ struct ContextSheet: View {
             appState.applyContextBreakdown(loaded)
         } catch {
             // Context detail is supplementary to the live ring in the composer.
+        }
+    }
+
+    /// The usage bar AS the composition: one segment per category, sized
+    /// by its share of the window and colored by what it is (Gerardo,
+    /// build 169: «diferentes colores dependiendo lo que ocupa lugar»).
+    /// Falls back to the single accent bar until the breakdown arrives.
+    private var usageCompositionBar: some View {
+        GeometryReader { geo in
+            let capacity = max(breakdown?.contextMax ?? 0, appState.runtime.contextMax, 1)
+            ZStack(alignment: .leading) {
+                Capsule()
+                    .fill(Color.primary.opacity(0.10))
+                if let breakdown {
+                    HStack(spacing: 1.5) {
+                        ForEach(breakdown.categories.filter { $0.tokens > 0 }, id: \.id) { category in
+                            colorForCategory(category)
+                                .frame(
+                                    width: max(
+                                        0,
+                                        geo.size.width * Double(category.tokens) / Double(capacity)
+                                    )
+                                )
+                        }
+                    }
+                    // Cropped to the track: a gateway whose categories sum
+                    // past capacity trims at the tail instead of widening.
+                    .clipShape(Capsule())
+                } else {
+                    Capsule()
+                        .fill(Color.conduitAccent)
+                        .frame(width: geo.size.width * appState.runtime.contextPercent / 100)
+                }
+            }
+        }
+        .frame(height: 6)
+    }
+
+    /// Keyed by the STABLE category id: the gateway ships `color` as the
+    /// dashboard's CSS custom property ("var(--context-usage-system)"),
+    /// which the plain-name switch below NEVER matched — every dot fell
+    /// through to conduitAccent and the whole panel read as one color
+    /// (Gerardo's screenshot, build 168). The name switch stays for
+    /// gateways that send real color words.
+    private func colorForCategory(_ category: (id: String, label: String, tokens: Int, color: String)) -> Color {
+        switch category.id {
+        case "system_prompt": return .blue
+        case "tool_definitions": return .cyan
+        case "rules": return .purple
+        case "skills": return .green
+        case "mcp": return .indigo
+        case "subagent_definitions": return .orange
+        case "memory": return .pink
+        case "conversation": return .yellow
+        default: return colorFor(category.color)
         }
     }
 

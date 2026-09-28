@@ -118,10 +118,11 @@ struct SessionsPanel: View {
             .accessibilityLabel("Close sessions")
         }
         // 12 (card margin) + 12 = 24 leading — the pill's x in the bar —
-        // and 10 top, its top padding: the morph has to land in place.
+        // and 12 top: with the pill now 40 pt tall its centered footnote
+        // text starts at ≈12, so the morph lands in place (build 169).
         .padding(.leading, 12)
         .padding(.trailing, 10)
-        .padding(.top, 10)
+        .padding(.top, 12)
         .padding(.bottom, 6)
     }
 }

@@ -265,7 +265,9 @@ struct GroupChatTitlePill: View {
             VStack(alignment: .leading, spacing: 1) {
                 Button(action: onOpenMenu) {
                     Text(surface?.room.name ?? "")
-                        .font(.subheadline.weight(.semibold))
+                        // Footnote semibold — the same weight the corner
+                        // buttons and the session pill wear (build 169).
+                        .font(.footnote.weight(.semibold))
                         .lineLimit(1)
                         .truncationMode(.middle)
                         .matchedGeometryEffect(id: "conversation-title", in: namespace)
@@ -283,7 +285,8 @@ struct GroupChatTitlePill: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
-        .conduitGlassSurface(cornerRadius: 20, tint: .conduitAccent.opacity(0.06))
+        // Control glass, radius 18 — the corner buttons' recipe (169).
+        .conduitGlassControl(cornerRadius: 18)
         // Source of the bubble→card morph, same contract as the session
         // pill in MainView: this pill is not rendered while the panel is
         // open, so the card inflates FROM this capsule (id "bubble").

@@ -387,20 +387,28 @@ struct MainView: View {
             Haptics.selection()
             openSessionsPanel()
         } label: {
-            // displayedChatTitle (upstream #99): shows the saved
-            // conversation's name while the offline copy is on screen.
-            // The match sits on the TEXT (before the padding) so the panel
-            // header receives the exact glyph frame, padding included.
-            Text(appState.displayedChatTitle)
-                .font(.subheadline.weight(.semibold))
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .matchedGeometryEffect(id: "conversation-title", in: sessionsMorph)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
-        }
-        .buttonStyle(.plain)
-        .conduitGlassSurface(cornerRadius: 20, tint: .conduitAccent.opacity(0.06))
+     // displayedChatTitle (upstream #99): shows the saved
+     // conversation's name while the offline copy is on screen.
+     // The match sits on the TEXT (before the padding) so the panel
+     // header receives the exact glyph frame, padding included.
+     Text(appState.displayedChatTitle)
+         // SAME recipe as the corner buttons (Gerardo, build 169:
+         // «que sea del mismo estilo que los botones de la esquina,
+         // ya que se ven de diferentes tamaños»): footnote semibold,
+         // one line, dynamic width sized by the name, 40-pt tall.
+         // The 12-pt horizontal pad keeps the text at x = 24, where
+         // the panel's header lands.
+         .font(.footnote.weight(.semibold))
+         .lineLimit(1)
+         .truncationMode(.middle)
+         .matchedGeometryEffect(id: "conversation-title", in: sessionsMorph)
+         .padding(.horizontal, 12)
+         .frame(minHeight: 40)
+ }
+ .buttonStyle(.plain)
+ // Control glass, not surface: the same interactive capsule the
+ // model pill and the context ring wear (radius 18).
+ .conduitGlassControl(cornerRadius: 18)
         // Source of the bubble→card morph: while the panel is open this
         // pill is NOT rendered (topBarLeading), so the panel's card takes
         // its capsule frame as the geometry to inflate from (id "bubble").
