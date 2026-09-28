@@ -54,46 +54,29 @@ struct ModelPickerView: View {
     @State private var visibility = ModelVisibility()
 
     var body: some View {
-        NavigationStack {
-            ZStack {
-                ConduitBackdrop()
-
-                ScrollView {
-                    VStack(spacing: 14) {
-                        if editingVisibility {
-                            visibilityEditor
-                        } else {
-                            modelSection
-                            reasoningSection
-                            runSettingsSection
-                            applyButton
-                        }
-                    }
-                    .padding(16)
-                    .padding(.bottom, 8)
-                }
-                .scrollIndicators(.hidden)
-            }
-            .navigationTitle("Model")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(.hidden, for: .navigationBar)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(editingVisibility ? AppLocalization.string("Done") : AppLocalization.string("Edit")) {
-                        if editingVisibility {
-                            appState.saveModelVisibility(visibility)
-                            editingVisibility = false
-                        } else {
-                            visibilityQuery = ""
-                            expandedVisibilityProvider = selectedProvider
-                            editingVisibility = true
-                        }
-                    }
-                    .font(.subheadline.weight(.semibold))
-                    .tint(.conduitAccent)
+        // Panel content since build 166 — this used to be a medium/large
+        // SHEET; it now lives inside CornerDropdownPanel, which supplies
+        // the glass, the title and the close. No NavigationStack: the
+        // visibility Edit/Done control moves out of the nav bar into the
+        // content as its own trailing row. Its ScrollView is the greedy
+        // half of the dropdown design — the panel grows to the screen's
+        // bottom margin and scrolls there.
+        ScrollView {
+            VStack(spacing: 14) {
+                visibilityRow
+                if editingVisibility {
+                    visibilityEditor
+                } else {
+                    modelSection
+                    reasoningSection
+                    runSettingsSection
+                    applyButton
                 }
             }
+            .padding(16)
+            .padding(.bottom, 8)
         }
+        .scrollIndicators(.hidden)
         .preferredColorScheme(appState.themePreference.colorScheme)
         .onAppear { refreshYoloToggle(force: false) }
         .onChange(of: appState.runtime.approvalsMode) { oldMode, newMode in
@@ -104,6 +87,26 @@ struct ModelPickerView: View {
             refreshYoloToggle(force: true)
         }
         .task { await loadModels() }
+    }
+
+    /// The visibility Edit/Done control — it lived in the navigation
+    /// toolbar while this was a sheet; build 166 removed the sheet.
+    private var visibilityRow: some View {
+        HStack {
+            Spacer()
+            Button(editingVisibility ? AppLocalization.string("Done") : AppLocalization.string("Edit")) {
+                if editingVisibility {
+                    appState.saveModelVisibility(visibility)
+                    editingVisibility = false
+                } else {
+                    visibilityQuery = ""
+                    expandedVisibilityProvider = selectedProvider
+                    editingVisibility = true
+                }
+            }
+            .font(.subheadline.weight(.semibold))
+            .tint(.conduitAccent)
+        }
     }
 
     private var modelSection: some View {
@@ -498,7 +501,11 @@ struct ModelPickerView: View {
             appState.runtime.reasoningEffort = reasoningEnabled ? reasoningEffort : ""
             try await client.setFast(sessionId, enabled: fastEnabled)
             appState.runtime.fast = fastEnabled
-            appState.showModelPicker = false
+            // Animated (build 166): the panel collapses back into the
+            // bar's pill instead of popping away.
+            withAnimation(ConduitMotion.transition) {
+                appState.showModelPicker = false
+            }
         } catch {
             appState.errorMessage = error.localizedDescription
         }

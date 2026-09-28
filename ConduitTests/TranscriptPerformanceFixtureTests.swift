@@ -440,6 +440,17 @@ final class TranscriptPerformanceFixtureTests: XCTestCase {
         host.rootView = PinnedChatRoot(appState: appState, generation: host.rootView.generation + 1)
         host.view.setNeedsLayout()
         host.view.layoutIfNeeded()
+        // Deterministic reachability (build 166): the re-creation commit
+        // alone does NOT reliably reach ChatView's body — measured while
+        // trimming the composer's control row, the original subtree landed
+        // the body run in-window on every run while the trimmed one missed
+        // the 30s pump 3/3, so this vacuity gate was sampling the
+        // scheduler, not the fixture. Publishing the environment object the
+        // view already observes is the production shape (re-creation
+        // accompanies appState churn): it re-runs ChatView's body without
+        // crossing any `.equatable()` row gate, so the settled-row
+        // assertions below still measure exactly what they claim to.
+        appState.objectWillChange.send()
         // Vacuity gate 1: the re-creation must have re-run ChatView's body.
         // Pump layout every turn, not just the run loop: under lane load
         // the hosting update can sit behind a deferred commit that a bare

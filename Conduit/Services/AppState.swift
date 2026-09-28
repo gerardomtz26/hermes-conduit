@@ -13362,7 +13362,15 @@ final class AppState: ObservableObject {
         case "model":
             if command.argument.isEmpty {
                 cancelChatResumeRestoration()
-                showModelPicker = true
+                // Opens the corner dropdown (build 166) with the same
+                // animated flip as tapping the bar's pill — the panel
+                // grows out of its button either way, one panel at a
+                // time.
+                withAnimation(ConduitMotion.transition) {
+                    dismissSidebarDrawer()
+                    showContextSheet = false
+                    showModelPicker = true
+                }
                 return
             }
         case "yolo":

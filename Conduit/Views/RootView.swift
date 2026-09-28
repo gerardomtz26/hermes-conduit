@@ -75,20 +75,17 @@ struct MainView: View {
     /// Shared by the conversation-name pill and the sessions panel's
     /// header: the panel grows out of the name through this match.
     @Namespace private var sessionsMorph
+    /// Shared by the corner buttons (model pill, context ring) and their
+    /// dropdown panels: each panel inflates from its own button — the
+    /// exact pair contract of the sessions morph, corner edition.
+    @Namespace private var cornerMorph
 
     var body: some View {
         chatNavigationContent
-        .sheet(isPresented: $appState.showModelPicker) {
-            ModelPickerView()
-                .presentationDetents([.medium, .large])
-                .presentationBackground(.clear)
-                .presentationDragIndicator(.visible)
-        }
-        .sheet(isPresented: $appState.showContextSheet) {
-            ContextSheet()
-                .presentationDetents([.medium])
-                .presentationDragIndicator(.visible)
-        }
+        // showModelPicker / showContextSheet no longer present sheets:
+        // since build 166 both open as CORNER DROPDOWNS that morph out of
+        // the bar's trailing buttons (CornerDropdownPanel, in the overlay
+        // of MainView's body).
         .sheet(isPresented: $appState.showWorkspaceSheet) {
             WorkspaceBrowserSheet()
                 .presentationDetents([.medium, .large])
@@ -197,17 +194,24 @@ struct MainView: View {
         // conversation's name (matched geometry between the title pill and
         // the panel header), leaving the conversation visible to its right.
         .overlay {
-            if appState.showSidebar {
-                ZStack(alignment: .topLeading) {
+            // One scrim for every panel: the sessions side bar and the
+            // two corner dropdowns are mutually exclusive — each open
+            // function closes the others inside the same flip, so at most
+            // one morph runs at a time.
+            let anyPanelOpen = appState.showSidebar || appState.showModelPicker || appState.showContextSheet
+            ZStack(alignment: .topLeading) {
+                if anyPanelOpen {
                     // The conversation stays visible beside the card, but
                     // dim enough that its white text stops fighting the
                     // panel's list (0.12 was measured too weak for
                     // legibility, build 162). Tap outside closes.
                     Color.black.opacity(0.30)
                         .ignoresSafeArea()
-                        .onTapGesture { closeSessionsPanel() }
+                        .onTapGesture { closeActivePanel() }
                         .transition(.opacity)
+                }
 
+                if appState.showSidebar {
                     SessionsPanel(
                         namespace: sessionsMorph,
                         title: panelTitle,
@@ -230,8 +234,51 @@ struct MainView: View {
                     // name's capsule — the bubble IS the first frame.
                     .frame(maxWidth: SessionsPanel.panelWidth + 24, alignment: .leading)
                 }
-                .zIndex(2)
+
+                if appState.showModelPicker {
+                    CornerDropdownPanel(
+                        namespace: cornerMorph,
+                        bubbleID: "model-bubble",
+                        panelID: "model.panel",
+                        title: AppLocalization.string("Model"),
+                        onClose: closeModelPanel
+                    ) {
+                        ModelPickerView()
+                    }
+                    .padding(.trailing, 12)
+                    .padding(.bottom, 16)
+                    // Corner placement (build 166): cap the block (356 +
+                    // the 12-pt trailing margin) and THEN stretch to full
+                    // width with the block pinned trailing — a maxWidth
+                    // cap alone would park it at the ZStack's leading
+                    // edge, not the corner. Height is left to the
+                    // content: ModelPickerView's ScrollView is greedy and
+                    // fills to the bottom margin (the dropdown Gerardo
+                    // picked — grows to the screen bottom and scrolls).
+                    .frame(maxWidth: SessionsPanel.panelWidth + 12, alignment: .trailing)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                }
+
+                if appState.showContextSheet {
+                    CornerDropdownPanel(
+                        namespace: cornerMorph,
+                        bubbleID: "context-bubble",
+                        panelID: "context.panel",
+                        title: AppLocalization.string("Context"),
+                        onClose: closeContextPanel
+                    ) {
+                        ContextSheet()
+                    }
+                    .padding(.trailing, 12)
+                    .padding(.bottom, 16)
+                    // Same corner frames; ContextSheet is a plain stack,
+                    // so this dropdown HUGS its content instead of
+                    // filling the screen.
+                    .frame(maxWidth: SessionsPanel.panelWidth + 12, alignment: .trailing)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+                }
             }
+            .zIndex(2)
         }
     }
 
@@ -270,6 +317,52 @@ struct MainView: View {
     private func closeSessionsPanel() {
         withAnimation(ConduitMotion.transition) {
             appState.dismissSidebarDrawer()
+        }
+    }
+
+    // MARK: - Corner dropdowns (model, context)
+
+    /// The model panel grows out of the bar's model pill — the same
+    /// contract as the sessions panel: one panel at a time (the others
+    /// close inside the same flip) and every change animated in the same
+    /// spring, so all morphs read as one system.
+    private func openModelPanel() {
+        Haptics.selection()
+        withAnimation(ConduitMotion.transition) {
+            appState.dismissSidebarDrawer()
+            appState.showContextSheet = false
+            appState.showModelPicker = true
+        }
+    }
+
+    private func openContextPanel() {
+        Haptics.selection()
+        withAnimation(ConduitMotion.transition) {
+            appState.dismissSidebarDrawer()
+            appState.showModelPicker = false
+            appState.showContextSheet = true
+        }
+    }
+
+    private func closeModelPanel() {
+        withAnimation(ConduitMotion.transition) {
+            appState.showModelPicker = false
+        }
+    }
+
+    private func closeContextPanel() {
+        withAnimation(ConduitMotion.transition) {
+            appState.showContextSheet = false
+        }
+    }
+
+    /// Scrim tap: close whichever panel is up. The three panels are
+    /// mutually exclusive by construction, but the scrim is shared.
+    private func closeActivePanel() {
+        withAnimation(ConduitMotion.transition) {
+            appState.dismissSidebarDrawer()
+            appState.showModelPicker = false
+            appState.showContextSheet = false
         }
     }
 
@@ -331,6 +424,30 @@ struct MainView: View {
     private var sessionActionsPill: some View {
         ConduitGlassGroup(spacing: 6) {
             HStack(spacing: 6) {
+                // Model selector + context ring: MOVED here from above
+                // the composer's text box (build 166). Each is the bubble
+                // its panel morphs from, so it is not rendered while its
+                // panel is open — exactly one of the pair, the same
+                // contract as the conversation pill.
+                if !appState.showModelPicker {
+                    ModelSelectorPill(namespace: cornerMorph, onOpen: openModelPanel)
+                }
+                if !appState.showContextSheet {
+                    Button {
+                        openContextPanel()
+                    } label: {
+                        ContextRingView(percent: appState.runtime.contextPercent)
+                            .frame(width: 32, height: 32)
+                            .frame(minWidth: 36, minHeight: 40)
+                    }
+                    .buttonStyle(.plain)
+                    .conduitGlassControl(cornerRadius: 18)
+                    .matchedGeometryEffect(id: "context-bubble", in: cornerMorph)
+                    .accessibilityLabel("Context usage, \(Int(appState.runtime.contextPercent.rounded())) percent")
+                    .accessibilityIdentifier("open.context")
+                    .accessibilityHint("Opens the context breakdown")
+                }
+
                 Button {
                     Task { await appState.refreshActiveSession() }
                 } label: {

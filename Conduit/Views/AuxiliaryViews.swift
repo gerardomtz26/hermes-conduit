@@ -24,54 +24,52 @@ struct ContextSheet: View {
     @State private var breakdown: ContextBreakdown?
 
     var body: some View {
-        NavigationStack {
-            ZStack {
-                ConduitBackdrop()
-                ScrollView {
-                    VStack(spacing: 14) {
-                        ConduitSettingsSection(title: AppLocalization.string("Context"), symbol: "circle.dotted.circle", tint: .conduitAura) {
-                            SettingsMetricRow(label: AppLocalization.string("Used"), value: AppLocalization.string("\(String(appState.runtime.contextUsed)) tokens"))
-                            SettingsMetricRow(label: AppLocalization.string("Capacity"), value: AppLocalization.string("\(String(appState.runtime.contextMax)) tokens"))
-                            VStack(alignment: .leading, spacing: 7) {
-                                HStack {
-                                    Text("Window usage")
-                                        .font(.caption.weight(.medium))
-                                        .foregroundStyle(.secondary)
-                                    Spacer()
-                                    Text("\(String(Int(appState.runtime.contextPercent.rounded())))%")
-                                        .font(.caption.monospacedDigit().weight(.semibold))
-                                }
-                                ProgressView(value: appState.runtime.contextPercent, total: 100)
-                                    .tint(.conduitAccent)
-                            }
-                            .padding(.top, 4)
-                        }
-
-                        if let breakdown {
-                            ConduitSettingsSection(title: AppLocalization.string("Breakdown"), symbol: "chart.pie", tint: .conduitAccent) {
-                                ForEach(breakdown.categories, id: \.id) { category in
-                                    HStack(spacing: 10) {
-                                        Circle()
-                                            .fill(colorFor(category.color))
-                                            .frame(width: 9, height: 9)
-                                        Text(category.label)
-                                        Spacer()
-                                        Text("\(category.tokens)")
-                                            .font(.caption.monospacedDigit())
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    .padding(.vertical, 3)
-                                }
-                            }
-                        }
+        // Panel content since build 166 — this used to be a medium
+        // SHEET; it now lives inside CornerDropdownPanel (the panel
+        // supplies the glass, the title and the close). A plain stack,
+        // NOT a ScrollView: its natural height is what makes the corner
+        // dropdown HUG its content — the model panel's ScrollView is the
+        // greedy half that fills to the screen bottom and scrolls. The
+        // breakdown was designed to fit a medium detent, so it fits
+        // below the bar; the card clips rather than overflows.
+        VStack(spacing: 14) {
+            ConduitSettingsSection(title: AppLocalization.string("Context"), symbol: "circle.dotted.circle", tint: .conduitAura) {
+                SettingsMetricRow(label: AppLocalization.string("Used"), value: AppLocalization.string("\(String(appState.runtime.contextUsed)) tokens"))
+                SettingsMetricRow(label: AppLocalization.string("Capacity"), value: AppLocalization.string("\(String(appState.runtime.contextMax)) tokens"))
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack {
+                        Text("Window usage")
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text("\(String(Int(appState.runtime.contextPercent.rounded())))%")
+                            .font(.caption.monospacedDigit().weight(.semibold))
                     }
-                    .padding(16)
+                    ProgressView(value: appState.runtime.contextPercent, total: 100)
+                        .tint(.conduitAccent)
+                }
+                .padding(.top, 4)
+            }
+
+            if let breakdown {
+                ConduitSettingsSection(title: AppLocalization.string("Breakdown"), symbol: "chart.pie", tint: .conduitAccent) {
+                    ForEach(breakdown.categories, id: \.id) { category in
+                        HStack(spacing: 10) {
+                            Circle()
+                                .fill(colorFor(category.color))
+                                .frame(width: 9, height: 9)
+                            Text(category.label)
+                            Spacer()
+                            Text("\(category.tokens)")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, 3)
+                    }
                 }
             }
-            .navigationTitle("Context")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarBackground(.hidden, for: .navigationBar)
         }
+        .padding(16)
         .task { await loadBreakdown() }
     }
 

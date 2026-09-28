@@ -84,6 +84,9 @@ struct SessionsPanel: View {
         .matchedGeometryEffect(id: "bubble", in: namespace)
         // Measured by SessionsPanelWidthUITests: the cap in MainView is
         // one line and it silently vanished once already (build 164).
+        // Explicit container so the identifier lands on ONE element the
+        // test can query (same realization issue as the corner panels).
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("sessions.panel")
     }
 

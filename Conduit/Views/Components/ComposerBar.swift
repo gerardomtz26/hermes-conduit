@@ -660,59 +660,15 @@ struct ComposerBar: View {
         .accessibilityLabel(accessibilityLabel)
     }
 
+    /// Only the delegate-agents shortcut lives in the composer since
+    /// build 166: the model selector and the context ring moved to the
+    /// bar's TRAILING CORNER (ModelSelectorPill + its context sibling),
+    /// where each is the bubble its panel morphs from. With no agents
+    /// running the whole row disappears — the composer gets cleaner.
+    @ViewBuilder
     private var sessionControls: some View {
-        HStack(spacing: 10) {
-            Button {
-                Haptics.selection()
-                appState.showModelPicker = true
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "cpu")
-                        .foregroundStyle(Color.conduitAccent)
-                        .symbolEffect(
-                            .variableColor.iterative,
-                            options: .repeating,
-                            isActive: appState.turnState == .running && !reduceMotion
-                        )
-                    Text(appState.runtime.model.isEmpty ? AppLocalization.string("Model") : appState.runtime.model)
-                        .lineLimit(1)
-                    if !appState.runtime.reasoningEffort.isEmpty {
-                        Text("/")
-                            .foregroundStyle(.secondary)
-                        Text(formatEffort(appState.runtime.reasoningEffort))
-                            .foregroundStyle(Color.conduitAccent)
-                            .lineLimit(1)
-                    }
-                    if appState.runtime.yolo {
-                        Image(systemName: "shield.slash.fill")
-                            .font(.caption2.weight(.bold))
-                            .foregroundStyle(Color.orange)
-                    }
-                    Image(systemName: "chevron.down")
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(.secondary)
-                }
-                .font(.footnote.weight(.semibold))
-                .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(modelAccessibilityLabel)
-
-            Button {
-                Haptics.selection()
-                appState.showContextSheet = true
-            } label: {
-                HStack(spacing: 5) {
-                    ContextRingView(percent: appState.runtime.contextPercent)
-                        .frame(width: 32, height: 32)
-                }
-                .frame(minWidth: 36, minHeight: 36)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Context usage, \(Int(appState.runtime.contextPercent.rounded())) percent")
-
-            if appState.activeAgents > 0 {
+        if appState.activeAgents > 0 {
+            HStack(spacing: 10) {
                 Button {
                     Haptics.selection()
                     appState.showAgentsSheet = true
@@ -725,10 +681,10 @@ struct ComposerBar: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(AppLocalization.string("Delegate agents, \(String(appState.activeAgents)) active"))
             }
+            .padding(.horizontal, 14)
+            .padding(.top, 7)
+            .padding(.bottom, 1)
         }
-        .padding(.horizontal, 14)
-        .padding(.top, 7)
-        .padding(.bottom, 1)
     }
 
     /// Return-shortcut entry point. Invokes the exact same submission path
@@ -1054,15 +1010,6 @@ struct ComposerBar: View {
         }
     }
 
-    private func formatEffort(_ value: String) -> String {
-        let lower = value.lowercased()
-        if lower == "none" || lower == "off" { return AppLocalization.string("Off") }
-        if lower == "xhigh" { return AppLocalization.string("Extra High") }
-        return lower.capitalized
-            .replacingOccurrences(of: "-", with: " ")
-            .replacingOccurrences(of: "_", with: " ")
-    }
-
     private var accessibilityLabel: String {
         switch action {
         case .stop: return AppLocalization.string("Stop response")
@@ -1073,15 +1020,6 @@ struct ComposerBar: View {
         }
     }
 
-    private var modelAccessibilityLabel: String {
-        let model = appState.runtime.model.isEmpty ? AppLocalization.string("Model") : appState.runtime.model
-        let reasoning = appState.runtime.reasoningEffort.isEmpty
-            ? AppLocalization.string("reasoning not set")
-            : AppLocalization.string("reasoning \(formatEffort(appState.runtime.reasoningEffort))")
-        let approvals = appState.runtime.yolo ? AppLocalization.string(", auto-approve enabled") : ""
-        let activity = appState.turnState == .running ? AppLocalization.string(", agent working") : ""
-        return "\(model), \(reasoning)\(approvals)\(activity)"
-    }
 }
 
 // MARK: - Context Ring
