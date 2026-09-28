@@ -56,13 +56,12 @@ struct ModelSelectorPill: View {
                     .foregroundStyle(.secondary)
             }
             .font(.footnote.weight(.semibold))
-            // 320, not 200 (measured on Gerardo's iPad, build 166): the
-            // pill sat next to free bar space while "mimo-v2.6-flash /
-            // High" ellipsized at 200 — realistic names with effort and
-            // the yolo shield need ~230, and 320 admits them whole while
-            // still bounding a pathological model id (beyond it the name
-            // truncates in the middle; the title pill absorbs the rest).
-            .frame(maxWidth: 320, alignment: .leading)
+            // DYNAMIC width (Gerardo, build 168): no cap — the pill is
+            // exactly as wide as the model name, so it grows and shrinks
+            // with it. Under a pathological id the bar itself bounds the
+            // name: the texts keep lineLimit(1) and the middle-truncation
+            // kicks in only when the center scroll zone and then the title
+            // pill have already given their space.
             .frame(minHeight: 40)
             .contentShape(Rectangle())
         }

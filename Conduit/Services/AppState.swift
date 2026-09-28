@@ -1484,6 +1484,17 @@ final class AppState: ObservableObject {
     /// that its requested session no longer exists. Callers use this to
     /// retire a saved automatic-return target instead of retrying it forever.
     private var reconciliationSessionWasNotFound = false
+    /// Set by `reconcile`'s failure fence when the resume RPC failed with
+    /// the gateway's stale-runtime answer — `4001 "session not found"` or
+    /// the same message under any code (`HermesClient
+    /// .isSessionNotFoundError`): the RUNTIME behind the requested id has
+    /// been reaped/detached while the conversation still exists under its
+    /// durable stored id. Distinct from `reconciliationSessionWasNotFound`
+    /// (4007 = the saved conversation was deleted, unrecoverable); THIS one
+    /// is recoverable by resuming the stored id, which
+    /// `refreshActiveSession` does — the same contract
+    /// `compressSessionWithRecovery` already honors.
+    private var reconciliationResumeWasStaleRuntime = false
     private var reconciliation: Reconciliation?
     private var activeClientEpoch = UUID()
     private var activeAssistantMessageId: String?
@@ -6302,6 +6313,7 @@ final class AppState: ObservableObject {
         durablePersistedRowIDs = []
         reconciliationWasIdentityRejected = false
         reconciliationSessionWasNotFound = false
+        reconciliationResumeWasStaleRuntime = false
         refreshActiveChatScrollSessionIdentity(isReconciling: true)
         turnState = .synchronizing
         // The resume RPC can overlap a user-initiated config.set. Capture the
@@ -6844,6 +6856,13 @@ final class AppState: ObservableObject {
             }
             turnState = .reconnecting
             reconciliationSessionWasNotFound = resumeRPCFailedSessionNotFound
+            // Stale runtime, session alive: the documented recovery is to
+            // resume the STORED id (HermesClient.isSessionNotFoundError's
+            // contract). refreshActiveSession reads this to retry once with
+            // the durable id instead of surfacing "Failed to restore this
+            // conversation: session not found" on every press (Gerardo,
+            // build 168).
+            reconciliationResumeWasStaleRuntime = HermesClient.isSessionNotFoundError(error)
             switch error {
             case is LegacyTranscriptOversizedError, DashboardTicketBridgeError.oversizedResponse:
                 // Oversized history responses carry their own user-facing
@@ -11421,15 +11440,56 @@ final class AppState: ObservableObject {
         defer { isChatRefreshing = false }
         let previousMessages = messages
 
+        // Captured BEFORE the first attempt: the stale-runtime recovery
+        // below needs the durable stored id even after the first reconcile
+        // has settled and cleared its own state.
+        let identity = captureConversationIdentity(for: sessionId)
         let token = beginReconciliation()
-        let succeeded = await reconcile(
+        var succeeded = await reconcile(
             sessionId: sessionId,
             using: client,
             token: token,
             acceptedSessionIDs: knownSessionIDs(for: sessionId),
-            conversationIdentity: captureConversationIdentity(for: sessionId),
+            conversationIdentity: identity,
             requiredViewportTransitionGeneration: transitionGeneration
         )
+        // Stale-runtime recovery — the refresh twin of
+        // `compressSessionWithRecovery` (upstream Desktop's
+        // `withSessionNotFoundResume`): when `session.resume` answers
+        // `4001 "session not found"` the RUNTIME behind `activeSessionId`
+        // was reaped/detached while the conversation still exists under
+        // its durable stored id — the gateway's documented contract is
+        // that the client recovers by resuming the STORED id
+        // (`HermesClient.isSessionNotFoundError`). Without this retry the
+        // refresh surfaced "Failed to restore this conversation: session
+        // not found" on EVERY press (Gerardo, build 168). A deleted
+        // conversation (4007) also lands here, wastes exactly one resume,
+        // and still reports the original failure.
+        if !succeeded,
+           reconciliationResumeWasStaleRuntime,
+           let identity,
+           let durable = identity.durableSessionID,
+           durable != sessionId {
+            let staleRuntimeError = errorMessage
+            let retryToken = beginReconciliation()
+            succeeded = await reconcile(
+                sessionId: durable,
+                using: client,
+                token: retryToken,
+                // Everything the identity positively anchors, plus the ids
+                // the scroll already admitted — the recovered runtime is
+                // born from the durable id and must pass the same
+                // admission breadth the first attempt offered.
+                acceptedSessionIDs: identity.acceptedSessionIDs
+                    .union(knownSessionIDs(for: sessionId))
+                    .union([durable]),
+                conversationIdentity: identity,
+                requiredViewportTransitionGeneration: transitionGeneration
+            )
+            if succeeded, errorMessage == staleRuntimeError {
+                errorMessage = nil
+            }
+        }
         if !succeeded || messages == previousMessages {
             finishChatViewportTransition(generation: transitionGeneration)
         }
