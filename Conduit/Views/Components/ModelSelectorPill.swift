@@ -56,10 +56,13 @@ struct ModelSelectorPill: View {
                     .foregroundStyle(.secondary)
             }
             .font(.footnote.weight(.semibold))
-            // Capped so a long model name cannot balloon the corner
-            // group: "mimo-v2.6-flash / medium" fits whole, anything
-            // longer truncates in the middle.
-            .frame(maxWidth: 200, alignment: .leading)
+            // 320, not 200 (measured on Gerardo's iPad, build 166): the
+            // pill sat next to free bar space while "mimo-v2.6-flash /
+            // High" ellipsized at 200 — realistic names with effort and
+            // the yolo shield need ~230, and 320 admits them whole while
+            // still bounding a pathological model id (beyond it the name
+            // truncates in the middle; the title pill absorbs the rest).
+            .frame(maxWidth: 320, alignment: .leading)
             .frame(minHeight: 40)
             .contentShape(Rectangle())
         }

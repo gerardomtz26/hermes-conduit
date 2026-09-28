@@ -224,18 +224,54 @@ struct ModelPickerView: View {
             Toggle("Enabled", isOn: $reasoningEnabled)
 
             if reasoningEnabled {
-                Picker("Effort", selection: $reasoningEffort) {
-                    Text("Minimal").tag("minimal")
-                    Text("Low").tag("low")
-                    Text("Medium").tag("medium")
-                    Text("High").tag("high")
-                    Text("Extra High").tag("xhigh")
-                    Text("Max").tag("max")
-                    Text("Ultra").tag("ultra")
+                // NOT a 7-way segmented Picker: inside the 356-pt corner
+                // panel its 324 content width leaves "Minimal", "Medium"
+                // and "Extra High" ellipsized and crowded (measured on
+                // Gerardo's iPad, build 166 — the segmented track divides
+                // whatever width it is given and then elides). Two rows of
+                // full-label chips (4 + 3) fit every effort readable.
+                VStack(spacing: 8) {
+                    HStack(spacing: 8) {
+                        effortChip("Minimal", value: "minimal")
+                        effortChip("Low", value: "low")
+                        effortChip("Medium", value: "medium")
+                        effortChip("High", value: "high")
+                    }
+                    HStack(spacing: 8) {
+                        effortChip("Extra High", value: "xhigh")
+                        effortChip("Max", value: "max")
+                        effortChip("Ultra", value: "ultra")
+                    }
                 }
-                .pickerStyle(.segmented)
             }
         }
+    }
+
+    /// One effort chip: equal-width capsule, selected state tinted like
+    /// the drawer's tabs so both pickers read as one system.
+    private func effortChip(_ label: String, value: String) -> some View {
+        let selected = reasoningEffort == value
+        return Button {
+            Haptics.selection()
+            withAnimation(ConduitMotion.response) {
+                reasoningEffort = value
+            }
+        } label: {
+            Text(label)
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+                .frame(maxWidth: .infinity)
+                .frame(height: 34)
+                .foregroundStyle(selected ? Color.primary : Color.primary.opacity(0.65))
+                .background(
+                    selected ? Color.conduitAccent.opacity(0.16) : Color.primary.opacity(0.04),
+                    in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(label)
+        .accessibilityAddTraits(selected ? [.isSelected] : [])
     }
 
     private var runSettingsSection: some View {
